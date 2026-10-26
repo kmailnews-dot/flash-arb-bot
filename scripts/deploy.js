@@ -1,16 +1,69 @@
-const { ethers } = require("hardhat");
+const { ethers, network } = require("hardhat");
+
+const RPC_ENV_BY_NETWORK = {
+  arbitrum: "ARBITRUM_RPC_URL",
+  arbitrumSepolia: "ARBITRUM_SEPOLIA_RPC_URL",
+};
+
+function readRequiredEnv(name, help) {
+  const value = process.env[name];
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(
+      `Missing required environment variable ${name} for network "${network.name}".\n` +
+        `${help}\n` +
+        "In GitHub Actions, add it under Settings > Secrets and variables > Actions > " +
+        "Secrets (repository secrets). Values stored in the Variables tab or in an " +
+        "environment are not exposed as secrets unless the job declares that environment."
+    );
+  }
+  return value.trim();
+}
+
+function readRpcUrl(name) {
+  const value = readRequiredEnv(name, "Set it to an Arbitrum RPC endpoint from Alchemy, Infura, or the public RPC.");
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${name} is not a valid URL.`);
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error(`${name} must be an http(s) URL.`);
+  }
+  return url;
+}
 
 async function main() {
-  const addressesProvider = process.env.AAVE_POOL_ADDRESSES_PROVIDER;
-  if (!addressesProvider) {
+  const rpcEnvName = RPC_ENV_BY_NETWORK[network.name];
+  if (rpcEnvName) {
+    const rpcUrl = readRpcUrl(rpcEnvName);
+    console.log(`Network: ${network.name} (chainId ${network.config.chainId})`);
+    console.log(`RPC endpoint host: ${rpcUrl.host}`);
+
+    const privateKey = readRequiredEnv(
+      "PRIVATE_KEY",
+      "Set it to the private key of a burner wallet funded with a small amount of ETH for gas."
+    );
+    if (!/^(0x)?[0-9a-fA-F]{64}$/.test(privateKey)) {
+      throw new Error(
+        "PRIVATE_KEY is not a valid 32-byte hex private key (64 hex characters, optionally prefixed with 0x)."
+      );
+    }
+  }
+
+  const addressesProvider = readRequiredEnv(
+    "AAVE_POOL_ADDRESSES_PROVIDER",
+    "Look up the current Aave V3 PoolAddressesProvider for Arbitrum at " +
+      "https://docs.aave.com/developers/deployed-contracts/v3-mainnet/arbitrum before deploying."
+  );
+
+  const [deployer] = await ethers.getSigners();
+  if (!deployer) {
     throw new Error(
-      "Set AAVE_POOL_ADDRESSES_PROVIDER in your .env - look up the current Arbitrum address at " +
-        "https://docs.aave.com/developers/deployed-contracts/v3-mainnet/arbitrum before deploying, " +
-        "since deployed addresses can change and a wrong one will make the contract unusable."
+      `No deployer account is configured for network "${network.name}". Set PRIVATE_KEY to the burner wallet key.`
     );
   }
 
-  const [deployer] = await ethers.getSigners();
   console.log("Deploying FlashArbExecutor with account:", deployer.address);
 
   const FlashArbExecutor = await ethers.getContractFactory("FlashArbExecutor");

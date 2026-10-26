@@ -29,6 +29,30 @@ jobs:
 
       - run: npm ci
 
+      - name: Validate deployment secrets
+        env:
+          ARBITRUM_RPC_URL: ${{ secrets.ARBITRUM_RPC_URL }}
+          ARBITRUM_SEPOLIA_RPC_URL: ${{ secrets.ARBITRUM_SEPOLIA_RPC_URL }}
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          AAVE_POOL_ADDRESSES_PROVIDER: ${{ secrets.AAVE_POOL_ADDRESSES_PROVIDER }}
+        run: |
+          case "${{ inputs.network }}" in
+            arbitrum) rpc_var="ARBITRUM_RPC_URL" ;;
+            arbitrumSepolia) rpc_var="ARBITRUM_SEPOLIA_RPC_URL" ;;
+            *)
+              echo "::error::Unknown network '${{ inputs.network }}'."
+              exit 1
+              ;;
+          esac
+          missing=0
+          for name in "$rpc_var" PRIVATE_KEY AAVE_POOL_ADDRESSES_PROVIDER; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is empty. Add it in Settings > Secrets and variables > Actions > Secrets (repository secrets), then re-run. Secrets stored in an environment require the job to declare that environment."
+              missing=1
+            fi
+          done
+          exit "$missing"
+
       - name: Deploy
         env:
           ARBITRUM_RPC_URL: ${{ secrets.ARBITRUM_RPC_URL }}
