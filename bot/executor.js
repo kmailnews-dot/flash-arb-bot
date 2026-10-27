@@ -15,6 +15,7 @@ const {
 const BPS_DENOMINATOR = 10000n;
 const WEI_PER_ETHER = 10n ** 18n;
 const GAS_COST_MARGIN_BPS = 11000n;
+const GAS_LIMIT_MARGIN_BPS = 11500n;
 const DEX_KIND = { V2: 0, V3: 1 };
 
 function withSlippage(amount, slippageBps) {
@@ -229,6 +230,15 @@ async function maybeExecute({ opportunity, provider, config, contract: injectedC
     return { submitted: false, simulated: true, estimatedGas, error: message };
   }
 
+  const gasLimitWithMargin = (estimatedGas * GAS_LIMIT_MARGIN_BPS) / BPS_DENOMINATOR;
+  if (gasLimitWithMargin > config.maxGasLimit) {
+    const message =
+      `Estimated gas ${estimatedGas} with margin (${gasLimitWithMargin}) exceeds ` +
+      `MAX_GAS_LIMIT ${config.maxGasLimit}`;
+    console.log(`  [SKIPPED] ${message} - transaction not sent.`);
+    return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
+  }
+
   const feeData = await provider.getFeeData();
   const gasPriceWei = feeData.gasPrice ?? feeData.maxFeePerGas;
   if (!gasPriceWei || gasPriceWei === 0n) {
@@ -236,20 +246,36 @@ async function maybeExecute({ opportunity, provider, config, contract: injectedC
     return { submitted: false, error: "gasPrice is 0" };
   }
 
-  const gasCostWei = estimatedGas * gasPriceWei;
+  const gasCostWei = gasLimitWithMargin * gasPriceWei;
   const gasCostInToken = gasCostInBorrowedToken({ gasCostWei, pair, config });
   if (gasCostInToken === null) {
     const token = pair.borrowedToken?.symbol ?? pair.borrowedToken?.address ?? "unknown";
     const message = `[SKIPPED] cannot price gas for token ${token} — enable ETH_USD_ROUTE_JSON`;
     console.log(`  ${message} - transaction not sent.`);
-    return { submitted: false, simulated: true, estimatedGas, error: message };
+    return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
   }
 
   const gasFloor = (gasCostInToken * GAS_COST_MARGIN_BPS) / BPS_DENOMINATOR;
   if (effectiveGrossProfit < gasFloor) {
     const message = `[SKIPPED] gas cost exceeds profit (gross=${effectiveGrossProfit}, gas=${gasCostInToken})`;
     console.log(`  ${message} - transaction not sent.`);
-    return { submitted: false, simulated: true, estimatedGas, error: message };
+    return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
+  }
+
+  const maxFeePerGas = feeData.maxFeePerGas;
+  if (maxFeePerGas && maxFeePerGas > 0n) {
+    const maxFeeCostInToken = gasCostInBorrowedToken({
+      gasCostWei: maxFeePerGas * gasLimitWithMargin,
+      pair,
+      config,
+    });
+    if (maxFeeCostInToken !== null && maxFeeCostInToken > effectiveGrossProfit) {
+      const message =
+        `[SKIPPED] maxFeePerGas exceeds profit cap ` +
+        `(maxFeePerGas=${maxFeePerGas}, profit=${effectiveGrossProfit}, gasLimit=${gasLimitWithMargin})`;
+      console.log(`  ${message} - transaction not sent.`);
+      return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
+    }
   }
 
   const bufferedMinProfit = (effectiveGrossProfit * config.minProfitBufferBps) / BPS_DENOMINATOR;
@@ -292,7 +318,9 @@ async function maybeExecute({ opportunity, provider, config, contract: injectedC
 
   let tx;
   try {
-    tx = await contract.startArbitrage(pair.borrowedToken.address, amountIn, finalParams, { gasLimit: estimatedGas });
+    tx = await contract.startArbitrage(pair.borrowedToken.address, amountIn, finalParams, {
+      gasLimit: gasLimitWithMargin,
+    });
   } catch (err) {
     const message = errorMessage(err);
     await addGasSpentSafely(settings, -gasCostWei);
@@ -301,7 +329,7 @@ async function maybeExecute({ opportunity, provider, config, contract: injectedC
     return { submitted: false, error: message, estimatedGas };
   }
 
-  console.log(`  [SUBMITTED] tx ${tx.hash} (gas limit ${estimatedGas})`);
+  console.log(`  [SUBMITTED] tx ${tx.hash} (gas limit ${gasLimitWithMargin}, estimated ${estimatedGas})`);
   try {
     const receipt = await tx.wait();
     const actualGasCostWei = receipt.gasUsed * (receipt.gasPrice ?? gasPriceWei);

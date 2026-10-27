@@ -103,13 +103,22 @@ describe("bot/executor maybeExecute", function () {
   async function opportunityAboveGasFloor({ opportunity, config, estimatedGas = 300000n }) {
     const feeData = await ethers.provider.getFeeData();
     const gasPriceWei = feeData.gasPrice ?? feeData.maxFeePerGas;
+    const gasLimitWithMargin = (estimatedGas * 11500n) / 10000n;
     const gasCost = gasCostInBorrowedToken({
-      gasCostWei: estimatedGas * gasPriceWei,
+      gasCostWei: gasLimitWithMargin * gasPriceWei,
       pair: opportunity.pair,
       config,
     });
     const gasFloor = (gasCost * 11000n) / 10000n;
-    return { gasFloor, opportunity: { ...opportunity, grossProfit: gasFloor + 1n } };
+    const maxFeeCost = feeData.maxFeePerGas
+      ? gasCostInBorrowedToken({
+          gasCostWei: feeData.maxFeePerGas * gasLimitWithMargin,
+          pair: opportunity.pair,
+          config,
+        })
+      : null;
+    const profitFloor = maxFeeCost !== null && maxFeeCost > gasFloor ? maxFeeCost : gasFloor;
+    return { gasFloor, opportunity: { ...opportunity, grossProfit: profitFloor + 1n } };
   }
 
   it("simulates, estimates gas and submits within the configured cap", async function () {
@@ -124,7 +133,7 @@ describe("bot/executor maybeExecute", function () {
     expect(result.estimatedGas).to.be.lessThanOrEqual(1000000n);
 
     const tx = await ethers.provider.getTransaction(result.txHash);
-    expect(tx.gasLimit).to.equal(result.estimatedGas);
+    expect(tx.gasLimit).to.equal((result.estimatedGas * 11500n) / 10000n);
     expect(await borrowToken.balanceOf(botWallet.address)).to.equal(opportunity.grossProfit);
   });
 
@@ -193,12 +202,22 @@ describe("bot/executor maybeExecute", function () {
 
     const feeData = await ethers.provider.getFeeData();
     const gasPriceWei = feeData.gasPrice ?? feeData.maxFeePerGas;
+    const gasLimitWithMargin = (probe.estimatedGas * 11500n) / 10000n;
     const gasCostInToken = gasCostInBorrowedToken({
-      gasCostWei: probe.estimatedGas * gasPriceWei,
+      gasCostWei: gasLimitWithMargin * gasPriceWei,
       pair: opportunity.pair,
       config,
     });
     const gasFloor = (gasCostInToken * 11000n) / 10000n;
+    const maxFeeCostInToken = feeData.maxFeePerGas
+      ? gasCostInBorrowedToken({
+          gasCostWei: feeData.maxFeePerGas * gasLimitWithMargin,
+          pair: opportunity.pair,
+          config,
+        })
+      : null;
+    const profitFloor =
+      maxFeeCostInToken !== null && maxFeeCostInToken > gasFloor ? maxFeeCostInToken : gasFloor;
     const margin = gasFloor / 100n + 1n;
     const nonceBefore = await ethers.provider.getTransactionCount(botWallet.address);
 
@@ -212,7 +231,7 @@ describe("bot/executor maybeExecute", function () {
     expect(await ethers.provider.getTransactionCount(botWallet.address)).to.equal(nonceBefore);
 
     const above = await maybeExecute({
-      opportunity: { ...opportunity, grossProfit: gasFloor + margin },
+      opportunity: { ...opportunity, grossProfit: profitFloor + margin },
       provider: ethers.provider,
       config,
     });
@@ -281,7 +300,7 @@ describe("bot/executor maybeExecute", function () {
     expect(staticCall.args[2].minProfit).to.equal(
       bufferedMinProfit > gasFloor ? bufferedMinProfit : gasFloor
     );
-    expect(send.args[3].gasLimit).to.equal(300000n);
+    expect(send.args[3].gasLimit).to.equal((300000n * 11500n) / 10000n);
   });
 
   it("calls estimateGas, then the final staticCall, then sends", async function () {
@@ -347,6 +366,43 @@ describe("bot/executor maybeExecute", function () {
     expect(result.estimatedGas).to.be.greaterThan(1n);
     expect(result.error).to.include("MAX_GAS_LIMIT");
     expect(await ethers.provider.getTransactionCount(botWallet.address)).to.equal(nonceBefore);
+  });
+
+  it("skips when the gas-limit margin pushes the estimate above MAX_GAS_LIMIT", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig({ maxGasLimit: 1000000n });
+    const { contract, calls } = makeSpyContract({ estimatedGas: 900000n });
+
+    const result = await maybeExecute({ opportunity, provider: ethers.provider, config, contract });
+
+    expect(result.submitted).to.equal(false);
+    expect(result.simulated).to.equal(true);
+    expect(result.estimatedGas).to.equal(900000n);
+    expect(result.error).to.include("MAX_GAS_LIMIT");
+    expect(calls.map((entry) => entry.method)).to.deep.equal(["estimateGas"]);
+  });
+
+  it("skips when maxFeePerGas exceeds the profit cap", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig({ ethUsdPrice: 1800 });
+    const { contract, calls } = makeSpyContract();
+    const provider = {
+      getFeeData: async () => ({ gasPrice: 1n, maxFeePerGas: ethers.parseUnits("100", "gwei") }),
+      getNetwork: () => ethers.provider.getNetwork(),
+      getBalance: (address) => ethers.provider.getBalance(address),
+    };
+
+    const result = await maybeExecute({
+      opportunity: { ...opportunity, grossProfit: ethers.parseEther("1") },
+      provider,
+      config,
+      contract,
+    });
+
+    expect(result.submitted).to.equal(false);
+    expect(result.simulated).to.equal(true);
+    expect(result.error).to.include("[SKIPPED] maxFeePerGas exceeds profit cap");
+    expect(calls.map((entry) => entry.method)).to.deep.equal(["estimateGas"]);
   });
 
   it("does not send a transaction when the RPC chainId does not match EXPECTED_CHAIN_ID", async function () {
