@@ -3,13 +3,13 @@ const { ethers } = require("hardhat");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { maybeExecute } = require("../bot/executor");
+const { maybeExecute, gasCostInBorrowedToken } = require("../bot/executor");
 
 const RATE_1_TO_1 = ethers.parseEther("1");
 const FLASH_LOAN_PREMIUM_BPS = 5n;
 
 describe("bot/executor maybeExecute", function () {
-  async function deployFixture({ legBackRate = ethers.parseEther("1.02") } = {}) {
+  async function deployFixture({ legBackRate = ethers.parseEther("1.02"), borrowedDecimals = 18 } = {}) {
     const [deployer] = await ethers.getSigners();
     const botWallet = ethers.Wallet.createRandom();
     await deployer.sendTransaction({ to: botWallet.address, value: ethers.parseEther("10") });
@@ -41,13 +41,13 @@ describe("bot/executor maybeExecute", function () {
 
     const pair = {
       label: "BOR/MID test pair",
-      borrowedToken: { address: borrowAddr, decimals: 18, symbol: "BOR", isStable: true },
+      borrowedToken: { address: borrowAddr, decimals: borrowedDecimals, symbol: "BOR", isStable: true },
       intermediateToken: { address: midAddr, decimals: 18, symbol: "MID" },
       legOut: { kind: "V2", router: await routerA.getAddress(), tokenOut: midAddr },
       legBack: { kind: "V3", router: await routerB.getAddress(), tokenOut: borrowAddr, v3Fee: 3000 },
     };
 
-    const amountIn = ethers.parseEther("1000");
+    const amountIn = ethers.parseUnits("1000", borrowedDecimals);
     const intermediateOut = amountIn;
     const finalOut = (amountIn * ethers.parseEther("1.02")) / RATE_1_TO_1;
     const premium = (amountIn * FLASH_LOAN_PREMIUM_BPS) / 10000n;
@@ -67,6 +67,7 @@ describe("bot/executor maybeExecute", function () {
         expectedChainId: 31337,
         maxWalletBalanceEth: 100,
         maxDailyGasEth: 1,
+        ethUsdPrice: 1800,
         maxConsecutiveFailures: 5,
         circuitBreakerCooldownMinutes: 60,
         gasSpentPath: path.join(guardDir, "gas_spent.json"),
@@ -128,6 +129,56 @@ describe("bot/executor maybeExecute", function () {
     expect(result.estimatedGas).to.be.greaterThan(0n);
     expect(result.error).to.include("[SKIPPED] gas cost exceeds profit");
     expect(await ethers.provider.getTransactionCount(botWallet.address)).to.equal(nonceBefore);
+  });
+
+  it("prices 6-decimal stablecoin gas with ETH/USD and enforces the 10% margin", async function () {
+    const { botWallet, opportunity, makeConfig } = await deployFixture({ borrowedDecimals: 6 });
+    const config = makeConfig({ ethUsdPrice: 1800 });
+
+    expect(
+      gasCostInBorrowedToken({
+        gasCostWei: ethers.parseEther("0.001"),
+        pair: { borrowedToken: { isStable: true, decimals: 6 } },
+        config,
+      })
+    ).to.equal(1_800_000n);
+
+    const probe = await maybeExecute({
+      opportunity: { ...opportunity, grossProfit: 1n },
+      provider: ethers.provider,
+      config,
+    });
+    expect(probe.submitted).to.equal(false);
+    expect(probe.error).to.include("gas cost exceeds profit");
+
+    const feeData = await ethers.provider.getFeeData();
+    const gasPriceWei = feeData.gasPrice ?? feeData.maxFeePerGas;
+    const gasCostInToken = gasCostInBorrowedToken({
+      gasCostWei: probe.estimatedGas * gasPriceWei,
+      pair: opportunity.pair,
+      config,
+    });
+    const gasFloor = (gasCostInToken * 11000n) / 10000n;
+    const margin = gasFloor / 100n + 1n;
+    const nonceBefore = await ethers.provider.getTransactionCount(botWallet.address);
+
+    const below = await maybeExecute({
+      opportunity: { ...opportunity, grossProfit: gasFloor - margin },
+      provider: ethers.provider,
+      config,
+    });
+    expect(below.submitted).to.equal(false);
+    expect(below.error).to.include("[SKIPPED] gas cost exceeds profit");
+    expect(await ethers.provider.getTransactionCount(botWallet.address)).to.equal(nonceBefore);
+
+    const above = await maybeExecute({
+      opportunity: { ...opportunity, grossProfit: gasFloor + margin },
+      provider: ethers.provider,
+      config,
+    });
+    expect(above.submitted).to.equal(true);
+    expect(above.receipt.status).to.equal(1);
+    expect(await ethers.provider.getTransactionCount(botWallet.address)).to.equal(nonceBefore + 1);
   });
 
   it("does not send a transaction when estimateGas exceeds MAX_GAS_LIMIT", async function () {

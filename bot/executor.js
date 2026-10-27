@@ -25,8 +25,15 @@ function gasCostInBorrowedToken({ gasCostWei, pair, config }) {
   const borrowedToken = pair.borrowedToken || {};
 
   if (borrowedToken.isStable === true) {
+    const ethUsdPrice = Number(config.ethUsdPrice);
+    if (!Number.isFinite(ethUsdPrice) || ethUsdPrice <= 0) return null;
     const scale = 10n ** BigInt(borrowedToken.decimals ?? 18);
-    return (gasCostWei * scale) / WEI_PER_ETHER;
+    const priceScale = 1_000_000n;
+    const price = BigInt(Math.round(ethUsdPrice * Number(priceScale)));
+    if (price <= 0n) return null;
+    const denominator = WEI_PER_ETHER * priceScale;
+    const numerator = gasCostWei * price * scale;
+    return (numerator + denominator - 1n) / denominator;
   }
 
   if (borrowedToken.isWeth === true) {
@@ -283,4 +290,4 @@ async function maybeExecute({ opportunity, provider, config }) {
   }
 }
 
-module.exports = { maybeExecute };
+module.exports = { maybeExecute, gasCostInBorrowedToken };
