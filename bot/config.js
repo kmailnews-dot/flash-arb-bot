@@ -65,6 +65,19 @@ const config = {
   maxGasLimit: BigInt(optionalNumber("MAX_GAS_LIMIT", 1000000)),
   gasPriceBufferPct: optionalNumber("GAS_PRICE_BUFFER_PCT", 20),
 
+  // Live-execution safety guards. They only apply when DRY_RUN=false and a transaction is about
+  // to be sent. See README "Live-execution loss guards" and bot/guards.js.
+  expectedChainId: optionalNumber("EXPECTED_CHAIN_ID", 42161),
+  maxWalletBalanceEth: optionalNumber("MAX_WALLET_BALANCE_ETH", 0.1),
+  maxDailyGasEth: optionalNumber("MAX_DAILY_GAS_ETH", 0.01),
+  maxConsecutiveFailures: optionalNumber("MAX_CONSECUTIVE_FAILURES", 5),
+  circuitBreakerCooldownMinutes: optionalNumber("CIRCUIT_BREAKER_COOLDOWN_MINUTES", 60),
+  gasSpentPath: optionalString("GAS_SPENT_PATH", "./logs/gas_spent.json"),
+  circuitBreakerPath: optionalString("CIRCUIT_BREAKER_PATH", "./logs/circuit_breaker.json"),
+
+  // Append-only JSONL log of every scan result, used to measure opportunities over time.
+  scanLogPath: optionalString("SCAN_LOG_PATH", "./logs/scans.jsonl"),
+
   // Optional: lets the bot price gas in USD by quoting 1 WETH -> a stablecoin on a live DEX pool.
   // Required only for pairs whose borrowed token is WETH or a stablecoin (see README). Leave unset
   // to skip USD filtering entirely and rely solely on the contract's on-chain minProfit guard.

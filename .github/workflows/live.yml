@@ -73,10 +73,24 @@ jobs:
           CONTRACT_ADDRESS: ${{ inputs.network == 'arbitrum' && secrets.CONTRACT_ADDRESS || secrets.CONTRACT_ADDRESS_SEPOLIA }}
         run: npx hardhat run scripts/deploy-live.js --network ${{ inputs.network }}
 
+      # GitHub-hosted runners are ephemeral. Restore the previous run's guard state so the daily
+      # gas cap and circuit-breaker cooldown survive manual triggers, then save the updated state.
+      - name: Restore loss-guard state
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            logs/gas_spent.json
+            logs/circuit_breaker.json
+          key: flash-arb-guard-state-${{ inputs.network }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            flash-arb-guard-state-${{ inputs.network }}-
+
       - name: Run live bot
         env:
           ARBITRUM_RPC_URL: ${{ inputs.network == 'arbitrum' && secrets.ARBITRUM_RPC_URL || secrets.ARBITRUM_SEPOLIA_RPC_URL }}
           DRY_RUN: "false"
+          # Must match the selected network; the bot refuses to send on a chainId mismatch.
+          EXPECTED_CHAIN_ID: ${{ inputs.network == 'arbitrum' && '42161' || '421614' }}
           PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
           CONTRACT_ADDRESS: ${{ inputs.network == 'arbitrum' && secrets.CONTRACT_ADDRESS || secrets.CONTRACT_ADDRESS_SEPOLIA }}
           AAVE_FLASH_LOAN_PREMIUM_BPS: ${{ secrets.AAVE_FLASH_LOAN_PREMIUM_BPS || '5' }}
@@ -86,6 +100,19 @@ jobs:
           GAS_LIMIT_ESTIMATE: ${{ secrets.GAS_LIMIT_ESTIMATE || '700000' }}
           MAX_GAS_LIMIT: ${{ secrets.MAX_GAS_LIMIT || '1000000' }}
           GAS_PRICE_BUFFER_PCT: ${{ secrets.GAS_PRICE_BUFFER_PCT || '20' }}
+          MAX_WALLET_BALANCE_ETH: ${{ secrets.MAX_WALLET_BALANCE_ETH || '0.1' }}
+          MAX_DAILY_GAS_ETH: ${{ secrets.MAX_DAILY_GAS_ETH || '0.01' }}
+          MAX_CONSECUTIVE_FAILURES: ${{ secrets.MAX_CONSECUTIVE_FAILURES || '5' }}
+          CIRCUIT_BREAKER_COOLDOWN_MINUTES: ${{ secrets.CIRCUIT_BREAKER_COOLDOWN_MINUTES || '60' }}
           ETH_USD_ROUTE_JSON: ${{ secrets.ETH_USD_ROUTE_JSON }}
           PAIRS_CONFIG_JSON: ${{ secrets.PAIRS_CONFIG_JSON }}
         run: npm run scan
+
+      - name: Save loss-guard state
+        if: always() && hashFiles('logs/gas_spent.json', 'logs/circuit_breaker.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            logs/gas_spent.json
+            logs/circuit_breaker.json
+          key: flash-arb-guard-state-${{ inputs.network }}-${{ github.run_id }}-${{ github.run_attempt }}

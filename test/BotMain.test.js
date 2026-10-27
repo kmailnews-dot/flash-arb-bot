@@ -1,5 +1,8 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
 const { main } = require("../bot/index");
 
 describe("bot/index main", function () {
@@ -26,8 +29,11 @@ describe("bot/index main", function () {
       tradeSizes: ["1000"],
     };
 
+    const scanDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-scan-"));
+    const scanLogPath = path.join(scanDir, "scans.jsonl");
     const config = {
       dryRun: true,
+      scanLogPath,
       pairs: [pair],
       aaveFlashLoanPremiumBps: 5n,
       minProfitUsd: 5,
@@ -62,5 +68,16 @@ describe("bot/index main", function () {
     expect(summary.opportunities).to.equal(1);
     expect(warnings.join("\n")).to.include("could not quote ETH/USD");
     expect(warnings.join("\n")).to.include("USD filtering is disabled");
+
+    const entries = fs
+      .readFileSync(scanLogPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(entries).to.have.length(1);
+    expect(entries[0].chainId).to.equal(31337);
+    expect(entries[0].isOpportunity).to.equal(true);
+
+    fs.rmSync(scanDir, { recursive: true, force: true });
   });
 });

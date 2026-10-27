@@ -48,7 +48,9 @@ separate, manual-only workflow (`.github/workflows/live.yml`).
 
 Before sending a live transaction, the bot simulates it with `staticCall` and estimates its gas
 with `estimateGas`. If the simulation reverts or the estimate exceeds the configurable
-`MAX_GAS_LIMIT` (default 1,000,000), the trade is skipped instead of submitted.
+`MAX_GAS_LIMIT` (default 1,000,000), the trade is skipped instead of submitted. It also applies
+loss guards (chainId, wallet balance, daily gas, circuit breaker) — see "Live-execution loss
+guards" below.
 
 ## The gas question
 
@@ -177,6 +179,52 @@ to confirm. Start on `arbitrumSepolia`; use `arbitrum` only after the testnet de
 verification pass. The burner wallet must hold a small amount of ETH on the selected network for
 gas.
 
+### Scan history and measurement
+
+Every scan result — one line per pair/trade size, including errors — is appended to a JSONL file
+at `SCAN_LOG_PATH` (default `./logs/scans.jsonl`). Each line records `timestamp`, `chainId`,
+`pair`, `borrowedToken`, `tradeSize`, `grossProfit` (raw token units as a string),
+`grossProfitSymbol`, `grossProfitUsd`, `netProfitUsd`, `gasCostUsd`, `isOpportunity`, and `error`.
+Parent directories are created automatically, and a persistence failure is logged as a warning
+without stopping the scan. `logs/` is ignored by Git.
+
+The scheduled GitHub Actions runner is ephemeral, so `scan.yml` uploads the file as the
+`scan-log` artifact after every run (90-day retention). Download the artifacts to analyse them
+together, or run `npm run scan` on a persistent machine (cron/systemd timer) to keep a single
+cumulative file. A quick analysis:
+
+```bash
+jq -r 'select(.isOpportunity) | [.timestamp,.pair,.tradeSize,.netProfitUsd] | @tsv' logs/scans.jsonl
+```
+
+### Live-execution loss guards
+
+With `DRY_RUN=false`, `maybeExecute` checks the following before submitting, in order:
+
+1. **Circuit breaker** — after `MAX_CONSECUTIVE_FAILURES` (default 5) consecutive failed
+   execution attempts, all live attempts are refused for `CIRCUIT_BREAKER_COOLDOWN_MINUTES`
+   (default 60). State is persisted in `./logs/circuit_breaker.json`.
+2. **Chain ID** — the RPC's chainId must equal `EXPECTED_CHAIN_ID` (default `42161`, Arbitrum One).
+   The live workflow sets `421614` automatically when you select `arbitrumSepolia`.
+3. **Wallet balance** — refuse if the burner wallet holds more than `MAX_WALLET_BALANCE_ETH`
+   (default `0.1` ETH), to cap the blast radius.
+4. **Per-transaction gas cap** — the existing `MAX_GAS_LIMIT`.
+5. **Daily gas cap** — projected gas cost (`estimateGas × gas price`) plus today's cumulative
+   spend must stay below `MAX_DAILY_GAS_ETH` (default `0.01` ETH). The estimate is reserved before
+   broadcast and reconciled to the actual receipt cost; the counter is stored in
+   `./logs/gas_spent.json` and resets at UTC midnight.
+
+Because GitHub-hosted runners are ephemeral, `live.yml` restores and saves the two guard state
+files through the Actions cache (keyed per network) so the limits survive manual runs. Caches can
+be evicted after 7 days of inactivity; run the live bot on a persistent host if you need a stronger
+guarantee.
+
+Guard skips return `submitted: false` with an explicit `error` (`CHAIN_ID_MISMATCH`,
+`WALLET_BALANCE_ABOVE_MAX`, `DAILY_GAS_LIMIT`, `CIRCUIT_BREAKER_OPEN`). If a guard check or the
+gas reservation cannot read/write its state, the bot fails closed and sends nothing for that
+transaction. A successful trade resets the consecutive-failure counter. The contract's on-chain
+`minProfit` logic is unchanged.
+
 ## Configuring pairs & DEXs
 
 `PAIRS_CONFIG_JSON` is a JSON array — each entry is one borrow/swap/swap-back route to scan,
@@ -230,11 +278,29 @@ DRY_RUN=false npm run scan                               # exercises the full on
 This is also what the test suite (`npm test`) exercises at the unit level — see
 `test/FlashArbExecutor.test.js`.
 
+## Fork integration test (optional)
+
+`npm test` only runs the fast unit/integration tests. To exercise the contract against the real
+Aave, Uniswap V3 and SushiSwap deployments, pin an Arbitrum block and run:
+
+```bash
+ARBITRUM_FORK_BLOCK=<recent-block-number> npm run test:fork
+```
+
+The test uses `ARBITRUM_FORK_RPC_URL` if set, otherwise `ARBITRUM_RPC_URL`, deploys
+`FlashArbExecutor` with the real Aave `PoolAddressesProvider`, attempts WETH/USDC round trips of
+0.01 and 0.1 WETH through SushiSwap V2 + Uniswap V3, and checks that the incompatible SwapRouter02
+reverts. Forking an old block normally requires an archive-capable RPC. If `ARBITRUM_FORK_BLOCK`
+is unset, or the RPC cannot serve historical state, the suite is skipped with a clear message
+instead of failing.
+
 ## Configuration reference
 
 See [`.env.example`](.env.example) for every environment variable / secret this project reads,
-with inline explanations — RPC URL, `DRY_RUN`, gas and slippage tuning, `MIN_PROFIT_USD`, and the
-`PAIRS_CONFIG_JSON` / `ETH_USD_ROUTE_JSON` shapes.
+with inline explanations — RPC URL, `DRY_RUN`, gas and slippage tuning, `MIN_PROFIT_USD`,
+`SCAN_LOG_PATH`, the loss-guard limits (`EXPECTED_CHAIN_ID`, `MAX_WALLET_BALANCE_ETH`,
+`MAX_DAILY_GAS_ETH`, `MAX_CONSECUTIVE_FAILURES`, `CIRCUIT_BREAKER_COOLDOWN_MINUTES`), the fork-test
+block, and the `PAIRS_CONFIG_JSON` / `ETH_USD_ROUTE_JSON` shapes.
 
 ## Security notes
 

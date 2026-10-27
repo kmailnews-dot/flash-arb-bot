@@ -13,6 +13,9 @@ typechain-types/
 .env.*
 !.env.example
 
-# logs
+# logs and persisted runtime state (scan history, gas/breaker guard state)
 *.log
 logs/
+logs/scans.jsonl
+logs/gas_spent.json
+logs/circuit_breaker.json

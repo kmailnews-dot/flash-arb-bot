@@ -1,22 +1,34 @@
 const { ethers } = require("ethers");
 const { getEthUsdPrice, scanPair } = require("./scanner");
 const { maybeExecute } = require("./executor");
+const { DEFAULT_SCAN_LOG_PATH, appendScanResult } = require("./persist");
+
+async function persistResultSafely(logPath, result, chainId) {
+  try {
+    await appendScanResult(logPath, result, { chainId });
+  } catch (err) {
+    console.warn(`WARNING: could not persist scan result to ${logPath}: ${err.message}`);
+  }
+}
 
 /// Runs one scan cycle. Config and provider are injectable so tests can run against the Hardhat
 /// network without depending on environment variables; production callers pass nothing.
 async function main({ provider: injectedProvider, config: injectedConfig } = {}) {
   const config = injectedConfig || require("./config");
   const provider = injectedProvider || new ethers.JsonRpcProvider(config.rpcUrl);
+  const scanLogPath = config.scanLogPath || DEFAULT_SCAN_LOG_PATH;
 
   console.log(`flash-arb-bot scan starting - DRY_RUN=${config.dryRun} - ${new Date().toISOString()}`);
   if (config.dryRun) {
     console.log("Running in SIMULATION mode: opportunities are logged, no transaction is sent.");
   }
 
-  const [feeData, ethUsdPrice] = await Promise.all([
+  const [network, feeData, ethUsdPrice] = await Promise.all([
+    provider.getNetwork(),
     provider.getFeeData(),
     getEthUsdPrice(provider, config.ethUsdRoute),
   ]);
+  const chainId = Number(network.chainId);
   const gasPriceWei = feeData.gasPrice ?? feeData.maxFeePerGas ?? 0n;
 
   if (ethUsdPrice !== null) {
@@ -35,6 +47,7 @@ async function main({ provider: injectedProvider, config: injectedConfig } = {})
 
     for (const result of results) {
       scanned += 1;
+      await persistResultSafely(scanLogPath, result, chainId);
 
       if (result.error) {
         console.log(`  ${result.tradeSizeHuman} ${pair.borrowedToken.symbol}: ERROR - ${result.error}`);
