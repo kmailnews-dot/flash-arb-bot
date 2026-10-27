@@ -116,17 +116,50 @@ async function addGasSpentSafely(settings, deltaWei) {
   }
 }
 
+function errorMessage(err) {
+  return err?.shortMessage || err?.message || String(err);
+}
+
+function isNotProfitableError(err) {
+  if (typeof err === "string") return err.includes("NOT_PROFITABLE");
+  const seen = new Set();
+  let current = err;
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    const text = [current.shortMessage, current.message, current.reason, current.info?.error?.message]
+      .filter(Boolean)
+      .join(" ");
+    if (text.includes("NOT_PROFITABLE")) return true;
+    current = current.error || current.cause || current.info?.error;
+  }
+  return false;
+}
+
 /// Either logs the opportunity (DRY_RUN, the default) or submits the flash-loan transaction
 /// against the deployed FlashArbExecutor contract. Never throws for an execution failure - a
 /// reverted/failed live trade is caught, logged, and the scan loop continues to the next pair.
-async function maybeExecute({ opportunity, provider, config }) {
+async function maybeExecute({ opportunity, provider, config, contract: injectedContract }) {
   const { pair, amountIn, intermediateOut, finalOut, grossProfit } = opportunity;
+  const effectivePremiumBps =
+    config.aaveFlashLoanPremiumBps === undefined ? null : BigInt(config.aaveFlashLoanPremiumBps);
+  const effectivePremium =
+    effectivePremiumBps === null ? null : (amountIn * effectivePremiumBps) / BPS_DENOMINATOR;
+  const effectiveGrossProfit =
+    effectivePremium === null ? grossProfit : finalOut - amountIn - effectivePremium;
+
+  if (effectiveGrossProfit !== grossProfit) {
+    console.log(
+      `  [PREMIUM] Aave premium ${effectivePremiumBps} bps -> expected gross profit ` +
+        `${ethers.formatUnits(effectiveGrossProfit, pair.borrowedToken.decimals)} ${pair.borrowedToken.symbol} ` +
+        `(scan used ${ethers.formatUnits(grossProfit, pair.borrowedToken.decimals)})`
+    );
+  }
 
   if (config.dryRun) {
     console.log(
       `  [SIMULATED] would flash-borrow ${ethers.formatUnits(amountIn, pair.borrowedToken.decimals)} ` +
         `${pair.borrowedToken.symbol}, expected profit ` +
-        `${ethers.formatUnits(grossProfit, pair.borrowedToken.decimals)} ${pair.borrowedToken.symbol}` +
+        `${ethers.formatUnits(effectiveGrossProfit, pair.borrowedToken.decimals)} ${pair.borrowedToken.symbol}` +
         (opportunity.netProfitUsd !== null ? ` (~$${opportunity.netProfitUsd.toFixed(2)} net of gas)` : "")
     );
     return { submitted: false };
@@ -139,7 +172,8 @@ async function maybeExecute({ opportunity, provider, config }) {
 
   const settings = guardSettings(config);
   const wallet = new ethers.Wallet(config.privateKey, provider);
-  const contract = new ethers.Contract(config.contractAddress, FLASH_ARB_EXECUTOR_ABI, wallet);
+  const contract =
+    injectedContract || new ethers.Contract(config.contractAddress, FLASH_ARB_EXECUTOR_ABI, wallet);
 
   const breaker = await runGuard("circuit breaker", () =>
     checkCircuitBreaker({ filePath: settings.circuitBreakerPath })
@@ -175,27 +209,18 @@ async function maybeExecute({ opportunity, provider, config }) {
     // Require the on-chain execution to still clear at least half of the off-chain estimate,
     // so a price move between quoting and mining reverts the whole (borrowed-capital) trade
     // instead of executing at a worse-than-expected profit.
-    minProfit: (grossProfit * config.minProfitBufferBps) / BPS_DENOMINATOR,
+    minProfit: (effectiveGrossProfit * config.minProfitBufferBps) / BPS_DENOMINATOR,
     deadline: Math.floor(Date.now() / 1000) + 300,
   };
-
-  try {
-    await contract.startArbitrage.staticCall(pair.borrowedToken.address, amountIn, params);
-  } catch (err) {
-    const message = err.shortMessage || err.message;
-    console.log(`  [SIMULATION FAILED] ${message} - transaction not sent.`);
-    await recordFailureSafely(settings);
-    return { submitted: false, simulated: false, error: message };
-  }
 
   let estimatedGas;
   try {
     estimatedGas = await contract.startArbitrage.estimateGas(pair.borrowedToken.address, amountIn, params);
   } catch (err) {
-    const message = err.shortMessage || err.message;
+    const message = errorMessage(err);
     console.log(`  [GAS ESTIMATION FAILED] ${message} - transaction not sent.`);
     await recordFailureSafely(settings);
-    return { submitted: false, simulated: true, error: message };
+    return { submitted: false, simulated: false, error: message };
   }
 
   if (estimatedGas > config.maxGasLimit) {
@@ -221,14 +246,28 @@ async function maybeExecute({ opportunity, provider, config }) {
   }
 
   const gasFloor = (gasCostInToken * GAS_COST_MARGIN_BPS) / BPS_DENOMINATOR;
-  if (grossProfit < gasFloor) {
-    const message = `[SKIPPED] gas cost exceeds profit (gross=${grossProfit}, gas=${gasCostInToken})`;
+  if (effectiveGrossProfit < gasFloor) {
+    const message = `[SKIPPED] gas cost exceeds profit (gross=${effectiveGrossProfit}, gas=${gasCostInToken})`;
     console.log(`  ${message} - transaction not sent.`);
     return { submitted: false, simulated: true, estimatedGas, error: message };
   }
 
-  const bufferedMinProfit = (grossProfit * config.minProfitBufferBps) / BPS_DENOMINATOR;
-  params.minProfit = bufferedMinProfit > gasFloor ? bufferedMinProfit : gasFloor;
+  const bufferedMinProfit = (effectiveGrossProfit * config.minProfitBufferBps) / BPS_DENOMINATOR;
+  const finalMinProfit = bufferedMinProfit > gasFloor ? bufferedMinProfit : gasFloor;
+  const finalParams = { ...params, minProfit: finalMinProfit };
+
+  try {
+    await contract.startArbitrage.staticCall(pair.borrowedToken.address, amountIn, finalParams);
+  } catch (err) {
+    const message = errorMessage(err);
+    if (isNotProfitableError(err)) {
+      console.log(`  [SKIPPED] ${message} - transaction not sent.`);
+      return { submitted: false, simulated: false, error: message };
+    }
+    console.log(`  [SIMULATION FAILED] ${message} - transaction not sent.`);
+    await recordFailureSafely(settings);
+    return { submitted: false, simulated: false, error: message };
+  }
 
   const dailyGas = await runGuard("daily gas", () =>
     checkDailyGas({
@@ -253,9 +292,9 @@ async function maybeExecute({ opportunity, provider, config }) {
 
   let tx;
   try {
-    tx = await contract.startArbitrage(pair.borrowedToken.address, amountIn, params, { gasLimit: estimatedGas });
+    tx = await contract.startArbitrage(pair.borrowedToken.address, amountIn, finalParams, { gasLimit: estimatedGas });
   } catch (err) {
-    const message = err.shortMessage || err.message;
+    const message = errorMessage(err);
     await addGasSpentSafely(settings, -gasCostWei);
     await recordFailureSafely(settings);
     console.error(`  [FAILED] ${message}`);

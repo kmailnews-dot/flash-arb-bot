@@ -2,6 +2,9 @@ const { ethers } = require("ethers");
 const { getEthUsdPrice, scanPair } = require("./scanner");
 const { maybeExecute } = require("./executor");
 const { DEFAULT_SCAN_LOG_PATH, appendScanResult } = require("./persist");
+const { NETWORKS } = require("./networks");
+
+const AAVE_POOL_PREMIUM_ABI = ["function FLASHLOAN_PREMIUM_TOTAL() view returns (uint128)"];
 
 async function persistResultSafely(logPath, result, chainId) {
   try {
@@ -37,9 +40,49 @@ function selectBestResult(results) {
   return [...results].sort(compareResults)[0];
 }
 
+async function readAaveFlashLoanPremium({ provider, chainId, config }) {
+  const network = NETWORKS[chainId];
+  if (!network) return config.aaveFlashLoanPremiumBps;
+
+  try {
+    const pool = new ethers.Contract(network.pool, AAVE_POOL_PREMIUM_ABI, provider);
+    const onChainPremiumBps = BigInt(await pool.FLASHLOAN_PREMIUM_TOTAL());
+    const configuredPremiumBps =
+      config.aaveFlashLoanPremiumBps === undefined
+        ? onChainPremiumBps
+        : BigInt(config.aaveFlashLoanPremiumBps);
+    const divergence =
+      onChainPremiumBps > configuredPremiumBps
+        ? onChainPremiumBps - configuredPremiumBps
+        : configuredPremiumBps - onChainPremiumBps;
+
+    if (divergence > 1n) {
+      console.warn(
+        `WARNING: Aave flash loan premium on ${network.name} (${chainId}) is ${onChainPremiumBps} bps on-chain, ` +
+          `but AAVE_FLASH_LOAN_PREMIUM_BPS is ${configuredPremiumBps} bps. ` +
+          "Using the on-chain value for execution estimates."
+      );
+    }
+
+    return onChainPremiumBps;
+  } catch (err) {
+    const message = err?.shortMessage || err?.message || String(err);
+    console.warn(
+      `WARNING: could not read Aave flash loan premium from ${network.name} (${chainId}) pool ${network.pool}: ` +
+        `${message}. Using configured ${config.aaveFlashLoanPremiumBps} bps.`
+    );
+    return config.aaveFlashLoanPremiumBps;
+  }
+}
+
 /// Runs one scan cycle. Config and provider are injectable so tests can run against the Hardhat
 /// network without depending on environment variables; production callers pass nothing.
-async function main({ provider: injectedProvider, config: injectedConfig } = {}) {
+async function main({
+  provider: injectedProvider,
+  config: injectedConfig,
+  scanPair: scanPairImpl = scanPair,
+  maybeExecute: maybeExecuteImpl = maybeExecute,
+} = {}) {
   const config = injectedConfig || require("./config");
   const provider = injectedProvider || new ethers.JsonRpcProvider(config.rpcUrl);
   const scanLogPath = config.scanLogPath || DEFAULT_SCAN_LOG_PATH;
@@ -55,6 +98,15 @@ async function main({ provider: injectedProvider, config: injectedConfig } = {})
     getEthUsdPrice(provider, config.ethUsdRoute),
   ]);
   const chainId = Number(network.chainId);
+
+  if (config.dryRun === false && ethUsdPrice === null) {
+    const reason =
+      "ETH_USD_ROUTE_JSON required for live execution, but quote failed. Set DRY_RUN=true or fix the route.";
+    console.error(`[LIVE REFUSED] ${reason}`);
+    return { refused: true, reason };
+  }
+
+  const aaveFlashLoanPremiumBps = await readAaveFlashLoanPremium({ provider, chainId, config });
   const gasPriceWei = feeData.gasPrice ?? feeData.maxFeePerGas;
   if (!gasPriceWei || gasPriceWei === 0n) {
     console.warn(
@@ -72,11 +124,11 @@ async function main({ provider: injectedProvider, config: injectedConfig } = {})
   let scanned = 0;
   let opportunities = 0;
   let executed = 0;
-  const executionConfig = { ...config, ethUsdPrice };
+  const executionConfig = { ...config, ethUsdPrice, aaveFlashLoanPremiumBps };
 
   for (const pair of config.pairs) {
     console.log(`\nScanning ${pair.label} ...`);
-    const results = await scanPair({ provider, pair, config, gasPriceWei, ethUsdPrice });
+    const results = await scanPairImpl({ provider, pair, config, gasPriceWei, ethUsdPrice });
 
     for (const result of results) {
       scanned += 1;
@@ -106,7 +158,7 @@ async function main({ provider: injectedProvider, config: injectedConfig } = {})
       );
 
       if (best.isOpportunity) {
-        const outcome = await maybeExecute({ opportunity: best, provider, config: executionConfig });
+        const outcome = await maybeExecuteImpl({ opportunity: best, provider, config: executionConfig });
         if (outcome.submitted) executed += 1;
       }
     }
@@ -117,7 +169,7 @@ async function main({ provider: injectedProvider, config: injectedConfig } = {})
       `${executed} transaction attempt(s).`
   );
 
-  return { ethUsdPrice, scanned, opportunities, executed };
+  return { ethUsdPrice, aaveFlashLoanPremiumBps, scanned, opportunities, executed };
 }
 
 if (require.main === module) {

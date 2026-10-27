@@ -79,6 +79,39 @@ describe("bot/executor maybeExecute", function () {
     return { deployer, botWallet, borrowToken, pair, opportunity, makeConfig };
   }
 
+  function makeSpyContract({ estimatedGas = 300000n, staticCallError = null } = {}) {
+    const calls = [];
+    const startArbitrage = async (...args) => {
+      calls.push({ method: "send", args });
+      return {
+        hash: `0x${"11".repeat(32)}`,
+        wait: async () => ({ status: 1, gasUsed: estimatedGas, gasPrice: 1n, blockNumber: 1 }),
+      };
+    };
+    startArbitrage.estimateGas = async (...args) => {
+      calls.push({ method: "estimateGas", args });
+      return estimatedGas;
+    };
+    startArbitrage.staticCall = async (...args) => {
+      calls.push({ method: "staticCall", args });
+      if (staticCallError) throw staticCallError;
+      return true;
+    };
+    return { contract: { startArbitrage }, calls };
+  }
+
+  async function opportunityAboveGasFloor({ opportunity, config, estimatedGas = 300000n }) {
+    const feeData = await ethers.provider.getFeeData();
+    const gasPriceWei = feeData.gasPrice ?? feeData.maxFeePerGas;
+    const gasCost = gasCostInBorrowedToken({
+      gasCostWei: estimatedGas * gasPriceWei,
+      pair: opportunity.pair,
+      config,
+    });
+    const gasFloor = (gasCost * 11000n) / 10000n;
+    return { gasFloor, opportunity: { ...opportunity, grossProfit: gasFloor + 1n } };
+  }
+
   it("simulates, estimates gas and submits within the configured cap", async function () {
     const { botWallet, borrowToken, opportunity, makeConfig } = await deployFixture();
 
@@ -95,7 +128,7 @@ describe("bot/executor maybeExecute", function () {
     expect(await borrowToken.balanceOf(botWallet.address)).to.equal(opportunity.grossProfit);
   });
 
-  it("does not send a transaction when the staticCall simulation reverts", async function () {
+  it("does not send a transaction when gas estimation reverts", async function () {
     const { botWallet, opportunity, makeConfig } = await deployFixture({
       legBackRate: ethers.parseEther("0.999"),
     });
@@ -142,6 +175,13 @@ describe("bot/executor maybeExecute", function () {
         config,
       })
     ).to.equal(1_800_000n);
+    expect(
+      gasCostInBorrowedToken({
+        gasCostWei: ethers.parseEther("0.001"),
+        pair: { borrowedToken: { isStable: true, decimals: 18 } },
+        config,
+      })
+    ).to.equal(ethers.parseEther("1.8"));
 
     const probe = await maybeExecute({
       opportunity: { ...opportunity, grossProfit: 1n },
@@ -179,6 +219,117 @@ describe("bot/executor maybeExecute", function () {
     expect(above.submitted).to.equal(true);
     expect(above.receipt.status).to.equal(1);
     expect(await ethers.provider.getTransactionCount(botWallet.address)).to.equal(nonceBefore + 1);
+  });
+
+  it("skips a final staticCall NOT_PROFITABLE above gasFloor without touching the breaker", async function () {
+    const { botWallet, opportunity, makeConfig } = await deployFixture();
+    const breakerPath = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-final-sim-")),
+      "circuit_breaker.json"
+    );
+    const config = makeConfig({ circuitBreakerPath: breakerPath });
+    const { contract, calls } = makeSpyContract({
+      staticCallError: new Error("execution reverted: NOT_PROFITABLE"),
+    });
+    const { gasFloor, opportunity: staleOpportunity } = await opportunityAboveGasFloor({
+      opportunity,
+      config,
+    });
+    expect(staleOpportunity.grossProfit).to.be.greaterThan(gasFloor);
+
+    const nonceBefore = await ethers.provider.getTransactionCount(botWallet.address);
+    const result = await maybeExecute({
+      opportunity: staleOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+    });
+
+    expect(result.submitted).to.equal(false);
+    expect(result.error).to.include("NOT_PROFITABLE");
+    expect(await ethers.provider.getTransactionCount(botWallet.address)).to.equal(nonceBefore);
+    expect(fs.existsSync(breakerPath)).to.equal(false);
+    expect(calls.map((entry) => entry.method)).to.deep.equal(["estimateGas", "staticCall"]);
+  });
+
+  it("uses the same final params for the final staticCall and the send", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const { contract, calls } = makeSpyContract();
+    const { gasFloor, opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+      opportunity,
+      config,
+    });
+
+    const result = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+    });
+
+    expect(result.submitted).to.equal(true);
+    const estimate = calls.find((entry) => entry.method === "estimateGas");
+    const staticCall = calls.find((entry) => entry.method === "staticCall");
+    const send = calls.find((entry) => entry.method === "send");
+    expect(staticCall.args[2]).to.equal(send.args[2]);
+    expect(staticCall.args[2]).to.deep.equal(send.args[2]);
+    expect(estimate.args[2]).to.not.equal(staticCall.args[2]);
+
+    const bufferedMinProfit =
+      (freshOpportunity.grossProfit * config.minProfitBufferBps) / 10000n;
+    expect(staticCall.args[2].minProfit).to.equal(
+      bufferedMinProfit > gasFloor ? bufferedMinProfit : gasFloor
+    );
+    expect(send.args[3].gasLimit).to.equal(300000n);
+  });
+
+  it("calls estimateGas, then the final staticCall, then sends", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const { contract, calls } = makeSpyContract();
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+      opportunity,
+      config,
+    });
+
+    const result = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+    });
+
+    expect(result.submitted).to.equal(true);
+    expect(calls.map((entry) => entry.method)).to.deep.equal(["estimateGas", "staticCall", "send"]);
+  });
+
+  it("counts a non-NOT_PROFITABLE final staticCall failure in the breaker", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const breakerPath = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-final-error-")),
+      "circuit_breaker.json"
+    );
+    const config = makeConfig({ circuitBreakerPath: breakerPath });
+    const { contract } = makeSpyContract({
+      staticCallError: new Error("execution reverted: OTHER_REASON"),
+    });
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+      opportunity,
+      config,
+    });
+
+    const result = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+    });
+
+    expect(result.submitted).to.equal(false);
+    expect(result.error).to.include("OTHER_REASON");
+    const state = JSON.parse(fs.readFileSync(breakerPath, "utf8"));
+    expect(state.consecutiveFailures).to.equal(1);
   });
 
   it("does not send a transaction when estimateGas exceeds MAX_GAS_LIMIT", async function () {
