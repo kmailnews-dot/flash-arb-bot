@@ -1,15 +1,17 @@
 const { ethers } = require("ethers");
-const config = require("./config");
 const { getEthUsdPrice, scanPair } = require("./scanner");
 const { maybeExecute } = require("./executor");
 
-async function main() {
+/// Runs one scan cycle. Config and provider are injectable so tests can run against the Hardhat
+/// network without depending on environment variables; production callers pass nothing.
+async function main({ provider: injectedProvider, config: injectedConfig } = {}) {
+  const config = injectedConfig || require("./config");
+  const provider = injectedProvider || new ethers.JsonRpcProvider(config.rpcUrl);
+
   console.log(`flash-arb-bot scan starting - DRY_RUN=${config.dryRun} - ${new Date().toISOString()}`);
   if (config.dryRun) {
     console.log("Running in SIMULATION mode: opportunities are logged, no transaction is sent.");
   }
-
-  const provider = new ethers.JsonRpcProvider(config.rpcUrl);
 
   const [feeData, ethUsdPrice] = await Promise.all([
     provider.getFeeData(),
@@ -20,7 +22,7 @@ async function main() {
   if (ethUsdPrice !== null) {
     console.log(`Reference price: 1 WETH ~= $${ethUsdPrice.toFixed(2)} (from ETH_USD_ROUTE_JSON)`);
   } else {
-    console.log("No ETH_USD_ROUTE_JSON configured - USD filtering is disabled, using raw on-chain profit only.");
+    console.log("No ETH/USD reference available - USD filtering is disabled, using raw on-chain profit only.");
   }
 
   let scanned = 0;
@@ -58,11 +60,17 @@ async function main() {
     `\nDone: ${scanned} quotes checked, ${opportunities} opportunit${opportunities === 1 ? "y" : "ies"} found, ` +
       `${executed} transaction attempt(s).`
   );
+
+  return { ethUsdPrice, scanned, opportunities, executed };
 }
 
-main()
-  .then(() => process.exit(0))
-  .catch((err) => {
-    console.error("flash-arb-bot scan failed:", err);
-    process.exit(1);
-  });
+if (require.main === module) {
+  main()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error("flash-arb-bot scan failed:", err);
+      process.exit(1);
+    });
+}
+
+module.exports = { main };

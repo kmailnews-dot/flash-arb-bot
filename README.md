@@ -97,7 +97,7 @@ Add these (see [`.env.example`](.env.example) for the exact shape of the JSON on
 | `AAVE_POOL_ADDRESSES_PROVIDER` | deploying | Aave V3 provider for the target network; see step 4 |
 | `CONTRACT_ADDRESS` | live execution on Arbitrum One | filled in after you deploy (step 5); not used by the scheduled scan |
 | `CONTRACT_ADDRESS_SEPOLIA` | live execution on Arbitrum Sepolia | filled in after the testnet deploy (step 5); not used by the scheduled scan |
-| `ETH_USD_ROUTE_JSON` | USD profit filtering | see step 4 |
+| `ETH_USD_ROUTE_JSON` | USD profit filtering | network-specific; see step 4 |
 | `PAIRS_CONFIG_JSON` | scanning | see step 4 |
 
 The **Flash arb scan** workflow does not read `DRY_RUN`, `PRIVATE_KEY`, or the contract-address
@@ -187,11 +187,31 @@ across chosen trade sizes. Full field reference and a worked example are in
   borrowed token is WETH (`isWeth: true`) or a USD stablecoin (`isStable: true`). For anything
   else, it skips USD filtering and relies on the raw on-chain profit check instead.
 - `ETH_USD_ROUTE_JSON` prices gas in USD by quoting 1 WETH against a stablecoin on a real DEX
-  pool — no external price API or key needed.
+  pool — no external price API or key needed. **Its addresses must belong to the network you are
+  actually running on.** Mainnet router/token addresses do not exist on Arbitrum Sepolia, so the
+  quote returns empty data; the bot now treats that as non-fatal (see below).
 - A "V3" leg needs both `router` (the **original** Uniswap V3 SwapRouter used to execute the
   swap) and `quoter` (the separate QuoterV2 contract used only to check prices) — the SwapRouter
   doesn't expose a quoting function itself. Do not use SwapRouter02: its `ExactInputSingleParams`
   has no `deadline` field, so it is incompatible with the executor's `ISwapRouterV3Like` interface.
+
+Example route for **Arbitrum One** (SushiSwap V2, WETH → native USDC):
+
+```json
+{
+  "kind": "V2",
+  "router": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
+  "weth": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+  "usdc": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+  "usdcDecimals": 6
+}
+```
+
+If the ETH/USD quote fails for any reason (wrong-network addresses, missing pool, revert), the
+bot logs a warning and continues with `ethUsdPrice = null`: the USD filter (`MIN_PROFIT_USD`) is
+disabled for that run and opportunities are judged on raw on-chain profit (`grossProfit > 0`)
+instead. The contract's own `minProfit` guard still applies on-chain. On Arbitrum Sepolia, leave
+`ETH_USD_ROUTE_JSON` unset unless you have a valid Sepolia WETH/stablecoin pool.
 
 ## Try it risk-free on a local mock network
 

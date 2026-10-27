@@ -5,16 +5,30 @@ const BPS_DENOMINATOR = 10000n;
 
 /// Quotes 1 WETH -> a reference stablecoin on a live DEX pool, so gas costs and profit can be
 /// priced in USD without paying for an external price API. Returns null if ethUsdRoute isn't set.
+///
+/// A failed quote (wrong-network addresses, missing pool, revert, undecodable return data, ...)
+/// is non-fatal: USD pricing is an optional convenience, so warn and return null. Callers then
+/// fall back to the raw on-chain profit check instead of crashing the whole scan.
 async function getEthUsdPrice(provider, ethUsdRoute) {
   if (!ethUsdRoute) return null;
 
-  const oneEth = ethers.parseUnits("1", 18);
-  const out =
-    ethUsdRoute.kind === "V2"
-      ? await quoteV2(provider, ethUsdRoute.router, ethUsdRoute.weth, ethUsdRoute.usdc, oneEth)
-      : await quoteV3(provider, ethUsdRoute.router, ethUsdRoute.weth, ethUsdRoute.usdc, ethUsdRoute.fee, oneEth);
+  try {
+    const oneEth = ethers.parseUnits("1", 18);
+    const out =
+      ethUsdRoute.kind === "V2"
+        ? await quoteV2(provider, ethUsdRoute.router, ethUsdRoute.weth, ethUsdRoute.usdc, oneEth)
+        : await quoteV3(provider, ethUsdRoute.router, ethUsdRoute.weth, ethUsdRoute.usdc, ethUsdRoute.fee, oneEth);
 
-  return Number(ethers.formatUnits(out, ethUsdRoute.usdcDecimals));
+    return Number(ethers.formatUnits(out, ethUsdRoute.usdcDecimals));
+  } catch (err) {
+    const message = err.shortMessage || err.message;
+    console.warn(
+      `WARNING: could not quote ETH/USD via ${ethUsdRoute.kind} router ${ethUsdRoute.router}: ${message}. ` +
+        "USD filtering is disabled for this run; the bot will keep scanning using raw on-chain profit only. " +
+        "Check that ETH_USD_ROUTE_JSON contains addresses for the network configured in ARBITRUM_RPC_URL."
+    );
+    return null;
+  }
 }
 
 /// Estimates the USD cost of submitting the arbitrage transaction.
