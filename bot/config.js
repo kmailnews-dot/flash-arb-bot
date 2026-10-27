@@ -62,6 +62,7 @@ const config = {
   slippageBps: BigInt(optionalNumber("SLIPPAGE_BPS", 50)), // 0.5% per-leg slippage tolerance for minAmountOut
 
   gasLimitEstimate: BigInt(optionalNumber("GAS_LIMIT_ESTIMATE", 700000)),
+  maxGasLimit: BigInt(optionalNumber("MAX_GAS_LIMIT", 1000000)),
   gasPriceBufferPct: optionalNumber("GAS_PRICE_BUFFER_PCT", 20),
 
   // Optional: lets the bot price gas in USD by quoting 1 WETH -> a stablecoin on a live DEX pool.

@@ -2,8 +2,8 @@ name: Deploy FlashArbExecutor
 
 # Manual-only, so you can deploy entirely from the GitHub Actions "Run workflow" button (works
 # fine from mobile Safari or the GitHub mobile app) - no terminal or computer needed. The deployed
-# contract address is printed in the run's log; copy it into your PRIVATE_KEY/CONTRACT_ADDRESS
-# secrets used by scan.yml.
+# contract address is printed in the run's log; copy it into the CONTRACT_ADDRESS secret used by
+# the separate live-execution workflow. The scheduled scan is read-only and does not use it.
 on:
   workflow_dispatch:
     inputs:

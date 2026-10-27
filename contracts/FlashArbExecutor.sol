@@ -78,23 +78,42 @@ contract FlashArbExecutor is FlashLoanSimpleReceiverBase, Ownable, ReentrancyGua
 
         ArbParams memory arb = abi.decode(params, (ArbParams));
         require(block.timestamp <= arb.deadline, "EXPIRED");
+        require(arb.leg1.tokenOut != asset, "INVALID_INTERMEDIATE_TOKEN");
+        require(arb.leg2.tokenOut == asset, "LEG2_TOKEN_OUT_MISMATCH");
 
-        uint256 intermediateOut = _swap(arb.leg1, asset, amount);
-        uint256 finalOut = _swap(arb.leg2, arb.leg1.tokenOut, intermediateOut);
+        uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
+        uint256 intermediateOut = _swapAndMeasure(arb.leg1, asset, amount);
+        _swap(arb.leg2, arb.leg1.tokenOut, intermediateOut);
 
-        uint256 totalOwed = amount + premium;
-        require(finalOut >= totalOwed + arb.minProfit, "NOT_PROFITABLE");
+        _settle(asset, amount, premium, arb.minProfit, balanceBefore, initiator);
+        return true;
+    }
 
-        uint256 profit = finalOut - totalOwed;
+    function _swapAndMeasure(Leg memory leg, address tokenIn, uint256 amountIn) internal returns (uint256) {
+        uint256 balanceBefore = IERC20(leg.tokenOut).balanceOf(address(this));
+        _swap(leg, tokenIn, amountIn);
+        return IERC20(leg.tokenOut).balanceOf(address(this)) - balanceBefore;
+    }
 
-        IERC20(asset).forceApprove(address(POOL), totalOwed);
+    function _settle(
+        address asset,
+        uint256 amount,
+        uint256 premium,
+        uint256 minProfit,
+        uint256 balanceBefore,
+        address initiator
+    ) internal {
+        uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
+        require(balanceAfter >= balanceBefore + premium + minProfit, "NOT_PROFITABLE");
+
+        uint256 profit = balanceAfter - balanceBefore - premium;
+        IERC20(asset).forceApprove(address(POOL), amount + premium);
 
         if (profit > 0) {
             IERC20(asset).safeTransfer(owner(), profit);
         }
 
         emit ArbitrageExecuted(initiator, asset, amount, premium, profit);
-        return true;
     }
 
     function _swap(Leg memory leg, address tokenIn, uint256 amountIn) internal returns (uint256) {

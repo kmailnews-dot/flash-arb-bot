@@ -16,9 +16,10 @@ and free-tier accounts.
   requires you to hold the borrowed asset — that's the whole point of a flash loan. But
   *submitting the transaction* costs a small amount of ETH in gas, the same as any Arbitrum
   transaction, whether or not the arbitrage succeeds. See "The gas question" below.
-- **Nothing trades until you explicitly turn it on.** The bot defaults to `DRY_RUN=true`: it
-  scans and logs opportunities but never sends a transaction. You have to deliberately set
-  `DRY_RUN=false` and fund a wallet before any real money moves.
+- **The scheduled scan is read-only.** The GitHub Actions scan always runs with `DRY_RUN=true`
+  and has no access to `PRIVATE_KEY` or `CONTRACT_ADDRESS`; it only logs opportunities. Live
+  execution is handled by a separate workflow, so nothing trades until you explicitly configure
+  and fund that workflow.
 - **Use a burner wallet.** Never put your main wallet's private key into a bot or a CI secret.
   Create a wallet with no funds beyond what you're willing to risk, specifically for this bot.
 - This is educational/personal-use software, not audited, and provided with no warranty (see
@@ -41,6 +42,14 @@ profit after fees and gas, and calls `startArbitrage` only when a trade looks wo
 on-chain `require` is the real safety net; the off-chain check just avoids wasting gas on
 attempts that clearly won't clear it.
 
+The scheduled GitHub Actions workflow runs this scanner in read-only mode: `DRY_RUN` is
+hard-coded to `true` and the job never receives wallet secrets. Live submission is isolated in a
+separate workflow.
+
+Before sending a live transaction, the bot simulates it with `staticCall` and estimates its gas
+with `estimateGas`. If the simulation reverts or the estimate exceeds the configurable
+`MAX_GAS_LIMIT` (default 1,000,000), the trade is skipped instead of submitted.
+
 ## The gas question
 
 I looked into free gas-sponsoring relayers (Gelato Relay, Biconomy, ERC-4337 paymasters, etc.)
@@ -51,7 +60,8 @@ covers arbitrary mainnet contract calls indefinitely. So the honest answer is:
 - Fund your burner wallet with a small amount of ETH on Arbitrum — a few dollars covers a large
   number of transaction attempts, since Arbitrum gas is cheap (typically fractions of a cent to
   a few cents per tx).
-- Until you do that, leave `DRY_RUN=true`. The bot is fully useful in that mode: you get a live
+- The scheduled scan always runs in this mode (`DRY_RUN=true`); for local runs, leave
+  `DRY_RUN=true` until you're ready to trade. The bot is fully useful in that mode: you get a live
   log of what it *would* have done and its estimated profit, with zero cost or risk.
 - If you'd rather not risk even a few dollars, test everything on **Arbitrum Sepolia** (the
   testnet) first, funded by a free faucet — see the walkthrough below.
@@ -72,7 +82,7 @@ Sepolia" too. Copy the HTTPS RPC URL for each.
 Install [MetaMask](https://metamask.io/) (or any wallet app), create a **new** wallet you'll use
 only for this bot, and export its private key (MetaMask: Account details → Show private key).
 Keep this private key out of chat, screenshots, and anywhere public — GitHub Secrets (next
-step) is the only place it should go.
+step) is the only place it should go. The scheduled scan workflow deliberately never receives it.
 
 ### 3. Set your GitHub repository secrets
 
@@ -83,26 +93,37 @@ Add these (see [`.env.example`](.env.example) for the exact shape of the JSON on
 | --- | --- | --- |
 | `ARBITRUM_RPC_URL` | scanning | from step 1 |
 | `ARBITRUM_SEPOLIA_RPC_URL` | testnet deploy | from step 1, only if testing first |
-| `DRY_RUN` | always | `true` until you're ready to go live |
-| `PRIVATE_KEY` | deploying / going live | your burner wallet's key, from step 2 |
+| `PRIVATE_KEY` | deploying / live execution | your burner wallet's key, from step 2; never exposed to the scheduled scan |
 | `AAVE_POOL_ADDRESSES_PROVIDER` | deploying | see step 4 |
-| `CONTRACT_ADDRESS` | going live | filled in after you deploy (step 5) |
+| `CONTRACT_ADDRESS` | live execution (separate workflow) | filled in after you deploy (step 5); not used by the scheduled scan |
 | `ETH_USD_ROUTE_JSON` | USD profit filtering | see step 4 |
 | `PAIRS_CONFIG_JSON` | scanning | see step 4 |
 
+The **Flash arb scan** workflow does not read `DRY_RUN`, `PRIVATE_KEY`, or `CONTRACT_ADDRESS`: it
+always runs read-only with `DRY_RUN=true` and never receives the wallet secrets. Those are only
+needed for deployment and for the separate live-execution workflow.
+
 ### 4. Look up current addresses
 
-Contract addresses on Arbitrum can change between protocol versions, so this repo deliberately
-does **not** hardcode them — a wrong guess could silently point the bot at the wrong contract.
-Look these up yourself, from the projects' own docs, in mobile Safari:
+Contract addresses on Arbitrum can change between protocol versions, so this repo keeps them in
+configuration rather than in the bot/contract code — a wrong guess could silently point the bot at
+the wrong contract. The addresses below are verified examples from the projects' own docs; re-check
+them before deploying:
 
 - **Aave V3 PoolAddressesProvider (Arbitrum)**:
-  <https://docs.aave.com/developers/deployed-contracts/v3-mainnet/arbitrum>
-- **Uniswap V3 SwapRouter02 & QuoterV2 (Arbitrum)**:
-  <https://docs.uniswap.org/contracts/v3/reference/deployments/arbitrum-deployments>
+  <https://aave.com/docs/resources/addresses>
+- **Uniswap V3 SwapRouter (original) & QuoterV2 (Arbitrum)**:
+  <https://developers.uniswap.org/docs/protocols/v3/deployments/v3-arbitrum-deployments>
 - **SushiSwap V2 Router (Arbitrum)** or **Camelot V2 Router** (either works as your V2-style
   leg): check each project's docs/GitHub for their current Arbitrum deployment address.
 - **WETH / USDC on Arbitrum**: also listed on the Uniswap/Aave docs pages above.
+
+The executor's `ISwapRouterV3Like` interface matches the **original** Uniswap V3 SwapRouter
+(`ExactInputSingleParams` has 8 fields, including `deadline`). On Arbitrum One that router is
+`0xE592427A0AEce92De3Edee1F18E0157C05861564`. **SwapRouter02 is incompatible** with this interface:
+its `ExactInputSingleParams` has no `deadline` field (SwapRouter02 enforces the deadline through
+`multicall(uint256 deadline, bytes[] data)`), so the function selector differs and a call built for
+the original SwapRouter would revert.
 
 Use these to fill in `AAVE_POOL_ADDRESSES_PROVIDER`, and the `PAIRS_CONFIG_JSON` /
 `ETH_USD_ROUTE_JSON` secrets (templates and field explanations are in
@@ -117,19 +138,22 @@ wallet before running it), confirm it works, then re-run with `arbitrum` for the
 (this needs a small amount of real ETH in your burner wallet for gas).
 
 Open the workflow run's log and copy the printed contract address into your `CONTRACT_ADDRESS`
-secret.
+secret for the separate live-execution workflow. The scheduled scan does not need it.
 
 ### 6. Watch it scan
 
 The **Flash arb scan** workflow runs automatically every ~10 minutes (and you can trigger it by
-hand from the Actions tab). With `DRY_RUN=true`, check its logs — you'll see every trade size it
+hand from the Actions tab). It is read-only: `DRY_RUN` is hard-coded to `true` and the job has no
+access to `PRIVATE_KEY` or `CONTRACT_ADDRESS`. Check its logs — you'll see every trade size it
 checked and any opportunities found, with zero cost or risk.
 
 ### 7. Go live (optional, real money)
 
-Once you're comfortable with what you're seeing in simulation mode: fund your burner wallet with
-a small amount of real ETH on Arbitrum, set the `DRY_RUN` secret to `false`, and the next
-scheduled run will start submitting real transactions when it finds something profitable.
+Live execution is intentionally kept out of the scheduled scan and will be handled by a separate
+workflow. The scanner never receives wallet secrets and cannot submit a transaction. Real trading
+requires a dedicated live-execution workflow that sets `DRY_RUN=false`, exposes `PRIVATE_KEY` and
+`CONTRACT_ADDRESS` only to that job, and uses a burner wallet funded with a small amount of ETH
+on Arbitrum for gas.
 
 ## Configuring pairs & DEXs
 
@@ -142,9 +166,10 @@ across chosen trade sizes. Full field reference and a worked example are in
   else, it skips USD filtering and relies on the raw on-chain profit check instead.
 - `ETH_USD_ROUTE_JSON` prices gas in USD by quoting 1 WETH against a stablecoin on a real DEX
   pool — no external price API or key needed.
-- A "V3" leg needs both `router` (the SwapRouter used to execute the swap) and `quoter` (the
-  separate QuoterV2 contract used only to check prices) — Uniswap V3's SwapRouter doesn't expose
-  a quoting function itself.
+- A "V3" leg needs both `router` (the **original** Uniswap V3 SwapRouter used to execute the
+  swap) and `quoter` (the separate QuoterV2 contract used only to check prices) — the SwapRouter
+  doesn't expose a quoting function itself. Do not use SwapRouter02: its `ExactInputSingleParams`
+  has no `deadline` field, so it is incompatible with the executor's `ISwapRouterV3Like` interface.
 
 ## Try it risk-free on a local mock network
 

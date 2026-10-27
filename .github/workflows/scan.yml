@@ -1,5 +1,10 @@
 name: Flash arb scan
 
+# READ-ONLY: this scheduled workflow always runs with DRY_RUN=true and deliberately has no access
+# to PRIVATE_KEY or CONTRACT_ADDRESS. It only scans and logs opportunities. Live execution is
+# intentionally kept out of this workflow and will be handled by a separate, explicitly configured
+# workflow that exposes wallet secrets only to that job.
+
 on:
   # Runs on a schedule (UTC, GitHub's cron). Every 10 minutes is a reasonable free-tier default -
   # tighten it once you've confirmed the bot behaves the way you expect. GitHub Actions schedules
@@ -30,14 +35,13 @@ jobs:
       - name: Run scanner
         env:
           ARBITRUM_RPC_URL: ${{ secrets.ARBITRUM_RPC_URL }}
-          DRY_RUN: ${{ secrets.DRY_RUN || 'true' }}
-          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
-          CONTRACT_ADDRESS: ${{ secrets.CONTRACT_ADDRESS }}
+          DRY_RUN: "true"
           AAVE_FLASH_LOAN_PREMIUM_BPS: ${{ secrets.AAVE_FLASH_LOAN_PREMIUM_BPS || '5' }}
           MIN_PROFIT_USD: ${{ secrets.MIN_PROFIT_USD || '5' }}
           MIN_PROFIT_BUFFER_BPS: ${{ secrets.MIN_PROFIT_BUFFER_BPS || '5000' }}
           SLIPPAGE_BPS: ${{ secrets.SLIPPAGE_BPS || '50' }}
           GAS_LIMIT_ESTIMATE: ${{ secrets.GAS_LIMIT_ESTIMATE || '700000' }}
+          MAX_GAS_LIMIT: ${{ secrets.MAX_GAS_LIMIT || '1000000' }}
           GAS_PRICE_BUFFER_PCT: ${{ secrets.GAS_PRICE_BUFFER_PCT || '20' }}
           ETH_USD_ROUTE_JSON: ${{ secrets.ETH_USD_ROUTE_JSON }}
           PAIRS_CONFIG_JSON: ${{ secrets.PAIRS_CONFIG_JSON }}

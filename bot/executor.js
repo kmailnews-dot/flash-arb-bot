@@ -53,14 +53,38 @@ async function maybeExecute({ opportunity, provider, config }) {
   };
 
   try {
-    const tx = await contract.startArbitrage(pair.borrowedToken.address, amountIn, params);
-    console.log(`  [SUBMITTED] tx ${tx.hash}`);
+    await contract.startArbitrage.staticCall(pair.borrowedToken.address, amountIn, params);
+  } catch (err) {
+    const message = err.shortMessage || err.message;
+    console.log(`  [SIMULATION FAILED] ${message} - transaction not sent.`);
+    return { submitted: false, simulated: false, error: message };
+  }
+
+  let estimatedGas;
+  try {
+    estimatedGas = await contract.startArbitrage.estimateGas(pair.borrowedToken.address, amountIn, params);
+  } catch (err) {
+    const message = err.shortMessage || err.message;
+    console.log(`  [GAS ESTIMATION FAILED] ${message} - transaction not sent.`);
+    return { submitted: false, simulated: true, error: message };
+  }
+
+  if (estimatedGas > config.maxGasLimit) {
+    const message = `Estimated gas ${estimatedGas} exceeds MAX_GAS_LIMIT ${config.maxGasLimit}`;
+    console.log(`  [SKIPPED] ${message} - transaction not sent.`);
+    return { submitted: false, simulated: true, estimatedGas, error: message };
+  }
+
+  try {
+    const tx = await contract.startArbitrage(pair.borrowedToken.address, amountIn, params, { gasLimit: estimatedGas });
+    console.log(`  [SUBMITTED] tx ${tx.hash} (gas limit ${estimatedGas})`);
     const receipt = await tx.wait();
     console.log(`  [CONFIRMED] block ${receipt.blockNumber}, status ${receipt.status === 1 ? "success" : "FAILED"}`);
-    return { submitted: true, txHash: tx.hash, receipt };
+    return { submitted: true, txHash: tx.hash, receipt, estimatedGas };
   } catch (err) {
-    console.error(`  [FAILED] ${err.shortMessage || err.message}`);
-    return { submitted: true, error: err.shortMessage || err.message };
+    const message = err.shortMessage || err.message;
+    console.error(`  [FAILED] ${message}`);
+    return { submitted: true, error: message, estimatedGas };
   }
 }
 

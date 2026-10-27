@@ -115,6 +115,111 @@ describe("FlashArbExecutor", function () {
     await expect(executor.startArbitrage(borrowAddr, amount, params)).to.be.revertedWith("NOT_PROFITABLE");
   });
 
+  it("rejects a leg2 that does not return the borrowed token", async function () {
+    const { borrowToken, midToken, executor, routerA, routerB } = await deployFixture();
+
+    const borrowAddr = await borrowToken.getAddress();
+    const midAddr = await midToken.getAddress();
+
+    const params = buildParams({
+      routerA: await routerA.getAddress(),
+      routerB: await routerB.getAddress(),
+      midToken: midAddr,
+      minProfit: 0n,
+      deadline: (await ethers.provider.getBlock("latest")).timestamp + 3600,
+    });
+    params.leg2.tokenOut = midAddr;
+
+    await expect(executor.startArbitrage(borrowAddr, ethers.parseEther("1"), params)).to.be.revertedWith(
+      "LEG2_TOKEN_OUT_MISMATCH"
+    );
+  });
+
+  it("rejects an intermediate token equal to the borrowed token", async function () {
+    const { borrowToken, midToken, executor, routerA, routerB } = await deployFixture();
+
+    const borrowAddr = await borrowToken.getAddress();
+    const midAddr = await midToken.getAddress();
+
+    const params = buildParams({
+      routerA: await routerA.getAddress(),
+      routerB: await routerB.getAddress(),
+      midToken: midAddr,
+      minProfit: 0n,
+      deadline: (await ethers.provider.getBlock("latest")).timestamp + 3600,
+    });
+    params.leg1.tokenOut = borrowAddr;
+    params.leg2.tokenOut = borrowAddr;
+
+    await expect(executor.startArbitrage(borrowAddr, ethers.parseEther("1"), params)).to.be.revertedWith(
+      "INVALID_INTERMEDIATE_TOKEN"
+    );
+  });
+
+  it("does not trust a router-reported amountOut that exceeds the actual balance", async function () {
+    const { borrowToken, midToken, executor, routerA } = await deployFixture();
+
+    const borrowAddr = await borrowToken.getAddress();
+    const midAddr = await midToken.getAddress();
+
+    await routerA.setRate(borrowAddr, midAddr, RATE_1_TO_1);
+
+    const MockMisreportingRouter = await ethers.getContractFactory("MockMisreportingRouter");
+    const misreportingRouter = await MockMisreportingRouter.deploy();
+    await misreportingRouter.setAmounts(ethers.parseEther("999"), ethers.parseEther("2000"));
+
+    const amount = ethers.parseEther("1000");
+    const deadline = (await ethers.provider.getBlock("latest")).timestamp + 3600;
+    const params = buildParams({
+      routerA: await routerA.getAddress(),
+      routerB: await misreportingRouter.getAddress(),
+      midToken: midAddr,
+      minProfit: 0n,
+      deadline,
+    });
+    params.leg2.tokenOut = borrowAddr;
+
+    await expect(executor.startArbitrage(borrowAddr, amount, params)).to.be.revertedWith("NOT_PROFITABLE");
+  });
+
+  it("does not count pre-existing borrowed-token balances as profit", async function () {
+    const { owner, borrowToken, midToken, executor, routerA, routerB } = await deployFixture();
+
+    const borrowAddr = await borrowToken.getAddress();
+    const midAddr = await midToken.getAddress();
+
+    await routerA.setRate(borrowAddr, midAddr, RATE_1_TO_1);
+    await routerB.setRate(midAddr, borrowAddr, ethers.parseEther("1.02"));
+
+    const preExisting = ethers.parseEther("100");
+    await borrowToken.mint(await executor.getAddress(), preExisting);
+
+    const amount = ethers.parseEther("1000");
+    const deadline = (await ethers.provider.getBlock("latest")).timestamp + 3600;
+    const params = buildParams({
+      routerA: await routerA.getAddress(),
+      routerB: await routerB.getAddress(),
+      midToken: midAddr,
+      minProfit: ethers.parseEther("1"),
+      deadline,
+    });
+    params.leg2.tokenOut = borrowAddr;
+
+    const premiumBps = await (await ethers.getContractAt("MockPool", await executor.POOL())).premiumBps();
+    const premium = (amount * premiumBps) / 10000n;
+    const expectedFinalOut = (amount * ethers.parseEther("1.02")) / RATE_1_TO_1;
+    const expectedProfit = expectedFinalOut - (amount + premium);
+
+    const ownerBalanceBefore = await borrowToken.balanceOf(owner.address);
+
+    await expect(executor.startArbitrage(borrowAddr, amount, params))
+      .to.emit(executor, "ArbitrageExecuted")
+      .withArgs(await executor.getAddress(), borrowAddr, amount, premium, expectedProfit);
+
+    expect((await borrowToken.balanceOf(owner.address)) - ownerBalanceBefore).to.equal(expectedProfit);
+    expect(await borrowToken.balanceOf(await executor.getAddress())).to.equal(preExisting);
+  });
+
   it("only lets the owner start an arbitrage", async function () {
     const { other, borrowToken, midToken, executor, routerA, routerB } = await deployFixture();
 
