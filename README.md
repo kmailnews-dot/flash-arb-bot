@@ -44,7 +44,7 @@ attempts that clearly won't clear it.
 
 The scheduled GitHub Actions workflow runs this scanner in read-only mode: `DRY_RUN` is
 hard-coded to `true` and the job never receives wallet secrets. Live submission is isolated in a
-separate workflow.
+separate, manual-only workflow (`.github/workflows/live.yml`).
 
 Before sending a live transaction, the bot simulates it with `staticCall` and estimates its gas
 with `estimateGas`. If the simulation reverts or the estimate exceeds the configurable
@@ -94,14 +94,19 @@ Add these (see [`.env.example`](.env.example) for the exact shape of the JSON on
 | `ARBITRUM_RPC_URL` | scanning | from step 1 |
 | `ARBITRUM_SEPOLIA_RPC_URL` | testnet deploy | from step 1, only if testing first |
 | `PRIVATE_KEY` | deploying / live execution | your burner wallet's key, from step 2; never exposed to the scheduled scan |
-| `AAVE_POOL_ADDRESSES_PROVIDER` | deploying | see step 4 |
-| `CONTRACT_ADDRESS` | live execution (separate workflow) | filled in after you deploy (step 5); not used by the scheduled scan |
+| `AAVE_POOL_ADDRESSES_PROVIDER` | deploying | Aave V3 provider for the target network; see step 4 |
+| `CONTRACT_ADDRESS` | live execution on Arbitrum One | filled in after you deploy (step 5); not used by the scheduled scan |
+| `CONTRACT_ADDRESS_SEPOLIA` | live execution on Arbitrum Sepolia | filled in after the testnet deploy (step 5); not used by the scheduled scan |
 | `ETH_USD_ROUTE_JSON` | USD profit filtering | see step 4 |
 | `PAIRS_CONFIG_JSON` | scanning | see step 4 |
 
-The **Flash arb scan** workflow does not read `DRY_RUN`, `PRIVATE_KEY`, or `CONTRACT_ADDRESS`: it
-always runs read-only with `DRY_RUN=true` and never receives the wallet secrets. Those are only
-needed for deployment and for the separate live-execution workflow.
+The **Flash arb scan** workflow does not read `DRY_RUN`, `PRIVATE_KEY`, or the contract-address
+secrets: it always runs read-only with `DRY_RUN=true` and never receives the wallet secrets. Those
+are only needed for deployment and for the separate live-execution workflow.
+
+The deploy workflow reads a single `AAVE_POOL_ADDRESSES_PROVIDER` secret for both targets, so set it
+to the Aave provider for the network you are deploying to and change it again before deploying to
+the other network.
 
 ### 4. Look up current addresses
 
@@ -137,8 +142,20 @@ Go to this repo's **Actions** tab → **Deploy FlashArbExecutor** → **Run work
 wallet before running it), confirm it works, then re-run with `arbitrum` for the real deployment
 (this needs a small amount of real ETH in your burner wallet for gas).
 
-Open the workflow run's log and copy the printed contract address into your `CONTRACT_ADDRESS`
-secret for the separate live-execution workflow. The scheduled scan does not need it.
+Before each run, make sure `AAVE_POOL_ADDRESSES_PROVIDER` is the Aave V3 provider for the selected
+network. After the Sepolia run, copy the printed address into `CONTRACT_ADDRESS_SEPOLIA`; after the
+Arbitrum One run, copy it into `CONTRACT_ADDRESS`. The scheduled scan does not need either.
+
+Verify a deployment against the current source before enabling live execution:
+
+```bash
+CONTRACT_ADDRESS=0xSepoliaAddress npx hardhat run scripts/deploy-live.js --network arbitrumSepolia
+CONTRACT_ADDRESS=0xArbitrumOneAddress npx hardhat run scripts/deploy-live.js --network arbitrum
+```
+
+The script compares the on-chain runtime bytecode (ignoring immutable slots) against the freshly
+compiled `FlashArbExecutor` artifact and exits non-zero if the address still points at an older
+version.
 
 ### 6. Watch it scan
 
@@ -149,11 +166,16 @@ checked and any opportunities found, with zero cost or risk.
 
 ### 7. Go live (optional, real money)
 
-Live execution is intentionally kept out of the scheduled scan and will be handled by a separate
-workflow. The scanner never receives wallet secrets and cannot submit a transaction. Real trading
-requires a dedicated live-execution workflow that sets `DRY_RUN=false`, exposes `PRIVATE_KEY` and
-`CONTRACT_ADDRESS` only to that job, and uses a burner wallet funded with a small amount of ETH
-on Arbitrum for gas.
+Live execution lives in [`.github/workflows/live.yml`](.github/workflows/live.yml) and is
+manual-only by design: it has a `workflow_dispatch` trigger and no cron. It is the only workflow
+that receives `PRIVATE_KEY`. Before trading, it runs `scripts/deploy-live.js` to verify that the
+configured contract matches the current `FlashArbExecutor` source, then runs one scan cycle with
+`DRY_RUN=false`.
+
+Go to **Actions → Live execution (manual) → Run workflow**, pick the network, and type `EXECUTE`
+to confirm. Start on `arbitrumSepolia`; use `arbitrum` only after the testnet deployment and
+verification pass. The burner wallet must hold a small amount of ETH on the selected network for
+gas.
 
 ## Configuring pairs & DEXs
 
