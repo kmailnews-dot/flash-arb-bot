@@ -3,6 +3,19 @@ const { quoteLeg, quoteV2, quoteV3 } = require("./prices");
 
 const BPS_DENOMINATOR = 10000n;
 
+function redactUrls(value) {
+  if (typeof value !== "string") return value;
+  return value.replace(/https:\/\/[^\s]+/g, "[REDACTED_URL]");
+}
+
+function sanitizeError(err) {
+  const source = err || {};
+  return {
+    code: redactUrls(source.code ?? null),
+    shortMessage: redactUrls(source.shortMessage ?? source.message ?? null),
+  };
+}
+
 /// Quotes 1 WETH -> a reference stablecoin on a live DEX pool, so gas costs and profit can be
 /// priced in USD without paying for an external price API. Returns null if ethUsdRoute isn't set.
 ///
@@ -12,18 +25,21 @@ const BPS_DENOMINATOR = 10000n;
 async function getEthUsdPrice(provider, ethUsdRoute) {
   if (!ethUsdRoute) return null;
 
+  const routeAddress = ethUsdRoute.kind === "V3" ? ethUsdRoute.quoter : ethUsdRoute.router;
+
   try {
     const oneEth = ethers.parseUnits("1", 18);
     const out =
       ethUsdRoute.kind === "V2"
         ? await quoteV2(provider, ethUsdRoute.router, ethUsdRoute.weth, ethUsdRoute.usdc, oneEth)
-        : await quoteV3(provider, ethUsdRoute.router, ethUsdRoute.weth, ethUsdRoute.usdc, ethUsdRoute.fee, oneEth);
+        : await quoteV3(provider, ethUsdRoute.quoter, ethUsdRoute.weth, ethUsdRoute.usdc, ethUsdRoute.fee, oneEth);
 
     return Number(ethers.formatUnits(out, ethUsdRoute.usdcDecimals));
   } catch (err) {
-    const message = err.shortMessage || err.message;
+    const { shortMessage } = sanitizeError(err);
+    const message = shortMessage ?? "unknown error";
     console.warn(
-      `WARNING: could not quote ETH/USD via ${ethUsdRoute.kind} router ${ethUsdRoute.router}: ${message}. ` +
+      `WARNING: could not quote ETH/USD via ${ethUsdRoute.kind} route ${routeAddress}: ${message}. ` +
         "USD filtering is disabled for this run; the bot will keep scanning using raw on-chain profit only. " +
         "Check that ETH_USD_ROUTE_JSON contains addresses for the network configured in ARBITRUM_RPC_URL."
     );
@@ -34,6 +50,7 @@ async function getEthUsdPrice(provider, ethUsdRoute) {
 /// Estimates the USD cost of submitting the arbitrage transaction.
 function estimateGasCostUsd({ gasPriceWei, gasLimit, gasPriceBufferPct, ethUsdPrice }) {
   if (ethUsdPrice === null) return null;
+  if (gasPriceWei === null || gasPriceWei === undefined || gasPriceWei === 0n) return null;
   const bufferedGasPrice = (gasPriceWei * BigInt(100 + gasPriceBufferPct)) / 100n;
   const gasCostWei = bufferedGasPrice * gasLimit;
   return Number(ethers.formatUnits(gasCostWei, 18)) * ethUsdPrice;
@@ -96,7 +113,7 @@ async function scanPair({ provider, pair, config, gasPriceWei, ethUsdPrice }) {
     try {
       results.push(await scanTradeSize({ provider, pair, tradeSizeHuman, config, gasPriceWei, ethUsdPrice }));
     } catch (err) {
-      results.push({ pair, tradeSizeHuman, error: err.message });
+      results.push({ pair, tradeSizeHuman, error: sanitizeError(err) });
     }
   }
   return results.sort((a, b) => {
@@ -106,4 +123,4 @@ async function scanPair({ provider, pair, config, gasPriceWei, ethUsdPrice }) {
   });
 }
 
-module.exports = { getEthUsdPrice, scanTradeSize, scanPair };
+module.exports = { getEthUsdPrice, estimateGasCostUsd, sanitizeError, scanTradeSize, scanPair };

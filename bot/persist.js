@@ -14,6 +14,19 @@ function toNullableString(value) {
   return value === undefined || value === null ? null : String(value);
 }
 
+function redactUrls(value) {
+  return typeof value === "string" ? value.replace(/https:\/\/[^\s]+/g, "[REDACTED_URL]") : value;
+}
+
+function persistableError(error) {
+  if (typeof error === "string") return redactUrls(error);
+  if (!error || typeof error !== "object") return null;
+  return {
+    code: toNullableString(redactUrls(error.code)),
+    shortMessage: toNullableString(redactUrls(error.shortMessage)),
+  };
+}
+
 async function appendScanResult(logPath = DEFAULT_SCAN_LOG_PATH, result, { chainId, timestamp = new Date() } = {}) {
   const pair = result.pair || {};
   const borrowedToken = pair.borrowedToken || {};
@@ -30,7 +43,7 @@ async function appendScanResult(logPath = DEFAULT_SCAN_LOG_PATH, result, { chain
     netProfitUsd: toNullableNumber(result.netProfitUsd),
     gasCostUsd: toNullableNumber(result.gasCostUsd),
     isOpportunity: Boolean(result.isOpportunity),
-    error: toNullableString(result.error),
+    error: persistableError(result.error),
   };
 
   await fs.mkdir(path.dirname(logPath), { recursive: true });

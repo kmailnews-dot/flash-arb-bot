@@ -1,4 +1,5 @@
 require("dotenv").config();
+const { ethers } = require("ethers");
 
 function required(name) {
   const value = process.env[name];
@@ -21,6 +22,50 @@ function optionalNumber(name, fallback) {
   return value === undefined || value === "" ? fallback : Number(value);
 }
 
+function validateAddress(value, path) {
+  try {
+    return ethers.getAddress(value);
+  } catch (err) {
+    throw new Error(`Invalid address at ${path}: ${value} (${err.message})`);
+  }
+}
+
+function validatePairs(pairs) {
+  return pairs.map((pair, index) => {
+    const prefix = `PAIRS_CONFIG_JSON[${index}]`;
+    if (!pair || typeof pair !== "object") {
+      throw new Error(`${prefix} must be an object.`);
+    }
+    if (!pair.borrowedToken || !pair.intermediateToken || !pair.legOut || !pair.legBack) {
+      throw new Error(`${prefix} must define borrowedToken, intermediateToken, legOut and legBack.`);
+    }
+
+    const borrowed = validateAddress(pair.borrowedToken.address, `${prefix}.borrowedToken.address`);
+    const intermediate = validateAddress(pair.intermediateToken.address, `${prefix}.intermediateToken.address`);
+
+    validateAddress(pair.legOut.router, `${prefix}.legOut.router`);
+    const legOutTokenOut = validateAddress(pair.legOut.tokenOut, `${prefix}.legOut.tokenOut`);
+    if (pair.legOut.quoter !== undefined) {
+      validateAddress(pair.legOut.quoter, `${prefix}.legOut.quoter`);
+    }
+
+    validateAddress(pair.legBack.router, `${prefix}.legBack.router`);
+    const legBackTokenOut = validateAddress(pair.legBack.tokenOut, `${prefix}.legBack.tokenOut`);
+    if (pair.legBack.quoter !== undefined) {
+      validateAddress(pair.legBack.quoter, `${prefix}.legBack.quoter`);
+    }
+
+    if (legOutTokenOut !== intermediate) {
+      throw new Error(`${prefix}.legOut.tokenOut must equal intermediateToken.address (${intermediate}).`);
+    }
+    if (legBackTokenOut !== borrowed) {
+      throw new Error(`${prefix}.legBack.tokenOut must equal borrowedToken.address (${borrowed}).`);
+    }
+
+    return pair;
+  });
+}
+
 function loadPairs() {
   const raw = required("PAIRS_CONFIG_JSON");
   let parsed;
@@ -32,20 +77,41 @@ function loadPairs() {
   if (!Array.isArray(parsed) || parsed.length === 0) {
     throw new Error("PAIRS_CONFIG_JSON must be a non-empty array. See .env.example for the shape.");
   }
-  return parsed;
+  return validatePairs(parsed);
 }
 
 function loadEthUsdRoute() {
   const raw = process.env.ETH_USD_ROUTE_JSON;
   if (!raw) return null;
+  let parsed;
   try {
-    return JSON.parse(raw);
+    parsed = JSON.parse(raw);
   } catch (err) {
     throw new Error(`ETH_USD_ROUTE_JSON is not valid JSON: ${err.message}`);
   }
+  if (parsed.kind === "V3") {
+    if (!parsed.quoter) {
+      throw new Error(
+        'ETH_USD_ROUTE_JSON with kind "V3" requires a "quoter" address (Uniswap V3 QuoterV2); ' +
+          '"router" alone cannot quote prices.'
+      );
+    }
+    validateAddress(parsed.quoter, "ETH_USD_ROUTE_JSON.quoter");
+  }
+  return parsed;
 }
 
 const dryRun = optionalString("DRY_RUN", "true").toLowerCase() !== "false";
+
+const slippageBps = optionalNumber("SLIPPAGE_BPS", 50);
+if (!Number.isInteger(slippageBps) || slippageBps < 1 || slippageBps > 500) {
+  throw new Error("SLIPPAGE_BPS must be an integer between 1 and 500.");
+}
+
+const minProfitBufferBps = optionalNumber("MIN_PROFIT_BUFFER_BPS", 5000);
+if (!Number.isInteger(minProfitBufferBps) || minProfitBufferBps < 1 || minProfitBufferBps > 10000) {
+  throw new Error("MIN_PROFIT_BUFFER_BPS must be an integer between 1 and 10000.");
+}
 
 const config = {
   rpcUrl: required("ARBITRUM_RPC_URL"),
@@ -58,8 +124,8 @@ const config = {
   aaveFlashLoanPremiumBps: BigInt(optionalNumber("AAVE_FLASH_LOAN_PREMIUM_BPS", 5)), // 0.05% Aave V3 default
 
   minProfitUsd: optionalNumber("MIN_PROFIT_USD", 5),
-  minProfitBufferBps: BigInt(optionalNumber("MIN_PROFIT_BUFFER_BPS", 5000)), // require on-chain minProfit >= 50% of the off-chain estimate, to absorb slippage/front-running between quote and execution
-  slippageBps: BigInt(optionalNumber("SLIPPAGE_BPS", 50)), // 0.5% per-leg slippage tolerance for minAmountOut
+  minProfitBufferBps: BigInt(minProfitBufferBps), // require on-chain minProfit >= 50% of the off-chain estimate, to absorb slippage/front-running between quote and execution
+  slippageBps: BigInt(slippageBps), // 0.5% per-leg slippage tolerance for minAmountOut
 
   gasLimitEstimate: BigInt(optionalNumber("GAS_LIMIT_ESTIMATE", 700000)),
   maxGasLimit: BigInt(optionalNumber("MAX_GAS_LIMIT", 1000000)),

@@ -65,4 +65,29 @@ describe("bot/persist appendScanResult", function () {
 
     fs.rmSync(logDir, { recursive: true, force: true });
   });
+
+  it("never persists raw error.message or an RPC URL containing a secret", async function () {
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-persist-secret-"));
+    const logPath = path.join(logDir, "scans.jsonl");
+    const pair = {
+      label: "secret pair",
+      borrowedToken: { symbol: "WETH", decimals: 18 },
+    };
+
+    await appendScanResult(
+      logPath,
+      {
+        pair,
+        tradeSizeHuman: "1",
+        error: { message: "https://alchemy.com/v2/SECRET_KEY", code: "X" },
+      },
+      { chainId: 42161 }
+    );
+
+    const contents = fs.readFileSync(logPath, "utf8");
+    expect(contents).to.not.include("SECRET_KEY");
+    expect(JSON.parse(contents.trim()).error).to.deep.equal({ code: "X", shortMessage: null });
+
+    fs.rmSync(logDir, { recursive: true, force: true });
+  });
 });

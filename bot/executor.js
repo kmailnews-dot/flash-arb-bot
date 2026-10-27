@@ -13,10 +13,31 @@ const {
 } = require("./guards");
 
 const BPS_DENOMINATOR = 10000n;
+const WEI_PER_ETHER = 10n ** 18n;
+const GAS_COST_MARGIN_BPS = 11000n;
 const DEX_KIND = { V2: 0, V3: 1 };
 
 function withSlippage(amount, slippageBps) {
   return (amount * (BPS_DENOMINATOR - slippageBps)) / BPS_DENOMINATOR;
+}
+
+function gasCostInBorrowedToken({ gasCostWei, pair, config }) {
+  const borrowedToken = pair.borrowedToken || {};
+
+  if (borrowedToken.isStable === true) {
+    const scale = 10n ** BigInt(borrowedToken.decimals ?? 18);
+    return (gasCostWei * scale) / WEI_PER_ETHER;
+  }
+
+  if (borrowedToken.isWeth === true) {
+    const ethUsdPrice = Number(config.ethUsdPrice);
+    if (!Number.isFinite(ethUsdPrice) || ethUsdPrice <= 0) return null;
+    const WETH_PRICE_IN_USD = ethUsdPrice;
+    const inTokenUnits = (Number(gasCostWei) / 1e18 / ethUsdPrice) * WETH_PRICE_IN_USD;
+    return BigInt(Math.ceil(inTokenUnits * 10 ** Number(borrowedToken.decimals ?? 18)));
+  }
+
+  return null;
 }
 
 function buildLeg(leg, quotedOut, slippageBps) {
@@ -177,13 +198,35 @@ async function maybeExecute({ opportunity, provider, config }) {
   }
 
   const feeData = await provider.getFeeData();
-  const gasPriceWei = feeData.gasPrice ?? feeData.maxFeePerGas ?? 0n;
-  const estimatedGasCostWei = estimatedGas * gasPriceWei;
+  const gasPriceWei = feeData.gasPrice ?? feeData.maxFeePerGas;
+  if (!gasPriceWei || gasPriceWei === 0n) {
+    console.log("  [SKIPPED] gasPrice is 0 - transaction not sent.");
+    return { submitted: false, error: "gasPrice is 0" };
+  }
+
+  const gasCostWei = estimatedGas * gasPriceWei;
+  const gasCostInToken = gasCostInBorrowedToken({ gasCostWei, pair, config });
+  if (gasCostInToken === null) {
+    const token = pair.borrowedToken?.symbol ?? pair.borrowedToken?.address ?? "unknown";
+    const message = `[SKIPPED] cannot price gas for token ${token} — enable ETH_USD_ROUTE_JSON`;
+    console.log(`  ${message} - transaction not sent.`);
+    return { submitted: false, simulated: true, estimatedGas, error: message };
+  }
+
+  const gasFloor = (gasCostInToken * GAS_COST_MARGIN_BPS) / BPS_DENOMINATOR;
+  if (grossProfit < gasFloor) {
+    const message = `[SKIPPED] gas cost exceeds profit (gross=${grossProfit}, gas=${gasCostInToken})`;
+    console.log(`  ${message} - transaction not sent.`);
+    return { submitted: false, simulated: true, estimatedGas, error: message };
+  }
+
+  const bufferedMinProfit = (grossProfit * config.minProfitBufferBps) / BPS_DENOMINATOR;
+  params.minProfit = bufferedMinProfit > gasFloor ? bufferedMinProfit : gasFloor;
 
   const dailyGas = await runGuard("daily gas", () =>
     checkDailyGas({
       filePath: settings.gasSpentPath,
-      estimatedGasCostWei,
+      estimatedGasCostWei: gasCostWei,
       maxDailyGasEth: settings.maxDailyGasEth,
     })
   );
@@ -195,7 +238,7 @@ async function maybeExecute({ opportunity, provider, config }) {
   // Reserve the estimated cost before broadcasting, so a crash after submission still counts
   // against today's budget. It is reconciled to the actual receipt cost below.
   const reserved = await runGuard("gas reservation", () =>
-    addGasSpent({ filePath: settings.gasSpentPath, deltaWei: estimatedGasCostWei })
+    addGasSpent({ filePath: settings.gasSpentPath, deltaWei: gasCostWei })
   );
   if (!reserved.ok) {
     return { submitted: false, guard: "dailyGas", error: reserved.error };
@@ -206,7 +249,7 @@ async function maybeExecute({ opportunity, provider, config }) {
     tx = await contract.startArbitrage(pair.borrowedToken.address, amountIn, params, { gasLimit: estimatedGas });
   } catch (err) {
     const message = err.shortMessage || err.message;
-    await addGasSpentSafely(settings, -estimatedGasCostWei);
+    await addGasSpentSafely(settings, -gasCostWei);
     await recordFailureSafely(settings);
     console.error(`  [FAILED] ${message}`);
     return { submitted: false, error: message, estimatedGas };
@@ -216,7 +259,7 @@ async function maybeExecute({ opportunity, provider, config }) {
   try {
     const receipt = await tx.wait();
     const actualGasCostWei = receipt.gasUsed * (receipt.gasPrice ?? gasPriceWei);
-    await addGasSpentSafely(settings, actualGasCostWei - estimatedGasCostWei);
+    await addGasSpentSafely(settings, actualGasCostWei - gasCostWei);
 
     if (receipt.status !== 1) {
       const message = `Transaction ${tx.hash} reverted on-chain (status ${receipt.status})`;
@@ -232,7 +275,7 @@ async function maybeExecute({ opportunity, provider, config }) {
     const message = err.shortMessage || err.message;
     if (err.receipt) {
       const actualGasCostWei = err.receipt.gasUsed * (err.receipt.gasPrice ?? gasPriceWei);
-      await addGasSpentSafely(settings, actualGasCostWei - estimatedGasCostWei);
+      await addGasSpentSafely(settings, actualGasCostWei - gasCostWei);
     }
     await recordFailureSafely(settings);
     console.error(`  [FAILED] ${message}`);

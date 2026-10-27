@@ -41,7 +41,7 @@ describe("bot/executor maybeExecute", function () {
 
     const pair = {
       label: "BOR/MID test pair",
-      borrowedToken: { address: borrowAddr, decimals: 18, symbol: "BOR" },
+      borrowedToken: { address: borrowAddr, decimals: 18, symbol: "BOR", isStable: true },
       intermediateToken: { address: midAddr, decimals: 18, symbol: "MID" },
       legOut: { kind: "V2", router: await routerA.getAddress(), tokenOut: midAddr },
       legBack: { kind: "V3", router: await routerB.getAddress(), tokenOut: borrowAddr, v3Fee: 3000 },
@@ -111,6 +111,22 @@ describe("bot/executor maybeExecute", function () {
     expect(result.submitted).to.equal(false);
     expect(result.simulated).to.equal(false);
     expect(result.error).to.include("NOT_PROFITABLE");
+    expect(await ethers.provider.getTransactionCount(botWallet.address)).to.equal(nonceBefore);
+  });
+
+  it("skips an opportunity whose positive gross profit is below the gas cost", async function () {
+    const { botWallet, opportunity, makeConfig } = await deployFixture();
+    const nonceBefore = await ethers.provider.getTransactionCount(botWallet.address);
+
+    const result = await maybeExecute({
+      opportunity: { ...opportunity, grossProfit: 1n },
+      provider: ethers.provider,
+      config: makeConfig(),
+    });
+
+    expect(result.submitted).to.equal(false);
+    expect(result.estimatedGas).to.be.greaterThan(0n);
+    expect(result.error).to.include("[SKIPPED] gas cost exceeds profit");
     expect(await ethers.provider.getTransactionCount(botWallet.address)).to.equal(nonceBefore);
   });
 
