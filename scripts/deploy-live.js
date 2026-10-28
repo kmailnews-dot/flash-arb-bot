@@ -1,7 +1,13 @@
 const { artifacts, ethers, network } = require("hardhat");
+const { NETWORKS } = require("../bot/networks");
 
 const CONTRACT_NAME = "FlashArbExecutor";
 const CONTRACT_FQN = "contracts/FlashArbExecutor.sol:FlashArbExecutor";
+const EXECUTOR_INVARIANTS_ABI = [
+  "function POOL() view returns (address)",
+  "function ADDRESSES_PROVIDER() view returns (address)",
+  "function owner() view returns (address)",
+];
 const RPC_ENV_BY_NETWORK = {
   arbitrum: "ARBITRUM_RPC_URL",
   arbitrumSepolia: "ARBITRUM_SEPOLIA_RPC_URL",
@@ -79,13 +85,53 @@ async function main() {
 
   if (actualCode !== expectedCode) {
     throw new Error(
-      `Contract at ${address} on ${network.name} does NOT match the current ${CONTRACT_NAME} source. ` +
-        "It is likely the old vulnerable deployment or a build from different sources. " +
+      `Contract at ${address} on ${network.name} bytecode differs from the current compiled ${CONTRACT_NAME} ` +
+        "version (may be an older deployment or a different source). " +
         "Redeploy from the current main branch and update CONTRACT_ADDRESS before live execution."
     );
   }
 
+  const verifiedNetwork = await ethers.provider.getNetwork();
+  const chainKey = Number(verifiedNetwork.chainId);
+  const expectedNetwork = NETWORKS[chainKey];
+  if (!expectedNetwork) {
+    throw new Error(
+      `Unsupported chainId ${verifiedNetwork.chainId}: no Aave pool/provider entry in bot/networks.js.`
+    );
+  }
+
+  const executor = new ethers.Contract(address, EXECUTOR_INVARIANTS_ABI, ethers.provider);
+  const [pool, addressesProvider, owner] = await Promise.all([
+    executor.POOL(),
+    executor.ADDRESSES_PROVIDER(),
+    executor.owner(),
+  ]);
+
+  if (ethers.getAddress(pool) !== ethers.getAddress(expectedNetwork.pool)) {
+    throw new Error(`POOL() mismatch: got ${pool}, expected ${expectedNetwork.pool}`);
+  }
+  if (ethers.getAddress(addressesProvider) !== ethers.getAddress(expectedNetwork.provider)) {
+    throw new Error(
+      `ADDRESSES_PROVIDER() mismatch: got ${addressesProvider}, expected ${expectedNetwork.provider}`
+    );
+  }
+
+  const expectedOwner = process.env.EXPECTED_OWNER;
+  if (typeof expectedOwner === "string" && expectedOwner.trim() !== "") {
+    if (ethers.getAddress(owner) !== ethers.getAddress(expectedOwner.trim())) {
+      throw new Error(`owner() mismatch: got ${owner}, expected ${expectedOwner.trim()}`);
+    }
+  } else {
+    console.warn("WARNING: EXPECTED_OWNER is not set - skipping owner() check.");
+  }
+
   console.log(`Verified ${CONTRACT_NAME} at ${address} on ${network.name}: runtime bytecode matches the current source.`);
+  console.log(
+    `Immutables match bot/networks.js: POOL=${expectedNetwork.pool}, ADDRESSES_PROVIDER=${expectedNetwork.provider}.`
+  );
+  if (typeof expectedOwner === "string" && expectedOwner.trim() !== "") {
+    console.log(`owner() matches EXPECTED_OWNER: ${owner}`);
+  }
   console.log("Verification only - no transaction was sent.");
 }
 

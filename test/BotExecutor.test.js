@@ -630,6 +630,40 @@ describe("bot/executor maybeExecute", function () {
     expect(await ethers.provider.getTransactionCount(botWallet.address)).to.equal(nonceBefore);
   });
 
+  it("reconciles gas spent to the receipt cost when send throws with a receipt", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig({ maxDailyGasEth: 0.01 });
+    const sendError = Object.assign(new Error("transaction reverted on-chain"), {
+      receipt: { gasUsed: 100000n, gasPrice: 5n },
+    });
+    const { contract } = makeSpyContract({ sendError });
+    const provider = {
+      getFeeData: async () => ({ gasPrice: 1n, maxFeePerGas: null }),
+      getNetwork: () => ethers.provider.getNetwork(),
+      getBalance: (address) => ethers.provider.getBalance(address),
+    };
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : opportunity.finalOut;
+
+    const result = await maybeExecute({
+      opportunity,
+      provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+
+    expect(result.submitted).to.equal(false);
+    expect(result.error).to.include("transaction reverted on-chain");
+
+    const reservedGasWei = (300000n * 11500n) / 10000n;
+    const actualGasWei = 100000n * 5n;
+    expect(actualGasWei - reservedGasWei).to.equal(155000n);
+
+    const state = JSON.parse(fs.readFileSync(config.gasSpentPath, "utf8"));
+    expect(state.gasSpentWei).to.equal(actualGasWei.toString());
+  });
+
   it("opens the circuit breaker after five costly send failures with a receipt", async function () {
     const { botWallet, opportunity, makeConfig } = await deployFixture();
     const breakerPath = path.join(

@@ -374,11 +374,13 @@ async function maybeExecute({
     });
   } catch (err) {
     const message = errorMessage(err);
-    await addGasSpentSafely(settings, -gasCostWei);
     if (err.receipt) {
+      const actualGasCostWei = err.receipt.gasUsed * (err.receipt.gasPrice ?? gasPriceWei);
+      await addGasSpentSafely(settings, actualGasCostWei - gasCostWei);
       await recordFailureSafely(settings);
       console.error(`  [FAILED] ${message}`);
     } else {
+      await addGasSpentSafely(settings, -gasCostWei);
       console.error(`  [SKIP FREE] broadcast failed: ${message}`);
     }
     return { submitted: false, error: message, estimatedGas };
