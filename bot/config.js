@@ -184,10 +184,15 @@ function loadEthUsdRoute() {
 
 const dryRun = optionalString("DRY_RUN", "true").toLowerCase() !== "false";
 
-const slippageBps = optionalNumber("SLIPPAGE_BPS", 50);
-if (!Number.isInteger(slippageBps) || slippageBps < 1 || slippageBps > 500) {
-  throw new Error("SLIPPAGE_BPS must be an integer between 1 and 500.");
+function validateSlippageBps() {
+  const value = optionalNumber("SLIPPAGE_BPS", 50);
+  if (!Number.isInteger(value) || value < 1 || value > 200) {
+    throw new Error("SLIPPAGE_BPS must be an integer between 1 and 200.");
+  }
+  return value;
 }
+
+const slippageBps = validateSlippageBps();
 
 const minProfitBufferBps = optionalNumber("MIN_PROFIT_BUFFER_BPS", 5000);
 if (!Number.isInteger(minProfitBufferBps) || minProfitBufferBps < 1 || minProfitBufferBps > 10000) {
@@ -236,3 +241,4 @@ const config = {
 
 module.exports = config;
 module.exports.validatePairs = validatePairs;
+module.exports.validateSlippageBps = validateSlippageBps;
