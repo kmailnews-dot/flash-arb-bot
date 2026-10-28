@@ -1,5 +1,6 @@
 const { ethers } = require("ethers");
 const { FLASH_ARB_EXECUTOR_ABI } = require("./abis");
+const { quoteLeg } = require("./prices");
 const {
   DEFAULT_GAS_SPENT_PATH,
   DEFAULT_CIRCUIT_BREAKER_PATH,
@@ -139,7 +140,15 @@ function isNotProfitableError(err) {
 /// Either logs the opportunity (DRY_RUN, the default) or submits the flash-loan transaction
 /// against the deployed FlashArbExecutor contract. Never throws for an execution failure - a
 /// reverted/failed live trade is caught, logged, and the scan loop continues to the next pair.
-async function maybeExecute({ opportunity, provider, config, contract: injectedContract }) {
+async function maybeExecute({
+  opportunity,
+  provider,
+  config,
+  contract: injectedContract,
+  quoteLeg: injectedQuoteLeg = quoteLeg,
+}) {
+  // Le breaker ne compte QUE les échecs coûteux (reverts on-chain). Les échecs gratuits
+  // (estimateGas, staticCall, send sans receipt) sont loggés mais ne comptent pas.
   const { pair, amountIn, intermediateOut, finalOut, grossProfit } = opportunity;
   const effectivePremiumBps =
     config.aaveFlashLoanPremiumBps === undefined ? null : BigInt(config.aaveFlashLoanPremiumBps);
@@ -219,8 +228,7 @@ async function maybeExecute({ opportunity, provider, config, contract: injectedC
     estimatedGas = await contract.startArbitrage.estimateGas(pair.borrowedToken.address, amountIn, params);
   } catch (err) {
     const message = errorMessage(err);
-    console.log(`  [GAS ESTIMATION FAILED] ${message} - transaction not sent.`);
-    await recordFailureSafely(settings);
+    console.log(`  [SKIP FREE] gas estimation failed: ${message} - transaction not sent.`);
     return { submitted: false, simulated: false, error: message };
   }
 
@@ -278,20 +286,63 @@ async function maybeExecute({ opportunity, provider, config, contract: injectedC
     }
   }
 
-  const bufferedMinProfit = (effectiveGrossProfit * config.minProfitBufferBps) / BPS_DENOMINATOR;
+  let intermediateOutFresh;
+  let finalOutFresh;
+  let grossProfitFresh;
+  try {
+    intermediateOutFresh = await injectedQuoteLeg(
+      provider,
+      pair.legOut,
+      pair.borrowedToken.address,
+      amountIn
+    );
+    finalOutFresh = await injectedQuoteLeg(
+      provider,
+      pair.legBack,
+      pair.intermediateToken.address,
+      intermediateOutFresh
+    );
+    const premiumFresh =
+      effectivePremiumBps === null
+        ? finalOut - amountIn - grossProfit
+        : (amountIn * effectivePremiumBps) / BPS_DENOMINATOR;
+    const owedFresh = amountIn + premiumFresh;
+    grossProfitFresh = finalOutFresh - owedFresh;
+  } catch (err) {
+    const message = errorMessage(err);
+    console.log(`  [SKIPPED] re-quote failed: ${message} - transaction not sent.`);
+    return {
+      submitted: false,
+      simulated: false,
+      estimatedGas,
+      gasLimitWithMargin,
+      error: `[SKIPPED] re-quote failed: ${message}`,
+    };
+  }
+
+  if (grossProfitFresh < gasFloor) {
+    const message =
+      `[SKIPPED] re-quote profit below gas floor ` +
+      `(cached=${effectiveGrossProfit}, fresh=${grossProfitFresh})`;
+    console.log(`  ${message} - transaction not sent.`);
+    return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
+  }
+
+  const bufferedMinProfit = (grossProfitFresh * config.minProfitBufferBps) / BPS_DENOMINATOR;
   const finalMinProfit = bufferedMinProfit > gasFloor ? bufferedMinProfit : gasFloor;
-  const finalParams = { ...params, minProfit: finalMinProfit };
+  const finalParams = {
+    ...params,
+    leg1: buildLeg(pair.legOut, intermediateOutFresh, config.slippageBps),
+    leg2: buildLeg(pair.legBack, finalOutFresh, config.slippageBps),
+    minProfit: finalMinProfit,
+  };
 
   try {
     await contract.startArbitrage.staticCall(pair.borrowedToken.address, amountIn, finalParams);
   } catch (err) {
     const message = errorMessage(err);
-    if (isNotProfitableError(err)) {
-      console.log(`  [SKIPPED] ${message} - transaction not sent.`);
-      return { submitted: false, simulated: false, error: message };
-    }
-    console.log(`  [SIMULATION FAILED] ${message} - transaction not sent.`);
-    await recordFailureSafely(settings);
+    const reason = isNotProfitableError(err) ? "NOT_PROFITABLE" : "simulation failed";
+    console.log(`  [SKIP FREE] ${reason}: ${message} - transaction not sent.`);
     return { submitted: false, simulated: false, error: message };
   }
 
@@ -324,8 +375,12 @@ async function maybeExecute({ opportunity, provider, config, contract: injectedC
   } catch (err) {
     const message = errorMessage(err);
     await addGasSpentSafely(settings, -gasCostWei);
-    await recordFailureSafely(settings);
-    console.error(`  [FAILED] ${message}`);
+    if (err.receipt) {
+      await recordFailureSafely(settings);
+      console.error(`  [FAILED] ${message}`);
+    } else {
+      console.error(`  [SKIP FREE] broadcast failed: ${message}`);
+    }
     return { submitted: false, error: message, estimatedGas };
   }
 
@@ -350,9 +405,11 @@ async function maybeExecute({ opportunity, provider, config, contract: injectedC
     if (err.receipt) {
       const actualGasCostWei = err.receipt.gasUsed * (err.receipt.gasPrice ?? gasPriceWei);
       await addGasSpentSafely(settings, actualGasCostWei - gasCostWei);
+      await recordFailureSafely(settings);
+      console.error(`  [FAILED] ${message}`);
+    } else {
+      console.error(`  [SKIP FREE] confirmation failed: ${message}`);
     }
-    await recordFailureSafely(settings);
-    console.error(`  [FAILED] ${message}`);
     return { submitted: true, error: message, estimatedGas, receipt: err.receipt };
   }
 }

@@ -32,6 +32,9 @@ describe("bot/executor maybeExecute", function () {
     const routerA = await MockRouter.deploy();
     const routerB = await MockRouter.deploy();
 
+    const MockQuoterV3 = await ethers.getContractFactory("MockQuoterV3");
+    const quoterB = await MockQuoterV3.deploy(await routerB.getAddress());
+
     const borrowAddr = await borrowToken.getAddress();
     const midAddr = await midToken.getAddress();
 
@@ -44,7 +47,13 @@ describe("bot/executor maybeExecute", function () {
       borrowedToken: { address: borrowAddr, decimals: borrowedDecimals, symbol: "BOR", isStable: true },
       intermediateToken: { address: midAddr, decimals: 18, symbol: "MID" },
       legOut: { kind: "V2", router: await routerA.getAddress(), tokenOut: midAddr },
-      legBack: { kind: "V3", router: await routerB.getAddress(), tokenOut: borrowAddr, v3Fee: 3000 },
+      legBack: {
+        kind: "V3",
+        router: await routerB.getAddress(),
+        quoter: await quoterB.getAddress(),
+        tokenOut: borrowAddr,
+        v3Fee: 3000,
+      },
     };
 
     const amountIn = ethers.parseUnits("1000", borrowedDecimals);
@@ -79,10 +88,16 @@ describe("bot/executor maybeExecute", function () {
     return { deployer, botWallet, borrowToken, pair, opportunity, makeConfig };
   }
 
-  function makeSpyContract({ estimatedGas = 300000n, staticCallError = null } = {}) {
+  function makeSpyContract({
+    estimatedGas = 300000n,
+    staticCallError = null,
+    estimateGasError = null,
+    sendError = null,
+  } = {}) {
     const calls = [];
     const startArbitrage = async (...args) => {
       calls.push({ method: "send", args });
+      if (sendError) throw sendError;
       return {
         hash: `0x${"11".repeat(32)}`,
         wait: async () => ({ status: 1, gasUsed: estimatedGas, gasPrice: 1n, blockNumber: 1 }),
@@ -90,6 +105,7 @@ describe("bot/executor maybeExecute", function () {
     };
     startArbitrage.estimateGas = async (...args) => {
       calls.push({ method: "estimateGas", args });
+      if (estimateGasError) throw estimateGasError;
       return estimatedGas;
     };
     startArbitrage.staticCall = async (...args) => {
@@ -323,32 +339,160 @@ describe("bot/executor maybeExecute", function () {
     expect(calls.map((entry) => entry.method)).to.deep.equal(["estimateGas", "staticCall", "send"]);
   });
 
-  it("counts a non-NOT_PROFITABLE final staticCall failure in the breaker", async function () {
+  it("re-quotes both legs and uses fresh values for the final params", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const { contract, calls } = makeSpyContract();
+    const { gasFloor } = await opportunityAboveGasFloor({ opportunity, config });
+    const freshDelta = ethers.parseEther("1");
+    const intermediateOutFresh = opportunity.intermediateOut + 1n;
+    const finalOutFresh = opportunity.finalOut + freshDelta;
+    const grossProfitFresh = opportunity.grossProfit + freshDelta;
+    const quoteCalls = [];
+    const quoteLeg = async (_provider, leg, tokenIn, amountIn) => {
+      quoteCalls.push({ leg, tokenIn, amountIn });
+      return leg === opportunity.pair.legOut ? intermediateOutFresh : finalOutFresh;
+    };
+
+    const result = await maybeExecute({
+      opportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+
+    expect(result.submitted).to.equal(true);
+    expect(quoteCalls).to.have.lengthOf(2);
+    expect(quoteCalls[0].leg).to.equal(opportunity.pair.legOut);
+    expect(quoteCalls[0].tokenIn).to.equal(opportunity.pair.borrowedToken.address);
+    expect(quoteCalls[0].amountIn).to.equal(opportunity.amountIn);
+    expect(quoteCalls[1].leg).to.equal(opportunity.pair.legBack);
+    expect(quoteCalls[1].tokenIn).to.equal(opportunity.pair.intermediateToken.address);
+    expect(quoteCalls[1].amountIn).to.equal(intermediateOutFresh);
+
+    const send = calls.find((entry) => entry.method === "send");
+    const staticCall = calls.find((entry) => entry.method === "staticCall");
+    expect(staticCall.args[2]).to.equal(send.args[2]);
+    expect(staticCall.args[2]).to.deep.equal(send.args[2]);
+    const slippageFactor = 10000n - config.slippageBps;
+    expect(staticCall.args[2].leg1.minAmountOut).to.equal(
+      (intermediateOutFresh * slippageFactor) / 10000n
+    );
+    expect(staticCall.args[2].leg2.minAmountOut).to.equal(
+      (finalOutFresh * slippageFactor) / 10000n
+    );
+    expect(send.args[2].leg1.minAmountOut).to.equal(
+      (intermediateOutFresh * slippageFactor) / 10000n
+    );
+    expect(send.args[2].leg2.minAmountOut).to.equal((finalOutFresh * slippageFactor) / 10000n);
+    const bufferedMinProfit = (grossProfitFresh * config.minProfitBufferBps) / 10000n;
+    expect(send.args[2].minProfit).to.equal(
+      bufferedMinProfit > gasFloor ? bufferedMinProfit : gasFloor
+    );
+  });
+
+  it("skips when the fresh re-quote profit falls below the gas floor", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const { contract, calls } = makeSpyContract();
+    const { gasFloor } = await opportunityAboveGasFloor({ opportunity, config });
+    const inferredPremium = opportunity.finalOut - opportunity.amountIn - opportunity.grossProfit;
+    const finalOutFresh = opportunity.amountIn + inferredPremium + gasFloor - 1n;
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : finalOutFresh;
+
+    const result = await maybeExecute({
+      opportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+
+    expect(result.submitted).to.equal(false);
+    expect(result.simulated).to.equal(true);
+    expect(result.error).to.include("[SKIPPED] re-quote profit below gas floor");
+    expect(result.error).to.include(`cached=${opportunity.grossProfit}`);
+    expect(result.error).to.include(`fresh=${gasFloor - 1n}`);
+    expect(calls.map((entry) => entry.method)).to.deep.equal(["estimateGas"]);
+  });
+
+  it("skips a failed re-quote without counting it in the breaker", async function () {
     const { opportunity, makeConfig } = await deployFixture();
     const breakerPath = path.join(
-      fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-final-error-")),
+      fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-requote-")),
+      "circuit_breaker.json"
+    );
+    const config = makeConfig({ circuitBreakerPath: breakerPath });
+    const { contract, calls } = makeSpyContract();
+    const quoteLeg = async () => {
+      throw new Error("RPC unavailable");
+    };
+
+    const result = await maybeExecute({
+      opportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+
+    expect(result.submitted).to.equal(false);
+    expect(result.simulated).to.equal(false);
+    expect(result.error).to.include("[SKIPPED] re-quote failed: RPC unavailable");
+    expect(calls.map((entry) => entry.method)).to.deep.equal(["estimateGas"]);
+    expect(fs.existsSync(breakerPath)).to.equal(false);
+  });
+
+  it("does not open the breaker after five free staticCall failures", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const breakerPath = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-free-staticcall-")),
       "circuit_breaker.json"
     );
     const config = makeConfig({ circuitBreakerPath: breakerPath });
     const { contract } = makeSpyContract({
       staticCallError: new Error("execution reverted: OTHER_REASON"),
     });
-    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
-      opportunity,
-      config,
+
+    for (let i = 0; i < 5; i += 1) {
+      const result = await maybeExecute({
+        opportunity,
+        provider: ethers.provider,
+        config,
+        contract,
+      });
+      expect(result.submitted).to.equal(false);
+      expect(result.error).to.include("OTHER_REASON");
+    }
+
+    expect(fs.existsSync(breakerPath)).to.equal(false);
+  });
+
+  it("does not open the breaker after five free estimateGas failures", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const breakerPath = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-free-estimategas-")),
+      "circuit_breaker.json"
+    );
+    const config = makeConfig({ circuitBreakerPath: breakerPath });
+    const { contract } = makeSpyContract({
+      estimateGasError: new Error("execution reverted: NOT_PROFITABLE"),
     });
 
-    const result = await maybeExecute({
-      opportunity: freshOpportunity,
-      provider: ethers.provider,
-      config,
-      contract,
-    });
+    for (let i = 0; i < 5; i += 1) {
+      const result = await maybeExecute({
+        opportunity,
+        provider: ethers.provider,
+        config,
+        contract,
+      });
+      expect(result.submitted).to.equal(false);
+      expect(result.error).to.include("NOT_PROFITABLE");
+    }
 
-    expect(result.submitted).to.equal(false);
-    expect(result.error).to.include("OTHER_REASON");
-    const state = JSON.parse(fs.readFileSync(breakerPath, "utf8"));
-    expect(state.consecutiveFailures).to.equal(1);
+    expect(fs.existsSync(breakerPath)).to.equal(false);
   });
 
   it("does not send a transaction when estimateGas exceeds MAX_GAS_LIMIT", async function () {
@@ -453,28 +597,27 @@ describe("bot/executor maybeExecute", function () {
     expect(await ethers.provider.getTransactionCount(botWallet.address)).to.equal(nonceBefore);
   });
 
-  it("opens the circuit breaker after MAX_CONSECUTIVE_FAILURES and blocks the next attempt", async function () {
-    const { botWallet, opportunity, makeConfig } = await deployFixture({
-      legBackRate: ethers.parseEther("0.999"),
+  it("opens the circuit breaker after five costly send failures with a receipt", async function () {
+    const { botWallet, opportunity, makeConfig } = await deployFixture();
+    const breakerPath = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-costly-send-")),
+      "circuit_breaker.json"
+    );
+    const sendError = Object.assign(new Error("transaction reverted on-chain"), {
+      receipt: { status: 0, gasUsed: 300000n, gasPrice: 1n },
     });
-    const breakerPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-breaker-")), "state.json");
-    const losingOpportunity = {
-      ...opportunity,
-      finalOut: (opportunity.amountIn * ethers.parseEther("0.999")) / RATE_1_TO_1,
-      grossProfit: 0n,
-    };
-    const config = makeConfig({
-      circuitBreakerPath: breakerPath,
-      maxConsecutiveFailures: 5,
-    });
+    const config = makeConfig({ circuitBreakerPath: breakerPath });
+    const { contract } = makeSpyContract({ sendError });
 
     for (let i = 0; i < 5; i += 1) {
       const result = await maybeExecute({
-        opportunity: losingOpportunity,
+        opportunity,
         provider: ethers.provider,
         config,
+        contract,
       });
-      expect(result.error).to.include("NOT_PROFITABLE");
+      expect(result.submitted).to.equal(false);
+      expect(result.error).to.include("transaction reverted on-chain");
     }
 
     const state = JSON.parse(fs.readFileSync(breakerPath, "utf8"));
@@ -482,7 +625,7 @@ describe("bot/executor maybeExecute", function () {
     expect(state.openUntil).to.be.greaterThan(Date.now());
 
     const nonceBefore = await ethers.provider.getTransactionCount(botWallet.address);
-    const blocked = await maybeExecute({ opportunity, provider: ethers.provider, config });
+    const blocked = await maybeExecute({ opportunity, provider: ethers.provider, config, contract });
     expect(blocked.submitted).to.equal(false);
     expect(blocked.guard).to.equal("circuitBreaker");
     expect(blocked.error).to.include("CIRCUIT_BREAKER_OPEN");
