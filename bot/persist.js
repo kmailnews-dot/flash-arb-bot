@@ -1,5 +1,6 @@
 const fs = require("fs/promises");
 const path = require("path");
+const { redactUrls } = require("./sanitizeError");
 
 const DEFAULT_SCAN_LOG_PATH = "./logs/scans.jsonl";
 
@@ -12,10 +13,6 @@ function toNullableNumber(value) {
 
 function toNullableString(value) {
   return value === undefined || value === null ? null : String(value);
-}
-
-function redactUrls(value) {
-  return typeof value === "string" ? value.replace(/https:\/\/[^\s]+/g, "[REDACTED_URL]") : value;
 }
 
 function persistableError(error) {
@@ -34,14 +31,24 @@ async function appendScanResult(logPath = DEFAULT_SCAN_LOG_PATH, result, { chain
   const entry = {
     timestamp: timestamp instanceof Date ? timestamp.toISOString() : String(timestamp),
     chainId: toNullableNumber(chainId),
+    blockNumber: toNullableNumber(result.blockNumber),
     pair: pair.label ?? null,
     borrowedToken: borrowedToken.symbol ?? null,
     tradeSize: result.tradeSizeHuman ?? null,
+    quoteTimestamp: result.quoteTimestamp ?? null,
+    gasPriceWei: toNullableString(result.gasPriceWei),
+    ethUsdPrice: toNullableNumber(result.ethUsdPrice),
+    amountIn: toNullableString(result.amountIn),
+    intermediateOut: toNullableString(result.intermediateOut),
+    finalOut: toNullableString(result.finalOut),
+    owed: toNullableString(result.owed),
+    premium: toNullableString(result.premium),
     grossProfit: toNullableString(result.grossProfit),
     grossProfitSymbol: borrowedToken.symbol ?? null,
     grossProfitUsd: toNullableNumber(result.grossProfitUsd),
     netProfitUsd: toNullableNumber(result.netProfitUsd),
     gasCostUsd: toNullableNumber(result.gasCostUsd),
+    priced: Boolean(result.priced),
     isOpportunity: Boolean(result.isOpportunity),
     error: persistableError(result.error),
   };

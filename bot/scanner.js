@@ -77,6 +77,7 @@ async function scanTradeSize({
   ethUsdPrice,
   quoteLeg: injectedQuoteLeg = quoteLeg,
 }) {
+  const quoteTimestamp = new Date().toISOString();
   const amountIn = ethers.parseUnits(tradeSizeHuman, pair.borrowedToken.decimals);
 
   const intermediateOut = await injectedQuoteLeg(provider, pair.legOut, pair.borrowedToken.address, amountIn);
@@ -100,6 +101,9 @@ async function scanTradeSize({
   return {
     pair,
     tradeSizeHuman,
+    quoteTimestamp,
+    gasPriceWei,
+    ethUsdPrice,
     amountIn,
     intermediateOut,
     finalOut,
