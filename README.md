@@ -101,6 +101,8 @@ Add these (see [`.env.example`](.env.example) for the exact shape of the JSON on
 | `CONTRACT_ADDRESS_SEPOLIA` | live execution on Arbitrum Sepolia | filled in after the testnet deploy (step 5); not used by the scheduled scan |
 | `ETH_USD_ROUTE_JSON` | USD profit filtering | network-specific; see step 4 |
 | `PAIRS_CONFIG_JSON` | scanning | see step 4 |
+| `ETH_USD_ROUTE_JSON_SEPOLIA` | live execution on Arbitrum Sepolia | required only if you run live.yml against arbitrumSepolia; see step 4 |
+| `PAIRS_CONFIG_JSON_SEPOLIA` | live execution on Arbitrum Sepolia | required only if you run live.yml against arbitrumSepolia; see step 4 |
 
 The **Flash arb scan** workflow does not read `DRY_RUN`, `PRIVATE_KEY`, or the contract-address
 secrets: it always runs read-only with `DRY_RUN=true` and never receives the wallet secrets. Those
