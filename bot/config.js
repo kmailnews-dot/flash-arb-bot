@@ -43,6 +43,30 @@ function validatePairs(pairs) {
     const borrowed = validateAddress(pair.borrowedToken.address, `${prefix}.borrowedToken.address`);
     const intermediate = validateAddress(pair.intermediateToken.address, `${prefix}.intermediateToken.address`);
 
+    if (
+      !Number.isInteger(pair.borrowedToken.decimals) ||
+      pair.borrowedToken.decimals < 0 ||
+      pair.borrowedToken.decimals > 18
+    ) {
+      throw new Error(`${prefix}.borrowedToken.decimals must be an integer between 0 and 18.`);
+    }
+    if (
+      !Number.isInteger(pair.intermediateToken.decimals) ||
+      pair.intermediateToken.decimals < 0 ||
+      pair.intermediateToken.decimals > 18
+    ) {
+      throw new Error(`${prefix}.intermediateToken.decimals must be an integer between 0 and 18.`);
+    }
+    if (pair.borrowedToken.isStable !== undefined && typeof pair.borrowedToken.isStable !== "boolean") {
+      throw new Error(`${prefix}.borrowedToken.isStable must be a boolean if present.`);
+    }
+    if (pair.borrowedToken.isWeth !== undefined && typeof pair.borrowedToken.isWeth !== "boolean") {
+      throw new Error(`${prefix}.borrowedToken.isWeth must be a boolean if present.`);
+    }
+    if (pair.borrowedToken.isStable === true && pair.borrowedToken.isWeth === true) {
+      throw new Error(`${prefix}.borrowedToken must not set both isStable and isWeth to true.`);
+    }
+
     validateAddress(pair.legOut.router, `${prefix}.legOut.router`);
     const legOutTokenOut = validateAddress(pair.legOut.tokenOut, `${prefix}.legOut.tokenOut`);
     if (pair.legOut.quoter !== undefined) {
@@ -154,3 +178,4 @@ const config = {
 };
 
 module.exports = config;
+module.exports.validatePairs = validatePairs;
