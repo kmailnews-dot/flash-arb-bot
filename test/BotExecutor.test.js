@@ -698,4 +698,103 @@ describe("bot/executor maybeExecute", function () {
     expect(blocked.error).to.include("CIRCUIT_BREAKER_OPEN");
     expect(await ethers.provider.getTransactionCount(botWallet.address)).to.equal(nonceBefore);
   });
+
+  it("skips when the fresh net profit is below MIN_PROFIT_USD", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig({ minProfitUsd: 5 });
+    const { contract, calls } = makeSpyContract();
+    const feeData = await ethers.provider.getFeeData();
+    const gasPriceWei = feeData.gasPrice ?? feeData.maxFeePerGas;
+    const gasLimitWithMargin = (300000n * 11500n) / 10000n;
+    const gasCost = gasCostInBorrowedToken({
+      gasCostWei: gasLimitWithMargin * gasPriceWei,
+      pair: opportunity.pair,
+      config,
+    });
+    const gasFloor = (gasCost * 11000n) / 10000n;
+    const maxFeeCost = feeData.maxFeePerGas
+      ? gasCostInBorrowedToken({
+          gasCostWei: feeData.maxFeePerGas * gasLimitWithMargin,
+          pair: opportunity.pair,
+          config,
+        })
+      : null;
+    const profitFloor = maxFeeCost !== null && maxFeeCost > gasFloor ? maxFeeCost : gasFloor;
+    const grossProfitFresh = profitFloor + 1n;
+    const inferredPremium = opportunity.finalOut - opportunity.amountIn - opportunity.grossProfit;
+    const finalOutFresh = opportunity.amountIn + inferredPremium + grossProfitFresh;
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : finalOutFresh;
+
+    const result = await maybeExecute({
+      opportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+
+    const netProfitFresh = grossProfitFresh - gasCost;
+    const threshold = 5n * 10n ** 18n;
+    expect(netProfitFresh).to.be.lessThan(threshold);
+    expect(result.submitted).to.equal(false);
+    expect(result.simulated).to.equal(true);
+    expect(result.error).to.include("[SKIPPED] fresh net profit below MIN_PROFIT_USD");
+    expect(result.error).to.include(`net=${netProfitFresh}`);
+    expect(result.error).to.include(`threshold=${threshold}`);
+    expect(calls.map((entry) => entry.method)).to.deep.equal(["estimateGas"]);
+  });
+
+  it("sends when the fresh net profit meets MIN_PROFIT_USD", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig({ minProfitUsd: 5 });
+    const { contract, calls } = makeSpyContract();
+    const feeData = await ethers.provider.getFeeData();
+    const gasPriceWei = feeData.gasPrice ?? feeData.maxFeePerGas;
+    const gasLimitWithMargin = (300000n * 11500n) / 10000n;
+    const gasCost = gasCostInBorrowedToken({
+      gasCostWei: gasLimitWithMargin * gasPriceWei,
+      pair: opportunity.pair,
+      config,
+    });
+    const grossProfitFresh = gasCost + ethers.parseEther("10");
+    const inferredPremium = opportunity.finalOut - opportunity.amountIn - opportunity.grossProfit;
+    const finalOutFresh = opportunity.amountIn + inferredPremium + grossProfitFresh;
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : finalOutFresh;
+
+    const result = await maybeExecute({
+      opportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+
+    expect(result.submitted).to.equal(true);
+    expect(result.receipt.status).to.equal(1);
+    expect(calls.map((entry) => entry.method)).to.deep.equal(["estimateGas", "staticCall", "send"]);
+  });
+
+  it("skips when MIN_PROFIT_USD cannot be priced for the borrowed token", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const pair = {
+      ...opportunity.pair,
+      borrowedToken: { ...opportunity.pair.borrowedToken, isStable: false, isWeth: false },
+    };
+    const config = makeConfig({ minProfitUsd: 5 });
+    const { contract, calls } = makeSpyContract();
+
+    const result = await maybeExecute({
+      opportunity: { ...opportunity, pair },
+      provider: ethers.provider,
+      config,
+      contract,
+    });
+
+    expect(result.submitted).to.equal(false);
+    expect(result.simulated).to.equal(true);
+    expect(result.error).to.include("[SKIPPED] cannot price MIN_PROFIT_USD for token BOR");
+    expect(calls.map((entry) => entry.method)).to.deep.equal(["estimateGas"]);
+  });
 });

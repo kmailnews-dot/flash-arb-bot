@@ -1,5 +1,6 @@
 const { ethers } = require("ethers");
 const { FLASH_ARB_EXECUTOR_ABI } = require("./abis");
+const { usdToTokenUnits } = require("./minProfitUsd");
 const { quoteLeg } = require("./prices");
 const {
   DEFAULT_GAS_SPENT_PATH,
@@ -258,7 +259,10 @@ async function maybeExecute({
   const gasCostInToken = gasCostInBorrowedToken({ gasCostWei, pair, config });
   if (gasCostInToken === null) {
     const token = pair.borrowedToken?.symbol ?? pair.borrowedToken?.address ?? "unknown";
-    const message = `[SKIPPED] cannot price gas for token ${token} — enable ETH_USD_ROUTE_JSON`;
+    const message =
+      config.minProfitUsd === undefined || config.minProfitUsd === null
+        ? `[SKIPPED] cannot price gas for token ${token} — enable ETH_USD_ROUTE_JSON`
+        : `[SKIPPED] cannot price MIN_PROFIT_USD for token ${token}`;
     console.log(`  ${message} - transaction not sent.`);
     return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
   }
@@ -310,6 +314,45 @@ async function maybeExecute({
       `(cached=${effectiveGrossProfit}, fresh=${grossProfitFresh})`;
     console.log(`  ${message} - transaction not sent.`);
     return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
+  }
+
+  if (config.minProfitUsd !== undefined && config.minProfitUsd !== null) {
+    const gasCostFreshInToken = gasCostInBorrowedToken({ gasCostWei, pair, config });
+    const token = pair.borrowedToken?.symbol ?? pair.borrowedToken?.address ?? "unknown";
+    if (gasCostFreshInToken === null) {
+      const message = `[SKIPPED] cannot price MIN_PROFIT_USD for token ${token}`;
+      console.log(`  ${message} - transaction not sent.`);
+      return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
+    }
+
+    let tokenUsdPrice;
+    if (pair.borrowedToken?.isStable === true) {
+      tokenUsdPrice = 1;
+    } else if (
+      pair.borrowedToken?.isWeth === true &&
+      Number.isFinite(Number(config.ethUsdPrice)) &&
+      Number(config.ethUsdPrice) > 0
+    ) {
+      tokenUsdPrice = Number(config.ethUsdPrice);
+    } else {
+      const message = `[SKIPPED] cannot price MIN_PROFIT_USD for token ${token}`;
+      console.log(`  ${message} - transaction not sent.`);
+      return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
+    }
+
+    const netProfitFresh = grossProfitFresh - gasCostFreshInToken;
+    const minProfitUsdInToken = usdToTokenUnits({
+      usdAmount: config.minProfitUsd,
+      tokenUsdPrice,
+      decimals: pair.borrowedToken.decimals,
+    });
+    if (netProfitFresh < minProfitUsdInToken) {
+      const message =
+        `[SKIPPED] fresh net profit below MIN_PROFIT_USD ` +
+        `(net=${netProfitFresh}, threshold=${minProfitUsdInToken})`;
+      console.log(`  ${message} - transaction not sent.`);
+      return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
+    }
   }
 
   const maxFeePerGas = feeData.maxFeePerGas;
