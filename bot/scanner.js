@@ -21,7 +21,7 @@ function sanitizeError(err) {
 ///
 /// A failed quote (wrong-network addresses, missing pool, revert, undecodable return data, ...)
 /// is non-fatal: USD pricing is an optional convenience, so warn and return null. Callers then
-/// fall back to the raw on-chain profit check instead of crashing the whole scan.
+/// mark the result unpriced instead of crashing the whole scan.
 async function getEthUsdPrice(provider, ethUsdRoute) {
   if (!ethUsdRoute) return null;
 
@@ -40,7 +40,7 @@ async function getEthUsdPrice(provider, ethUsdRoute) {
     const message = shortMessage ?? "unknown error";
     console.warn(
       `WARNING: could not quote ETH/USD via ${ethUsdRoute.kind} route ${routeAddress}: ${message}. ` +
-        "USD filtering is disabled for this run; the bot will keep scanning using raw on-chain profit only. " +
+        "USD filtering is disabled for this run; scan results will be unpriced and not flagged as opportunities. " +
         "Check that ETH_USD_ROUTE_JSON contains addresses for the network configured in ARBITRUM_RPC_URL."
     );
     return null;
@@ -68,11 +68,19 @@ function profitInUsd(profitTokenUnits, borrowedToken, ethUsdPrice) {
 
 /// Scans one configured trade size for one pair and returns an opportunity descriptor
 /// (profitable or not) - never throws for "just not profitable", only for real errors.
-async function scanTradeSize({ provider, pair, tradeSizeHuman, config, gasPriceWei, ethUsdPrice }) {
+async function scanTradeSize({
+  provider,
+  pair,
+  tradeSizeHuman,
+  config,
+  gasPriceWei,
+  ethUsdPrice,
+  quoteLeg: injectedQuoteLeg = quoteLeg,
+}) {
   const amountIn = ethers.parseUnits(tradeSizeHuman, pair.borrowedToken.decimals);
 
-  const intermediateOut = await quoteLeg(provider, pair.legOut, pair.borrowedToken.address, amountIn);
-  const finalOut = await quoteLeg(provider, pair.legBack, pair.intermediateToken.address, intermediateOut);
+  const intermediateOut = await injectedQuoteLeg(provider, pair.legOut, pair.borrowedToken.address, amountIn);
+  const finalOut = await injectedQuoteLeg(provider, pair.legBack, pair.intermediateToken.address, intermediateOut);
 
   const premium = (amountIn * config.aaveFlashLoanPremiumBps) / BPS_DENOMINATOR;
   const owed = amountIn + premium;
@@ -87,7 +95,7 @@ async function scanTradeSize({ provider, pair, tradeSizeHuman, config, gasPriceW
   const grossProfitUsd = profitInUsd(grossProfit, pair.borrowedToken, ethUsdPrice);
   const netProfitUsd = grossProfitUsd !== null && gasCostUsd !== null ? grossProfitUsd - gasCostUsd : null;
 
-  const meetsUsdThreshold = netProfitUsd !== null ? netProfitUsd >= config.minProfitUsd : grossProfit > 0n;
+  const priced = netProfitUsd !== null;
 
   return {
     pair,
@@ -101,7 +109,8 @@ async function scanTradeSize({ provider, pair, tradeSizeHuman, config, gasPriceW
     grossProfitUsd,
     gasCostUsd,
     netProfitUsd,
-    isOpportunity: grossProfit > 0n && meetsUsdThreshold,
+    priced,
+    isOpportunity: priced === true && grossProfit > 0n && netProfitUsd >= config.minProfitUsd,
   };
 }
 

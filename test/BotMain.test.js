@@ -66,7 +66,7 @@ describe("bot/index main", function () {
 
     expect(summary.ethUsdPrice).to.equal(null);
     expect(summary.scanned).to.equal(1);
-    expect(summary.opportunities).to.equal(1);
+    expect(summary.opportunities).to.equal(0);
     expect(warnings.join("\n")).to.include("could not quote ETH/USD");
     expect(warnings.join("\n")).to.include("USD filtering is disabled");
 
@@ -77,7 +77,8 @@ describe("bot/index main", function () {
       .map((line) => JSON.parse(line));
     expect(entries).to.have.length(1);
     expect(entries[0].chainId).to.equal(31337);
-    expect(entries[0].isOpportunity).to.equal(true);
+    expect(entries[0].isOpportunity).to.equal(false);
+    expect(BigInt(entries[0].grossProfit)).to.be.greaterThan(0n);
 
     fs.rmSync(scanDir, { recursive: true, force: true });
   });
