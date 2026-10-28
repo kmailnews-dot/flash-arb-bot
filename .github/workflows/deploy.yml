@@ -27,6 +27,8 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Requires manual approval on GitHub; PRIVATE_KEY lives in the production environment.
+    environment: production
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
