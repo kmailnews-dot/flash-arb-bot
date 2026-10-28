@@ -15,37 +15,57 @@ on:
         options:
           - arbitrumSepolia
           - arbitrum
+      confirm:
+        description: 'Type EXECUTE to confirm a mainnet deployment'
+        required: false
+        default: ""
+        type: string
 
 jobs:
   deploy:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
           cache: "npm"
 
-      - run: npm ci
+      - run: npm ci --ignore-scripts
+
+      - name: Confirm mainnet deployment
+        env:
+          TARGET_NETWORK: ${{ inputs.network }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          if [ "$TARGET_NETWORK" = "arbitrum" ] && [ "$CONFIRM" != "EXECUTE" ]; then
+            echo "::error::Type EXECUTE in the confirm input to deploy to Arbitrum One."
+            exit 1
+          fi
 
       - name: Validate deployment secrets
         env:
+          TARGET_NETWORK: ${{ inputs.network }}
           ARBITRUM_RPC_URL: ${{ secrets.ARBITRUM_RPC_URL }}
           ARBITRUM_SEPOLIA_RPC_URL: ${{ secrets.ARBITRUM_SEPOLIA_RPC_URL }}
           PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          # Optional: when empty, scripts/deploy.js uses the chainId entry in bot/networks.js.
           AAVE_POOL_ADDRESSES_PROVIDER: ${{ secrets.AAVE_POOL_ADDRESSES_PROVIDER }}
         run: |
-          case "${{ inputs.network }}" in
+          case "$TARGET_NETWORK" in
             arbitrum) rpc_var="ARBITRUM_RPC_URL" ;;
             arbitrumSepolia) rpc_var="ARBITRUM_SEPOLIA_RPC_URL" ;;
             *)
-              echo "::error::Unknown network '${{ inputs.network }}'."
+              echo "::error::Unknown network '$TARGET_NETWORK'."
               exit 1
               ;;
           esac
           missing=0
-          for name in "$rpc_var" PRIVATE_KEY AAVE_POOL_ADDRESSES_PROVIDER; do
+          for name in "$rpc_var" PRIVATE_KEY; do
             if [ -z "${!name}" ]; then
               echo "::error::$name is empty. Add it in Settings > Secrets and variables > Actions > Secrets (repository secrets), then re-run. Secrets stored in an environment require the job to declare that environment."
               missing=1
@@ -55,8 +75,11 @@ jobs:
 
       - name: Deploy
         env:
+          TARGET_NETWORK: ${{ inputs.network }}
           ARBITRUM_RPC_URL: ${{ secrets.ARBITRUM_RPC_URL }}
           ARBITRUM_SEPOLIA_RPC_URL: ${{ secrets.ARBITRUM_SEPOLIA_RPC_URL }}
           PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          # Optional: when empty, scripts/deploy.js falls back to the Aave V3 addresses
+          # for this chainId in bot/networks.js, which is the source of truth.
           AAVE_POOL_ADDRESSES_PROVIDER: ${{ secrets.AAVE_POOL_ADDRESSES_PROVIDER }}
-        run: npx hardhat run scripts/deploy.js --network ${{ inputs.network }}
+        run: npx hardhat run scripts/deploy.js --network "$TARGET_NETWORK"
