@@ -1,5 +1,6 @@
 const { artifacts, ethers, network } = require("hardhat");
 const { NETWORKS } = require("../bot/networks");
+const { validateOwner } = require("./validateOwner");
 
 const CONTRACT_NAME = "FlashArbExecutor";
 const CONTRACT_FQN = "contracts/FlashArbExecutor.sol:FlashArbExecutor";
@@ -117,21 +118,19 @@ async function main() {
   }
 
   const expectedOwner = process.env.EXPECTED_OWNER;
-  if (typeof expectedOwner === "string" && expectedOwner.trim() !== "") {
-    if (ethers.getAddress(owner) !== ethers.getAddress(expectedOwner.trim())) {
-      throw new Error(`owner() mismatch: got ${owner}, expected ${expectedOwner.trim()}`);
-    }
-  } else {
-    console.warn("WARNING: EXPECTED_OWNER is not set - skipping owner() check.");
+  try {
+    const validatedOwner = validateOwner({ owner, expectedOwner });
+    console.log(`owner() matches EXPECTED_OWNER: ${validatedOwner.owner}`);
+  } catch (error) {
+    console.error(`Owner validation failed: ${error.message}`);
+    process.exitCode = 1;
+    return;
   }
 
   console.log(`Verified ${CONTRACT_NAME} at ${address} on ${network.name}: runtime bytecode matches the current source.`);
   console.log(
     `Immutables match bot/networks.js: POOL=${expectedNetwork.pool}, ADDRESSES_PROVIDER=${expectedNetwork.provider}.`
   );
-  if (typeof expectedOwner === "string" && expectedOwner.trim() !== "") {
-    console.log(`owner() matches EXPECTED_OWNER: ${owner}`);
-  }
   console.log("Verification only - no transaction was sent.");
 }
 
