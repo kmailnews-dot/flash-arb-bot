@@ -50,6 +50,26 @@ function gasCostInBorrowedToken({ gasCostWei, pair, config }) {
   return null;
 }
 
+function buildFeeOverrides(feeData) {
+  const maxFeePerGas = feeData?.maxFeePerGas;
+  const maxPriorityFeePerGas = feeData?.maxPriorityFeePerGas;
+  if (
+    typeof maxFeePerGas === "bigint" &&
+    maxFeePerGas > 0n &&
+    typeof maxPriorityFeePerGas === "bigint" &&
+    maxPriorityFeePerGas > 0n
+  ) {
+    return { maxFeePerGas, maxPriorityFeePerGas };
+  }
+
+  const gasPrice = feeData?.gasPrice;
+  if (typeof gasPrice === "bigint" && gasPrice > 0n) {
+    return { gasPrice };
+  }
+
+  return {};
+}
+
 function buildLeg(leg, quotedOut, slippageBps) {
   return {
     kind: DEX_KIND[leg.kind],
@@ -371,6 +391,8 @@ async function maybeExecute({
     }
   }
 
+  const feeOverrides = buildFeeOverrides(feeData);
+
   const bufferedMinProfit = (grossProfitFresh * config.minProfitBufferBps) / BPS_DENOMINATOR;
   const finalMinProfit = bufferedMinProfit > gasFloor ? bufferedMinProfit : gasFloor;
   const finalParams = {
@@ -414,6 +436,7 @@ async function maybeExecute({
   try {
     tx = await contract.startArbitrage(pair.borrowedToken.address, amountIn, finalParams, {
       gasLimit: gasLimitWithMargin,
+      ...feeOverrides,
     });
   } catch (err) {
     const message = errorMessage(err);
@@ -460,4 +483,4 @@ async function maybeExecute({
   }
 }
 
-module.exports = { maybeExecute, gasCostInBorrowedToken };
+module.exports = { maybeExecute, gasCostInBorrowedToken, buildFeeOverrides };

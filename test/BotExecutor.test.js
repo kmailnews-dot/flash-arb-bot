@@ -3,7 +3,7 @@ const { ethers } = require("hardhat");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { maybeExecute, gasCostInBorrowedToken } = require("../bot/executor");
+const { maybeExecute, gasCostInBorrowedToken, buildFeeOverrides } = require("../bot/executor");
 
 const RATE_1_TO_1 = ethers.parseEther("1");
 const FLASH_LOAN_PREMIUM_BPS = 5n;
@@ -795,6 +795,94 @@ describe("bot/executor maybeExecute", function () {
     expect(result.submitted).to.equal(false);
     expect(result.simulated).to.equal(true);
     expect(result.error).to.include("[SKIPPED] cannot price MIN_PROFIT_USD for token BOR");
+    expect(calls.map((entry) => entry.method)).to.deep.equal(["estimateGas"]);
+  });
+
+  it("sends the verified EIP-1559 fee overrides", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig({ ethUsdPrice: 1800 });
+    const { contract, calls } = makeSpyContract();
+    const maxFeePerGas = ethers.parseUnits("30", "gwei");
+    const maxPriorityFeePerGas = ethers.parseUnits("1", "gwei");
+    const provider = {
+      getFeeData: async () => ({ gasPrice: null, maxFeePerGas, maxPriorityFeePerGas }),
+      getNetwork: () => ethers.provider.getNetwork(),
+      getBalance: (address) => ethers.provider.getBalance(address),
+    };
+    const cachedOpportunity = { ...opportunity, grossProfit: ethers.parseEther("200") };
+    const inferredPremium =
+      cachedOpportunity.finalOut - cachedOpportunity.amountIn - cachedOpportunity.grossProfit;
+    const grossProfitFresh = ethers.parseEther("100");
+    const finalOutFresh = cachedOpportunity.amountIn + inferredPremium + grossProfitFresh;
+    const quoteLeg = async (_provider, leg) =>
+      leg === cachedOpportunity.pair.legOut ? cachedOpportunity.intermediateOut : finalOutFresh;
+
+    const result = await maybeExecute({
+      opportunity: cachedOpportunity,
+      provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+
+    expect(result.submitted).to.equal(true);
+    const send = calls.find((entry) => entry.method === "send");
+    expect(send.args[3].gasLimit).to.equal((300000n * 11500n) / 10000n);
+    expect(send.args[3].maxFeePerGas).to.equal(maxFeePerGas);
+    expect(send.args[3].maxPriorityFeePerGas).to.equal(maxPriorityFeePerGas);
+    expect(send.args[3]).to.not.have.property("gasPrice");
+  });
+
+  it("sends the verified legacy gasPrice override", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig({ ethUsdPrice: 1800 });
+    const { contract, calls } = makeSpyContract();
+    const gasPrice = ethers.parseUnits("10", "gwei");
+    const provider = {
+      getFeeData: async () => ({ gasPrice, maxFeePerGas: null, maxPriorityFeePerGas: null }),
+      getNetwork: () => ethers.provider.getNetwork(),
+      getBalance: (address) => ethers.provider.getBalance(address),
+    };
+    const inferredPremium = opportunity.finalOut - opportunity.amountIn - opportunity.grossProfit;
+    const grossProfitFresh = ethers.parseEther("100");
+    const finalOutFresh = opportunity.amountIn + inferredPremium + grossProfitFresh;
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : finalOutFresh;
+
+    const result = await maybeExecute({
+      opportunity,
+      provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+
+    expect(result.submitted).to.equal(true);
+    const send = calls.find((entry) => entry.method === "send");
+    expect(send.args[3].gasPrice).to.equal(gasPrice);
+    expect(send.args[3]).to.not.have.property("maxFeePerGas");
+    expect(send.args[3]).to.not.have.property("maxPriorityFeePerGas");
+  });
+
+  it("adds no fee override when feeData is empty", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const { contract, calls } = makeSpyContract();
+    const provider = {
+      getFeeData: async () => ({}),
+      getNetwork: () => ethers.provider.getNetwork(),
+      getBalance: (address) => ethers.provider.getBalance(address),
+    };
+
+    const result = await maybeExecute({
+      opportunity,
+      provider,
+      config: makeConfig(),
+      contract,
+    });
+
+    expect(buildFeeOverrides({})).to.deep.equal({});
+    expect(result.submitted).to.equal(false);
+    expect(result.error).to.include("gasPrice is 0");
     expect(calls.map((entry) => entry.method)).to.deep.equal(["estimateGas"]);
   });
 });
