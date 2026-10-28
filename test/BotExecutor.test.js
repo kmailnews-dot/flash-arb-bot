@@ -445,6 +445,36 @@ describe("bot/executor maybeExecute", function () {
     expect(fs.existsSync(breakerPath)).to.equal(false);
   });
 
+  it("T5: a failed second re-quote does not count in the breaker", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const breakerPath = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-requote-second-")),
+      "circuit_breaker.json"
+    );
+    const config = makeConfig({ circuitBreakerPath: breakerPath });
+    const { contract, calls } = makeSpyContract();
+    let quoteCalls = 0;
+    const quoteLeg = async () => {
+      quoteCalls += 1;
+      if (quoteCalls === 2) throw new Error("RPC unavailable");
+      return opportunity.intermediateOut;
+    };
+
+    const result = await maybeExecute({
+      opportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+
+    expect(result.submitted).to.equal(false);
+    expect(result.simulated).to.equal(false);
+    expect(result.error).to.include("[SKIPPED] re-quote failed: RPC unavailable");
+    expect(calls.map((entry) => entry.method)).to.deep.equal(["estimateGas"]);
+    expect(fs.existsSync(breakerPath)).to.equal(false);
+  });
+
   it("does not open the breaker after five free staticCall failures", async function () {
     const { opportunity, makeConfig } = await deployFixture();
     const breakerPath = path.join(
@@ -535,12 +565,15 @@ describe("bot/executor maybeExecute", function () {
       getNetwork: () => ethers.provider.getNetwork(),
       getBalance: (address) => ethers.provider.getBalance(address),
     };
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : opportunity.finalOut;
 
     const result = await maybeExecute({
       opportunity: { ...opportunity, grossProfit: ethers.parseEther("1") },
       provider,
       config,
       contract,
+      quoteLeg,
     });
 
     expect(result.submitted).to.equal(false);

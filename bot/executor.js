@@ -270,22 +270,6 @@ async function maybeExecute({
     return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
   }
 
-  const maxFeePerGas = feeData.maxFeePerGas;
-  if (maxFeePerGas && maxFeePerGas > 0n) {
-    const maxFeeCostInToken = gasCostInBorrowedToken({
-      gasCostWei: maxFeePerGas * gasLimitWithMargin,
-      pair,
-      config,
-    });
-    if (maxFeeCostInToken !== null && maxFeeCostInToken > effectiveGrossProfit) {
-      const message =
-        `[SKIPPED] maxFeePerGas exceeds profit cap ` +
-        `(maxFeePerGas=${maxFeePerGas}, profit=${effectiveGrossProfit}, gasLimit=${gasLimitWithMargin})`;
-      console.log(`  ${message} - transaction not sent.`);
-      return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
-    }
-  }
-
   let intermediateOutFresh;
   let finalOutFresh;
   let grossProfitFresh;
@@ -326,6 +310,22 @@ async function maybeExecute({
       `(cached=${effectiveGrossProfit}, fresh=${grossProfitFresh})`;
     console.log(`  ${message} - transaction not sent.`);
     return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
+  }
+
+  const maxFeePerGas = feeData.maxFeePerGas;
+  if (maxFeePerGas && maxFeePerGas > 0n) {
+    const maxFeeCostInToken = gasCostInBorrowedToken({
+      gasCostWei: maxFeePerGas * gasLimitWithMargin,
+      pair,
+      config,
+    });
+    if (maxFeeCostInToken !== null && maxFeeCostInToken > grossProfitFresh) {
+      const message =
+        `[SKIPPED] maxFeePerGas exceeds profit cap ` +
+        `(maxFeePerGas=${maxFeePerGas}, profit=${grossProfitFresh}, gasLimit=${gasLimitWithMargin})`;
+      console.log(`  ${message} - transaction not sent.`);
+      return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
+    }
   }
 
   const bufferedMinProfit = (grossProfitFresh * config.minProfitBufferBps) / BPS_DENOMINATOR;
@@ -408,6 +408,7 @@ async function maybeExecute({
       await recordFailureSafely(settings);
       console.error(`  [FAILED] ${message}`);
     } else {
+      await addGasSpentSafely(settings, -gasCostWei);
       console.error(`  [SKIP FREE] confirmation failed: ${message}`);
     }
     return { submitted: true, error: message, estimatedGas, receipt: err.receipt };
