@@ -67,6 +67,63 @@ function validatePairs(pairs) {
       throw new Error(`${prefix}.borrowedToken must not set both isStable and isWeth to true.`);
     }
 
+    if (pair.tradeSizes === undefined) {
+      throw new Error(`${prefix}.tradeSizes is required.`);
+    }
+    if (!Array.isArray(pair.tradeSizes)) {
+      throw new Error(`${prefix}.tradeSizes must be an array.`);
+    }
+    if (pair.tradeSizes.length === 0) {
+      throw new Error(`${prefix}.tradeSizes must not be empty.`);
+    }
+    const decimals = pair.borrowedToken.decimals;
+    const seenTradeSizes = new Set();
+    for (let i = 0; i < pair.tradeSizes.length; i += 1) {
+      if (typeof pair.tradeSizes[i] !== "string") {
+        throw new Error(`${prefix}.tradeSizes[${i}] must be a string.`);
+      }
+      let tradeSize;
+      try {
+        tradeSize = ethers.parseUnits(pair.tradeSizes[i], decimals);
+      } catch (err) {
+        throw new Error(
+          `${prefix}.tradeSizes[${i}] must be parseable with borrowedToken.decimals (${decimals}).`
+        );
+      }
+      if (tradeSize <= 0n) {
+        throw new Error(`${prefix}.tradeSizes[${i}] must be greater than 0.`);
+      }
+      if (seenTradeSizes.has(tradeSize.toString())) {
+        throw new Error(`${prefix}.tradeSizes[${i}] duplicates an earlier trade size (${tradeSize}).`);
+      }
+      seenTradeSizes.add(tradeSize.toString());
+    }
+
+    if (pair.legOut.kind !== "V2" && pair.legOut.kind !== "V3") {
+      throw new Error(`${prefix}.legOut.kind must be "V2" or "V3".`);
+    }
+    if (pair.legBack.kind !== "V2" && pair.legBack.kind !== "V3") {
+      throw new Error(`${prefix}.legBack.kind must be "V2" or "V3".`);
+    }
+
+    const v3Fees = [100, 500, 3000, 10000];
+    if (pair.legOut.kind === "V3") {
+      if (!Number.isInteger(pair.legOut.v3Fee) || !v3Fees.includes(pair.legOut.v3Fee)) {
+        throw new Error(`${prefix}.legOut.v3Fee must be one of 100, 500, 3000 or 10000 when kind is "V3".`);
+      }
+      if (pair.legOut.quoter === undefined) {
+        throw new Error(`${prefix}.legOut.quoter is required when kind is "V3".`);
+      }
+    }
+    if (pair.legBack.kind === "V3") {
+      if (!Number.isInteger(pair.legBack.v3Fee) || !v3Fees.includes(pair.legBack.v3Fee)) {
+        throw new Error(`${prefix}.legBack.v3Fee must be one of 100, 500, 3000 or 10000 when kind is "V3".`);
+      }
+      if (pair.legBack.quoter === undefined) {
+        throw new Error(`${prefix}.legBack.quoter is required when kind is "V3".`);
+      }
+    }
+
     validateAddress(pair.legOut.router, `${prefix}.legOut.router`);
     const legOutTokenOut = validateAddress(pair.legOut.tokenOut, `${prefix}.legOut.tokenOut`);
     if (pair.legOut.quoter !== undefined) {
