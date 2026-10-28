@@ -1,5 +1,6 @@
 const { artifacts, ethers, network } = require("hardhat");
 const { NETWORKS } = require("../bot/networks");
+const { sanitizeError } = require("../bot/sanitizeError");
 const { validateOwner } = require("./validateOwner");
 
 const CONTRACT_NAME = "FlashArbExecutor";
@@ -135,6 +136,7 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(error);
+  const safe = sanitizeError(error);
+  console.error(`Deploy-live failed: ${safe.code ?? "UNKNOWN"} - ${safe.shortMessage ?? "no message"}`);
   process.exitCode = 1;
 });
