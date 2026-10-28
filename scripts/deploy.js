@@ -1,4 +1,5 @@
 const { ethers, network } = require("hardhat");
+const { AAVE_BY_CHAIN_ID, validateAaveAddresses } = require("./validateAave");
 
 const RPC_ENV_BY_NETWORK = {
   arbitrum: "ARBITRUM_RPC_URL",
@@ -51,11 +52,32 @@ async function main() {
     }
   }
 
-  const addressesProvider = readRequiredEnv(
-    "AAVE_POOL_ADDRESSES_PROVIDER",
-    "Look up the current Aave V3 PoolAddressesProvider for Arbitrum at " +
-      "https://docs.aave.com/developers/deployed-contracts/v3-mainnet/arbitrum before deploying."
-  );
+  const chainId = Number(network.config.chainId);
+  let addressesProvider = process.env.AAVE_POOL_ADDRESSES_PROVIDER?.trim();
+  if (!addressesProvider) {
+    const fallback = AAVE_BY_CHAIN_ID[chainId];
+    if (!fallback) {
+      throw new Error(
+        `Missing AAVE_POOL_ADDRESSES_PROVIDER and no Aave V3 default for chainId ${chainId} in bot/networks.js.`
+      );
+    }
+    addressesProvider = fallback.provider;
+    console.log(`AAVE_POOL_ADDRESSES_PROVIDER is not set - using bot/networks.js default for chainId ${chainId}.`);
+  }
+
+  try {
+    const validated = await validateAaveAddresses({
+      provider: ethers.provider,
+      addressesProvider,
+      chainId,
+    });
+    addressesProvider = validated.provider;
+    console.log(`Aave addresses validated: provider=${validated.provider}, pool=${validated.pool}`);
+  } catch (error) {
+    console.error(`Aave address validation failed: ${error.message}`);
+    process.exitCode = 1;
+    return;
+  }
 
   const [deployer] = await ethers.getSigners();
   if (!deployer) {
