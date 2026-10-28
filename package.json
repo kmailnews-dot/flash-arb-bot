@@ -22,5 +22,10 @@
     "@openzeppelin/contracts": "^5.0.2",
     "dotenv": "^16.4.5",
     "ethers": "^6.13.0"
+  },
+  "overrides": {
+    "lodash": "4.18.1",
+    "@ethersproject/providers": { "ws": "8.22.0" },
+    "mocha": { "serialize-javascript": "7.1.4" }
   }
 }
