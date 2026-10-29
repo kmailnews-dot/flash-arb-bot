@@ -41,6 +41,6 @@ Ces règles s'appliquent à toutes les sessions sur ce projet. Lis-les avant tou
 ## 8. CONTEXTE DU PROJET (mis à jour manuellement)
 - **Stack** : Solidity ^0.8.20, Node.js 20, Hardhat, ethers v6, Aave V3, Uniswap V3 (SwapRouter original uniquement, jamais SwapRouter02), SushiSwap V2.
 - **Réseau** : Arbitrum One (42161), Arbitrum Sepolia (421614).
-- **Dernier commit** : à mettre à jour.
-- **Prochaine étape** : à mettre à jour.
-- **Tests** : à mettre à jour (nombre de passing / pending).
+- **Dernier commit** : ce5042a (P1-9b-3: overrides undici 6.29.1).
+- **Prochaine étape** : Aucune (projet stable, 0 high, 0 critical, prêt pour DRY_RUN ou live).
+- **Tests** : 104 passing, 2 pending (tests fork).
