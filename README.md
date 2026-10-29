@@ -190,7 +190,8 @@ at `SCAN_LOG_PATH` (default `./logs/scans.jsonl`). Each line records `timestamp`
 Parent directories are created automatically, and a persistence failure is logged as a warning
 without stopping the scan. `logs/` is ignored by Git.
 
-The scheduled GitHub Actions runner is ephemeral, so `scan.yml` uploads the file as the
+The scheduled GitHub Actions runner is ephemeral, so [`scan.yml`](.github/workflows/scan.yml)
+uploads the file as the
 `scan-log` artifact after every run (90-day retention). Download the artifacts to analyse them
 together, or run `npm run scan` on a persistent machine (cron/systemd timer) to keep a single
 cumulative file. A quick analysis:
@@ -227,6 +228,21 @@ gas reservation cannot read/write its state, the bot fails closed and sends noth
 transaction. A successful trade resets the consecutive-failure counter. The contract's on-chain
 `minProfit` logic is unchanged.
 
+## Monitoring
+
+Two lightweight checks surface operational problems in the workflow logs:
+
+- `MIN_WALLET_BALANCE_ETH` (default `0.005`): when a wallet key is configured (live execution),
+  the bot checks the gas wallet at the start of each scan and logs a `[BALANCE LOW]` warning if
+  the balance is below this threshold. It is an alert only and does not block the run; the
+  scheduled scan never receives `PRIVATE_KEY`, so it skips this check.
+- `MAX_RPC_ERRORS_PER_SCAN` (default `3`): the bot counts per-quote errors (RPC/quote failures)
+  during a scan and logs `[RPC ERRORS] N erreurs sur ce cycle.` when the count is greater than
+  this value. Like the balance warning, it is informational and does not stop the scan.
+
+Both messages appear in the Actions run log; the per-result errors are also written to
+`SCAN_LOG_PATH` for later analysis.
+
 ## Configuring pairs & DEXs
 
 `PAIRS_CONFIG_JSON` is a JSON array — each entry is one borrow/swap/swap-back route to scan,
@@ -245,7 +261,22 @@ across chosen trade sizes. Full field reference and a worked example are in
   doesn't expose a quoting function itself. Do not use SwapRouter02: its `ExactInputSingleParams`
   has no `deadline` field, so it is incompatible with the executor's `ISwapRouterV3Like` interface.
 
-Example route for **Arbitrum One** (SushiSwap V2, WETH → native USDC):
+`PAIRS_CONFIG_JSON` is an array, so you can scan several pairs in the same run — the production
+configuration currently uses 7. For example, append this USDC/WBTC route that uses Camelot V2 for
+the outbound leg and SushiSwap V2 for the return leg:
+
+```json
+{
+  "label": "USDC/WBTC via Camelot V2 + SushiSwap V2",
+  "borrowedToken": {"address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "decimals": 6, "symbol": "USDC", "isStable": true},
+  "intermediateToken": {"address": "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f", "decimals": 8, "symbol": "WBTC"},
+  "legOut": {"kind": "V2", "router": "0xc873fEcbd354f5A56E00E710B90EF4201db2448d", "tokenOut": "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f"},
+  "legBack": {"kind": "V2", "router": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506", "tokenOut": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"},
+  "tradeSizes": ["10", "50", "100"]
+}
+```
+
+Example `ETH_USD_ROUTE_JSON` for **Arbitrum One** (SushiSwap V2, WETH → native USDC):
 
 ```json
 {
@@ -278,7 +309,13 @@ DRY_RUN=false npm run scan                               # exercises the full on
 ```
 
 This is also what the test suite (`npm test`) exercises at the unit level — see
-`test/FlashArbExecutor.test.js`.
+`test/FlashArbExecutor.test.js`. The fast suite is **107 passing, 2 pending** (the pending tests
+are the optional fork tests below), and CI runs it via
+[`ci.yml`](.github/workflows/ci.yml).
+
+**Known local-deployment limitation:** `npx hardhat run scripts/deploy.js --network hardhat` fails
+because chainId `31337` has no Aave V3 addresses in `bot/networks.js`. This is a known limitation,
+not a bug; use `scripts/seedLocalMocks.js` above for a local mock deployment.
 
 ## Fork integration test (optional)
 
@@ -301,8 +338,9 @@ instead of failing.
 See [`.env.example`](.env.example) for every environment variable / secret this project reads,
 with inline explanations — RPC URL, `DRY_RUN`, gas and slippage tuning, `MIN_PROFIT_USD`,
 `SCAN_LOG_PATH`, the loss-guard limits (`EXPECTED_CHAIN_ID`, `MAX_WALLET_BALANCE_ETH`,
-`MAX_DAILY_GAS_ETH`, `MAX_CONSECUTIVE_FAILURES`, `CIRCUIT_BREAKER_COOLDOWN_MINUTES`), the fork-test
-block, and the `PAIRS_CONFIG_JSON` / `ETH_USD_ROUTE_JSON` shapes.
+`MAX_DAILY_GAS_ETH`, `MAX_CONSECUTIVE_FAILURES`, `CIRCUIT_BREAKER_COOLDOWN_MINUTES`), the
+monitoring thresholds (`MIN_WALLET_BALANCE_ETH`, `MAX_RPC_ERRORS_PER_SCAN`), the fork-test block,
+and the `PAIRS_CONFIG_JSON` / `ETH_USD_ROUTE_JSON` shapes.
 
 ## Security notes
 
