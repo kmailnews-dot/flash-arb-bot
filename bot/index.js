@@ -3,6 +3,7 @@ const { getEthUsdPrice, scanPair } = require("./scanner");
 const { maybeExecute } = require("./executor");
 const { DEFAULT_SCAN_LOG_PATH, appendScanResult } = require("./persist");
 const { NETWORKS } = require("./networks");
+const { checkWalletBalanceLow } = require("./guards");
 
 const AAVE_POOL_PREMIUM_ABI = ["function FLASHLOAN_PREMIUM_TOTAL() view returns (uint128)"];
 
@@ -99,6 +100,21 @@ async function main({
   ]);
   const chainId = Number(network.chainId);
 
+  if (config.privateKey) {
+    const walletAddress = new ethers.Wallet(config.privateKey).address;
+    const balanceCheck = await checkWalletBalanceLow({
+      provider,
+      address: walletAddress,
+      minWalletBalanceEth: config.minWalletBalanceEth,
+    });
+    if (!balanceCheck.ok) {
+      console.warn(
+        `[BALANCE LOW] ${walletAddress} holds ${ethers.formatEther(balanceCheck.balanceWei)} ETH, ` +
+          `below MIN_WALLET_BALANCE_ETH=${config.minWalletBalanceEth}`
+      );
+    }
+  }
+
   if (config.dryRun === false && ethUsdPrice === null) {
     const reason =
       "ETH_USD_ROUTE_JSON required for live execution, but quote failed. Set DRY_RUN=true or fix the route.";
@@ -124,6 +140,7 @@ async function main({
   let scanned = 0;
   let opportunities = 0;
   let executed = 0;
+  let rpcErrors = 0;
   const executionConfig = { ...config, ethUsdPrice, aaveFlashLoanPremiumBps };
 
   for (const pair of config.pairs) {
@@ -135,6 +152,7 @@ async function main({
       await persistResultSafely(scanLogPath, result, chainId);
 
       if (result.error) {
+        rpcErrors += 1;
         console.log(`  ${result.tradeSizeHuman} ${pair.borrowedToken.symbol}: ERROR - ${describeError(result.error)}`);
         continue;
       }
@@ -162,6 +180,10 @@ async function main({
         if (outcome.submitted) executed += 1;
       }
     }
+  }
+
+  if (rpcErrors > config.maxRpcErrorsPerScan) {
+    console.warn(`[RPC ERRORS] ${rpcErrors} erreurs sur ce cycle.`);
   }
 
   console.log(

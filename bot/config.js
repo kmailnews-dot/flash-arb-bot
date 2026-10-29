@@ -221,6 +221,8 @@ const config = {
   // to be sent. See README "Live-execution loss guards" and bot/guards.js.
   expectedChainId: optionalNumber("EXPECTED_CHAIN_ID", 42161),
   maxWalletBalanceEth: optionalNumber("MAX_WALLET_BALANCE_ETH", 0.1),
+  minWalletBalanceEth: optionalNumber("MIN_WALLET_BALANCE_ETH", 0.005),
+  maxRpcErrorsPerScan: optionalNumber("MAX_RPC_ERRORS_PER_SCAN", 3),
   maxDailyGasEth: optionalNumber("MAX_DAILY_GAS_ETH", 0.01),
   maxConsecutiveFailures: optionalNumber("MAX_CONSECUTIVE_FAILURES", 5),
   circuitBreakerCooldownMinutes: optionalNumber("CIRCUIT_BREAKER_COOLDOWN_MINUTES", 60),

@@ -6,6 +6,7 @@ const path = require("path");
 const {
   checkChainId,
   checkWalletBalance,
+  checkWalletBalanceLow,
   addGasSpent,
   checkDailyGas,
   checkCircuitBreaker,
@@ -50,6 +51,37 @@ describe("bot/guards", function () {
       maxWalletBalanceEth: 10000,
     });
     expect(allowed.ok).to.equal(true);
+  });
+
+  it("accepts a wallet balance above MIN_WALLET_BALANCE_ETH", async function () {
+    const [signer] = await ethers.getSigners();
+
+    const result = await checkWalletBalanceLow({
+      provider: ethers.provider,
+      address: signer.address,
+      minWalletBalanceEth: 0.001,
+    });
+    expect(result.ok).to.equal(true);
+  });
+
+  it("flags a wallet balance below MIN_WALLET_BALANCE_ETH", async function () {
+    const result = await checkWalletBalanceLow({
+      provider: ethers.provider,
+      address: ethers.Wallet.createRandom().address,
+      minWalletBalanceEth: 0.005,
+    });
+    expect(result.ok).to.equal(false);
+    expect(result.error).to.include("WALLET_BALANCE_BELOW_MIN");
+    expect(result.error).to.include("0.005");
+  });
+
+  it("accepts any balance when MIN_WALLET_BALANCE_ETH is zero", async function () {
+    const result = await checkWalletBalanceLow({
+      provider: ethers.provider,
+      address: ethers.Wallet.createRandom().address,
+      minWalletBalanceEth: 0,
+    });
+    expect(result.ok).to.equal(true);
   });
 
   it("persists daily gas spend and blocks a trade that would exceed the cap", async function () {

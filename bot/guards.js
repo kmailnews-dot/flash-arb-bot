@@ -59,6 +59,22 @@ async function checkWalletBalance({ provider, address, maxWalletBalanceEth = 0.1
   return { ok: true, balanceWei, maxWei };
 }
 
+async function checkWalletBalanceLow({ provider, address, minWalletBalanceEth = 0 }) {
+  const balanceWei = await provider.getBalance(address);
+  const minWei = ethers.parseEther(String(minWalletBalanceEth));
+  if (balanceWei < minWei) {
+    return {
+      ok: false,
+      balanceWei,
+      minWei,
+      error:
+        `WALLET_BALANCE_BELOW_MIN: ${ethers.formatEther(balanceWei)} ETH is below ` +
+        `${minWalletBalanceEth} ETH (MIN_WALLET_BALANCE_ETH)`,
+    };
+  }
+  return { ok: true, balanceWei, minWei };
+}
+
 async function readGasSpent({ filePath = DEFAULT_GAS_SPENT_PATH, now = Date.now() } = {}) {
   const today = utcDay(now);
   const state = await readState(filePath, null);
@@ -157,6 +173,7 @@ module.exports = {
   utcDay,
   checkChainId,
   checkWalletBalance,
+  checkWalletBalanceLow,
   readGasSpent,
   checkDailyGas,
   addGasSpent,
