@@ -10,7 +10,7 @@ on:
   # tighten it once you've confirmed the bot behaves the way you expect. GitHub Actions schedules
   # can lag a few minutes under load, so treat this as "roughly every 10 minutes", not exact.
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/5 * * * *"
   # Lets you trigger a run by hand from the Actions tab (works fine from mobile Safari/GitHub app).
   workflow_dispatch: {}
 
