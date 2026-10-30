@@ -5,6 +5,7 @@ const os = require("os");
 const path = require("path");
 const {
   checkChainId,
+  checkContractOwner,
   checkWalletBalance,
   checkWalletBalanceLow,
   addGasSpent,
@@ -151,5 +152,29 @@ describe("bot/guards", function () {
     await recordSuccess({ filePath: breakerPath });
     const afterSuccess = JSON.parse(fs.readFileSync(breakerPath, "utf8"));
     expect(afterSuccess.consecutiveFailures).to.equal(0);
+  });
+});
+
+describe("bot/guards checkContractOwner", function () {
+  it("accepts a contract owner matching the wallet", async function () {
+    const walletAddress = ethers.Wallet.createRandom().address;
+    const contract = { owner: async () => walletAddress };
+
+    const result = await checkContractOwner({ contract, walletAddress });
+
+    expect(result.ok).to.equal(true);
+    expect(result.owner).to.equal(walletAddress);
+  });
+
+  it("rejects a contract owner that differs from the wallet", async function () {
+    const walletAddress = ethers.Wallet.createRandom().address;
+    const owner = ethers.Wallet.createRandom().address;
+    const contract = { owner: async () => owner };
+
+    const result = await checkContractOwner({ contract, walletAddress });
+
+    expect(result.ok).to.equal(false);
+    expect(result.owner).to.equal(owner);
+    expect(result.error).to.include("CONTRACT_OWNER_MISMATCH");
   });
 });

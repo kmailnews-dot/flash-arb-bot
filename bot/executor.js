@@ -6,6 +6,7 @@ const {
   DEFAULT_GAS_SPENT_PATH,
   DEFAULT_CIRCUIT_BREAKER_PATH,
   checkChainId,
+  checkContractOwner,
   checkWalletBalance,
   checkDailyGas,
   addGasSpent,
@@ -205,6 +206,17 @@ async function maybeExecute({
   const wallet = new ethers.Wallet(config.privateKey, provider);
   const contract =
     injectedContract || new ethers.Contract(config.contractAddress, FLASH_ARB_EXECUTOR_ABI, wallet);
+
+  const ownerCheck =
+    typeof contract.owner === "function"
+      ? await runGuard("contract owner", () =>
+          checkContractOwner({ contract, walletAddress: wallet.address })
+        )
+      : { ok: true };
+  if (!ownerCheck.ok) {
+    console.log(`  [OWNER GUARD] ${ownerCheck.error} - transaction not sent.`);
+    return { submitted: false, guard: "contractOwner", error: ownerCheck.error };
+  }
 
   const breaker = await runGuard("circuit breaker", () =>
     checkCircuitBreaker({ filePath: settings.circuitBreakerPath })

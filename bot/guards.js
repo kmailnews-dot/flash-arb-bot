@@ -43,6 +43,19 @@ async function checkChainId({ provider, expectedChainId }) {
   return { ok: true, chainId: Number(network.chainId) };
 }
 
+async function checkContractOwner({ contract, walletAddress }) {
+  const owner = await contract.owner();
+  if (owner.toLowerCase() !== walletAddress.toLowerCase()) {
+    return {
+      ok: false,
+      owner,
+      walletAddress,
+      error: `CONTRACT_OWNER_MISMATCH: contract owner is ${owner}, wallet is ${walletAddress}`,
+    };
+  }
+  return { ok: true, owner };
+}
+
 async function checkWalletBalance({ provider, address, maxWalletBalanceEth = 0.1 }) {
   const balanceWei = await provider.getBalance(address);
   const maxWei = ethers.parseEther(String(maxWalletBalanceEth));
@@ -172,6 +185,7 @@ module.exports = {
   DEFAULT_CIRCUIT_BREAKER_PATH,
   utcDay,
   checkChainId,
+  checkContractOwner,
   checkWalletBalance,
   checkWalletBalanceLow,
   readGasSpent,
