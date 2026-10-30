@@ -4,6 +4,8 @@ const BORROWED = "0x1111111111111111111111111111111111111111";
 const INTERMEDIATE = "0x2222222222222222222222222222222222222222";
 const ROUTER_OUT = "0x3333333333333333333333333333333333333333";
 const ROUTER_BACK = "0x4444444444444444444444444444444444444444";
+const V3_SWAP_ROUTER = "0xE592427A0AEce92De3Edee1F18E0157C05861564";
+const V3_SWAP_ROUTER_02 = "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45";
 
 function makePair() {
   return {
@@ -297,5 +299,35 @@ describe("bot/config validatePairs", function () {
     expect(() =>
       validatePairs([pairWithLegBack({ kind: "V3", v3Fee: 500, quoter: "not-an-address" })])
     ).to.throw("Invalid address at PAIRS_CONFIG_JSON[0].legBack.quoter");
+  });
+
+  it("rejects a V3 leg using SwapRouter02", function () {
+    expect(() =>
+      validatePairs([
+        pairWithLegOut({ kind: "V3", v3Fee: 500, quoter: ROUTER_OUT, router: V3_SWAP_ROUTER_02 }),
+      ])
+    ).to.throw(
+      "PAIRS_CONFIG_JSON[0].legOut.router must be the original Uniswap V3 SwapRouter (0xE592...1564), not SwapRouter02 (0x68b3...Fc45)"
+    );
+    expect(() =>
+      validatePairs([
+        pairWithLegBack({ kind: "V3", v3Fee: 500, quoter: ROUTER_BACK, router: V3_SWAP_ROUTER_02 }),
+      ])
+    ).to.throw(
+      "PAIRS_CONFIG_JSON[0].legBack.router must be the original Uniswap V3 SwapRouter (0xE592...1564), not SwapRouter02 (0x68b3...Fc45)"
+    );
+  });
+
+  it("accepts a V3 leg using the original Uniswap V3 SwapRouter", function () {
+    expect(() =>
+      validatePairs([
+        pairWithLegOut({ kind: "V3", v3Fee: 500, quoter: ROUTER_OUT, router: V3_SWAP_ROUTER }),
+      ])
+    ).to.not.throw();
+    expect(() =>
+      validatePairs([
+        pairWithLegBack({ kind: "V3", v3Fee: 500, quoter: ROUTER_BACK, router: V3_SWAP_ROUTER }),
+      ])
+    ).to.not.throw();
   });
 });

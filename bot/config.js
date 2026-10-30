@@ -136,6 +136,18 @@ function validatePairs(pairs) {
       validateAddress(pair.legBack.quoter, `${prefix}.legBack.quoter`);
     }
 
+    const originalV3SwapRouter = "0xE592427A0AEce92De3Edee1F18E0157C05861564";
+    if (pair.legOut.kind === "V3" && ethers.getAddress(pair.legOut.router) !== originalV3SwapRouter) {
+      throw new Error(
+        `${prefix}.legOut.router must be the original Uniswap V3 SwapRouter (0xE592...1564), not SwapRouter02 (0x68b3...Fc45)`
+      );
+    }
+    if (pair.legBack.kind === "V3" && ethers.getAddress(pair.legBack.router) !== originalV3SwapRouter) {
+      throw new Error(
+        `${prefix}.legBack.router must be the original Uniswap V3 SwapRouter (0xE592...1564), not SwapRouter02 (0x68b3...Fc45)`
+      );
+    }
+
     if (legOutTokenOut !== intermediate) {
       throw new Error(`${prefix}.legOut.tokenOut must equal intermediateToken.address (${intermediate}).`);
     }

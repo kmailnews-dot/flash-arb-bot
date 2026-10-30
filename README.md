@@ -261,6 +261,12 @@ across chosen trade sizes. Full field reference and a worked example are in
   doesn't expose a quoting function itself. Do not use SwapRouter02: its `ExactInputSingleParams`
   has no `deadline` field, so it is incompatible with the executor's `ISwapRouterV3Like` interface.
 
+A V3 leg must point to the original Uniswap V3 SwapRouter
+(`0xE592427A0AEce92De3Edee1F18E0157C05861564`), not SwapRouter02
+(`0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45`). SwapRouter02's `ExactInputSingleParams` has no
+`deadline` field, so a V3 leg pointing at it reverts (no funds are lost, but gas is spent);
+`validatePairs` rejects this configuration before the bot starts.
+
 `PAIRS_CONFIG_JSON` is an array, so you can scan several pairs in the same run — the production
 configuration currently uses 7. For example, append this USDC/WBTC route that uses Camelot V2 for
 the outbound leg and SushiSwap V2 for the return leg:
