@@ -21,6 +21,10 @@ on:
         default: ""
         type: string
 
+concurrency:
+  group: flash-arb-deploy
+  cancel-in-progress: false
+
 jobs:
   deploy:
     permissions:
