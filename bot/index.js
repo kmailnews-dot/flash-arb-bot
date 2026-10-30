@@ -144,41 +144,45 @@ async function main({
   const executionConfig = { ...config, ethUsdPrice, aaveFlashLoanPremiumBps };
 
   for (const pair of config.pairs) {
-    console.log(`\nScanning ${pair.label} ...`);
-    const results = await scanPairImpl({ provider, pair, config, gasPriceWei, ethUsdPrice });
+    try {
+      console.log(`\nScanning ${pair.label} ...`);
+      const results = await scanPairImpl({ provider, pair, config, gasPriceWei, ethUsdPrice });
 
-    for (const result of results) {
-      scanned += 1;
-      await persistResultSafely(scanLogPath, result, chainId);
+      for (const result of results) {
+        scanned += 1;
+        await persistResultSafely(scanLogPath, result, chainId);
 
-      if (result.error) {
-        rpcErrors += 1;
-        console.log(`  ${result.tradeSizeHuman} ${pair.borrowedToken.symbol}: ERROR - ${describeError(result.error)}`);
-        continue;
+        if (result.error) {
+          rpcErrors += 1;
+          console.log(`  ${result.tradeSizeHuman} ${pair.borrowedToken.symbol}: ERROR - ${describeError(result.error)}`);
+          continue;
+        }
+
+        const profitStr = ethers.formatUnits(result.grossProfit, pair.borrowedToken.decimals);
+        const usdStr = result.netProfitUsd !== null ? ` (~$${result.netProfitUsd.toFixed(2)} net)` : "";
+        console.log(
+          `  ${result.tradeSizeHuman} ${pair.borrowedToken.symbol}: gross profit ${profitStr} ` +
+            `${pair.borrowedToken.symbol}${usdStr}${result.isOpportunity ? " -> OPPORTUNITY" : ""}`
+        );
+
+        if (result.isOpportunity) opportunities += 1;
       }
 
-      const profitStr = ethers.formatUnits(result.grossProfit, pair.borrowedToken.decimals);
-      const usdStr = result.netProfitUsd !== null ? ` (~$${result.netProfitUsd.toFixed(2)} net)` : "";
-      console.log(
-        `  ${result.tradeSizeHuman} ${pair.borrowedToken.symbol}: gross profit ${profitStr} ` +
-          `${pair.borrowedToken.symbol}${usdStr}${result.isOpportunity ? " -> OPPORTUNITY" : ""}`
-      );
+      const best = selectBestResult(results);
+      if (best && !best.error) {
+        const bestGross = ethers.formatUnits(best.grossProfit, pair.borrowedToken.decimals);
+        const bestNet = hasNetProfit(best) ? best.netProfitUsd.toFixed(2) : "n/a";
+        console.log(
+          `  [BEST] pair=${pair.label}, size=${best.tradeSizeHuman}, gross=${bestGross}, net=${bestNet}`
+        );
 
-      if (result.isOpportunity) opportunities += 1;
-    }
-
-    const best = selectBestResult(results);
-    if (best && !best.error) {
-      const bestGross = ethers.formatUnits(best.grossProfit, pair.borrowedToken.decimals);
-      const bestNet = hasNetProfit(best) ? best.netProfitUsd.toFixed(2) : "n/a";
-      console.log(
-        `  [BEST] pair=${pair.label}, size=${best.tradeSizeHuman}, gross=${bestGross}, net=${bestNet}`
-      );
-
-      if (best.isOpportunity) {
-        const outcome = await maybeExecuteImpl({ opportunity: best, provider, config: executionConfig });
-        if (outcome.submitted) executed += 1;
+        if (best.isOpportunity) {
+          const outcome = await maybeExecuteImpl({ opportunity: best, provider, config: executionConfig });
+          if (outcome.submitted) executed += 1;
+        }
       }
+    } catch (err) {
+      console.warn(`[PAIR ERROR] ${pair.label}: ${err.message} - continuing to next pair.`);
     }
   }
 
