@@ -117,4 +117,28 @@ describe("bot/config validateScannerConfig", function () {
       "MAX_DAILY_GAS_ETH must be a finite number > 0."
     );
   });
+
+  it("rejects a gasPriceBufferPct above 1000", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, gasPriceBufferPct: 1001 })).to.throw(
+      "GAS_PRICE_BUFFER_PCT must be <= 1000."
+    );
+  });
+
+  it("rejects a maxGasLimit above 10000000", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, maxGasLimit: 10000001n })).to.throw(
+      "MAX_GAS_LIMIT must be <= 10000000."
+    );
+  });
+
+  it("rejects a maxWalletBalanceEth above 10", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, maxWalletBalanceEth: 11 })).to.throw(
+      "MAX_WALLET_BALANCE_ETH must be <= 10."
+    );
+  });
+
+  it("rejects a maxDailyGasEth above 10", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, maxDailyGasEth: 11 })).to.throw(
+      "MAX_DAILY_GAS_ETH must be <= 10."
+    );
+  });
 });

@@ -223,8 +223,14 @@ function validateScannerConfig({
   if (typeof gasPriceBufferPct !== "number" || !Number.isInteger(gasPriceBufferPct) || gasPriceBufferPct < 0) {
     throw new Error("GAS_PRICE_BUFFER_PCT must be a non-negative integer.");
   }
+  if (gasPriceBufferPct > 1000) {
+    throw new Error("GAS_PRICE_BUFFER_PCT must be <= 1000.");
+  }
   if (typeof maxGasLimit !== "bigint" || maxGasLimit <= 0n) {
     throw new Error("MAX_GAS_LIMIT must be a positive bigint.");
+  }
+  if (maxGasLimit > 10_000_000n) {
+    throw new Error("MAX_GAS_LIMIT must be <= 10000000.");
   }
   if (
     typeof maxWalletBalanceEth !== "number" ||
@@ -233,12 +239,18 @@ function validateScannerConfig({
   ) {
     throw new Error("MAX_WALLET_BALANCE_ETH must be a finite number > 0.");
   }
+  if (maxWalletBalanceEth > 10) {
+    throw new Error("MAX_WALLET_BALANCE_ETH must be <= 10.");
+  }
   if (
     typeof maxDailyGasEth !== "number" ||
     !Number.isFinite(maxDailyGasEth) ||
     maxDailyGasEth <= 0
   ) {
     throw new Error("MAX_DAILY_GAS_ETH must be a finite number > 0.");
+  }
+  if (maxDailyGasEth > 10) {
+    throw new Error("MAX_DAILY_GAS_ETH must be <= 10.");
   }
 }
 
