@@ -167,4 +167,103 @@ describe("bot/index main", function () {
     expect(executions).to.equal(0);
     expect(errors.join("\n")).to.include(`[LIVE REFUSED] ${reason}`);
   });
+
+  it("derives exitCode 1 when live execution is refused", async function () {
+    const config = {
+      dryRun: false,
+      pairs: [],
+      ethUsdRoute: null,
+    };
+
+    const summary = await main({ provider: ethers.provider, config, scanPair: async () => [] });
+
+    expect(summary.refused).to.equal(true);
+    expect(summary.exitCode ?? (summary.refused ? 1 : 0)).to.equal(1);
+  });
+
+  it("sets exitCode 1 when rpcErrors exceeds maxRpcErrorsPerScan", async function () {
+    const scanDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-rpc-errors-"));
+    const pair = {
+      label: "BOR/MID exit code pair",
+      borrowedToken: { address: ethers.Wallet.createRandom().address, decimals: 18, symbol: "BOR" },
+      intermediateToken: { address: ethers.Wallet.createRandom().address, decimals: 18, symbol: "MID" },
+    };
+    const config = {
+      dryRun: true,
+      scanLogPath: path.join(scanDir, "scans.jsonl"),
+      pairs: [pair],
+      aaveFlashLoanPremiumBps: 5n,
+      ethUsdRoute: null,
+      maxRpcErrorsPerScan: 1,
+    };
+
+    const summary = await main({
+      provider: ethers.provider,
+      config,
+      scanPair: async () => [
+        { tradeSizeHuman: "1000", error: new Error("RPC down") },
+        { tradeSizeHuman: "1000", error: new Error("RPC down") },
+      ],
+    });
+
+    expect(summary.scanned).to.equal(2);
+    expect(summary.exitCode).to.equal(1);
+    fs.rmSync(scanDir, { recursive: true, force: true });
+  });
+
+  it("sets exitCode 1 when no result is scanned", async function () {
+    const scanDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-zero-scanned-"));
+    const pair = {
+      label: "BOR/MID exit code pair",
+      borrowedToken: { address: ethers.Wallet.createRandom().address, decimals: 18, symbol: "BOR" },
+      intermediateToken: { address: ethers.Wallet.createRandom().address, decimals: 18, symbol: "MID" },
+    };
+    const config = {
+      dryRun: true,
+      scanLogPath: path.join(scanDir, "scans.jsonl"),
+      pairs: [pair],
+      aaveFlashLoanPremiumBps: 5n,
+      ethUsdRoute: null,
+      maxRpcErrorsPerScan: 0,
+    };
+
+    const summary = await main({
+      provider: ethers.provider,
+      config,
+      scanPair: async () => [],
+    });
+
+    expect(summary.scanned).to.equal(0);
+    expect(summary.exitCode).to.equal(1);
+    fs.rmSync(scanDir, { recursive: true, force: true });
+  });
+
+  it("sets exitCode 0 on a normal scan", async function () {
+    const scanDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-normal-scan-"));
+    const pair = {
+      label: "BOR/MID exit code pair",
+      borrowedToken: { address: ethers.Wallet.createRandom().address, decimals: 18, symbol: "BOR" },
+      intermediateToken: { address: ethers.Wallet.createRandom().address, decimals: 18, symbol: "MID" },
+    };
+    const config = {
+      dryRun: true,
+      scanLogPath: path.join(scanDir, "scans.jsonl"),
+      pairs: [pair],
+      aaveFlashLoanPremiumBps: 5n,
+      ethUsdRoute: null,
+      maxRpcErrorsPerScan: 0,
+    };
+
+    const summary = await main({
+      provider: ethers.provider,
+      config,
+      scanPair: async () => [
+        { tradeSizeHuman: "1000", grossProfit: 1n, netProfitUsd: null, isOpportunity: false },
+      ],
+    });
+
+    expect(summary.scanned).to.equal(1);
+    expect(summary.exitCode).to.equal(0);
+    fs.rmSync(scanDir, { recursive: true, force: true });
+  });
 });

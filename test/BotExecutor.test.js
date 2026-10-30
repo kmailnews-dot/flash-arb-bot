@@ -118,23 +118,20 @@ describe("bot/executor maybeExecute", function () {
 
   async function opportunityAboveGasFloor({ opportunity, config, estimatedGas = 300000n }) {
     const feeData = await ethers.provider.getFeeData();
-    const gasPriceWei = feeData.gasPrice ?? feeData.maxFeePerGas;
+    const decisionGasPriceWei = feeData.maxFeePerGas ?? feeData.gasPrice;
     const gasLimitWithMargin = (estimatedGas * 11500n) / 10000n;
     const gasCost = gasCostInBorrowedToken({
-      gasCostWei: gasLimitWithMargin * gasPriceWei,
+      gasCostWei: gasLimitWithMargin * decisionGasPriceWei,
       pair: opportunity.pair,
       config,
     });
     const gasFloor = (gasCost * 11000n) / 10000n;
-    const maxFeeCost = feeData.maxFeePerGas
-      ? gasCostInBorrowedToken({
-          gasCostWei: feeData.maxFeePerGas * gasLimitWithMargin,
-          pair: opportunity.pair,
-          config,
-        })
-      : null;
-    const profitFloor = maxFeeCost !== null && maxFeeCost > gasFloor ? maxFeeCost : gasFloor;
-    return { gasFloor, opportunity: { ...opportunity, grossProfit: profitFloor + 1n } };
+    const margin = gasFloor / 100n + 1n;
+    return {
+      gasFloor,
+      gasCost,
+      opportunity: { ...opportunity, grossProfit: gasFloor + margin },
+    };
   }
 
   it("simulates, estimates gas and submits within the configured cap", async function () {
@@ -703,24 +700,12 @@ describe("bot/executor maybeExecute", function () {
     const { opportunity, makeConfig } = await deployFixture();
     const config = makeConfig({ minProfitUsd: 5 });
     const { contract, calls } = makeSpyContract();
-    const feeData = await ethers.provider.getFeeData();
-    const gasPriceWei = feeData.gasPrice ?? feeData.maxFeePerGas;
-    const gasLimitWithMargin = (300000n * 11500n) / 10000n;
-    const gasCost = gasCostInBorrowedToken({
-      gasCostWei: gasLimitWithMargin * gasPriceWei,
-      pair: opportunity.pair,
+    const { gasFloor, gasCost, opportunity: aboveFloorOpportunity } = await opportunityAboveGasFloor({
+      opportunity,
       config,
     });
-    const gasFloor = (gasCost * 11000n) / 10000n;
-    const maxFeeCost = feeData.maxFeePerGas
-      ? gasCostInBorrowedToken({
-          gasCostWei: feeData.maxFeePerGas * gasLimitWithMargin,
-          pair: opportunity.pair,
-          config,
-        })
-      : null;
-    const profitFloor = maxFeeCost !== null && maxFeeCost > gasFloor ? maxFeeCost : gasFloor;
-    const grossProfitFresh = profitFloor + 1n;
+    const grossProfitFresh = aboveFloorOpportunity.grossProfit;
+    expect(grossProfitFresh).to.be.greaterThan(gasFloor);
     const inferredPremium = opportunity.finalOut - opportunity.amountIn - opportunity.grossProfit;
     const finalOutFresh = opportunity.amountIn + inferredPremium + grossProfitFresh;
     const quoteLeg = async (_provider, leg) =>
@@ -884,5 +869,244 @@ describe("bot/executor maybeExecute", function () {
     expect(result.submitted).to.equal(false);
     expect(result.error).to.include("gasPrice is 0");
     expect(calls.map((entry) => entry.method)).to.deep.equal(["estimateGas"]);
+  });
+
+  it("treats a tx.wait timeout as ambiguous and keeps the gas reservation", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({ opportunity, config });
+    const timeoutError = Object.assign(new Error("timed out"), { code: "TIMEOUT" });
+    const contract = {
+      startArbitrage: async () => ({
+        hash: `0x${"22".repeat(32)}`,
+        wait: async () => {
+          throw timeoutError;
+        },
+      }),
+    };
+    contract.startArbitrage.estimateGas = async () => 300000n;
+    contract.startArbitrage.staticCall = async () => true;
+
+    const result = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+    });
+
+    const feeData = await ethers.provider.getFeeData();
+    const decisionGasPriceWei = feeData.maxFeePerGas ?? feeData.gasPrice;
+    const reservedGasWei = ((300000n * 11500n) / 10000n) * decisionGasPriceWei;
+    const breaker = JSON.parse(fs.readFileSync(config.circuitBreakerPath, "utf8"));
+    const gasSpent = JSON.parse(fs.readFileSync(config.gasSpentPath, "utf8"));
+
+    expect(result.submitted).to.equal(true);
+    expect(result.error).to.include("TIMEOUT_WAIT_RECEIPT");
+    expect(breaker.consecutiveFailures).to.equal(1);
+    expect(gasSpent.gasSpentWei).to.equal(reservedGasWei.toString());
+  });
+
+  it("treats a send error without receipt as ambiguous and keeps the gas reservation", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({ opportunity, config });
+    const { contract } = makeSpyContract({ sendError: new Error("broadcast failed") });
+
+    const result = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+    });
+
+    const feeData = await ethers.provider.getFeeData();
+    const decisionGasPriceWei = feeData.maxFeePerGas ?? feeData.gasPrice;
+    const reservedGasWei = ((300000n * 11500n) / 10000n) * decisionGasPriceWei;
+    const breaker = JSON.parse(fs.readFileSync(config.circuitBreakerPath, "utf8"));
+    const gasSpent = JSON.parse(fs.readFileSync(config.gasSpentPath, "utf8"));
+
+    expect(result.submitted).to.equal(true);
+    expect(result.error).to.include("broadcast failed");
+    expect(breaker.consecutiveFailures).to.equal(1);
+    expect(gasSpent.gasSpentWei).to.equal(reservedGasWei.toString());
+  });
+
+  it("rechecks the circuit breaker after reservation and before send", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const breakerPath = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-breaker-recheck-")),
+      "circuit_breaker.json"
+    );
+    const config = makeConfig({ circuitBreakerPath: breakerPath });
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({ opportunity, config });
+    const methods = [];
+    const contract = {
+      startArbitrage: async () => {
+        methods.push("send");
+        return { hash: `0x${"33".repeat(32)}`, wait: async () => ({ status: 1 }) };
+      },
+    };
+    contract.startArbitrage.estimateGas = async () => {
+      methods.push("estimateGas");
+      return 300000n;
+    };
+    contract.startArbitrage.staticCall = async () => {
+      methods.push("staticCall");
+      fs.writeFileSync(
+        breakerPath,
+        `${JSON.stringify({ consecutiveFailures: 5, openUntil: Date.now() + 60_000 })}\n`,
+        "utf8"
+      );
+      return true;
+    };
+
+    const result = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+    });
+
+    expect(result.submitted).to.equal(false);
+    expect(result.guard).to.equal("circuitBreaker");
+    expect(result.error).to.include("CIRCUIT_BREAKER_OPEN");
+    expect(methods).to.deep.equal(["estimateGas", "staticCall"]);
+  });
+
+  it("reserves gas at maxFeePerGas rather than gasPrice before sending", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig({ ethUsdPrice: 1800 });
+    const maxFeePerGas = 5n;
+    const gasPrice = 1n;
+    const provider = {
+      getFeeData: async () => ({ gasPrice, maxFeePerGas, maxPriorityFeePerGas: 1n }),
+      getNetwork: () => ethers.provider.getNetwork(),
+      getBalance: (address) => ethers.provider.getBalance(address),
+    };
+    let reservedDuringSend;
+    const contract = {
+      startArbitrage: async () => {
+        reservedDuringSend = JSON.parse(fs.readFileSync(config.gasSpentPath, "utf8")).gasSpentWei;
+        return {
+          hash: `0x${"44".repeat(32)}`,
+          wait: async () => ({ status: 1, gasUsed: 100000n, gasPrice: 1n, blockNumber: 1 }),
+        };
+      },
+    };
+    contract.startArbitrage.estimateGas = async () => 300000n;
+    contract.startArbitrage.staticCall = async () => true;
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : opportunity.finalOut;
+
+    const result = await maybeExecute({ opportunity, provider, config, contract, quoteLeg });
+
+    const gasLimitWithMargin = (300000n * 11500n) / 10000n;
+    const expectedReservation = gasLimitWithMargin * maxFeePerGas;
+    const gasSpent = JSON.parse(fs.readFileSync(config.gasSpentPath, "utf8"));
+
+    expect(result.submitted).to.equal(true);
+    expect(BigInt(reservedDuringSend)).to.equal(expectedReservation);
+    expect(gasSpent.gasSpentWei).to.equal((100000n * 1n).toString());
+  });
+
+  it("rejects on the maxFeePerGas-based floor when the profit clears only the gasPrice cost", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig({ ethUsdPrice: 1800 });
+    const gasPrice = 1n;
+    const maxFeePerGas = 5n;
+    const provider = {
+      getFeeData: async () => ({ gasPrice, maxFeePerGas, maxPriorityFeePerGas: 1n }),
+      getNetwork: () => ethers.provider.getNetwork(),
+      getBalance: (address) => ethers.provider.getBalance(address),
+    };
+    const { contract, calls } = makeSpyContract();
+    const gasLimitWithMargin = (300000n * 11500n) / 10000n;
+    const gasPriceCost = gasCostInBorrowedToken({
+      gasCostWei: gasLimitWithMargin * gasPrice,
+      pair: opportunity.pair,
+      config,
+    });
+    const maxFeeFloor =
+      (gasCostInBorrowedToken({
+        gasCostWei: gasLimitWithMargin * maxFeePerGas,
+        pair: opportunity.pair,
+        config,
+      }) *
+        11000n) /
+      10000n;
+    const grossProfit = (gasPriceCost + maxFeeFloor) / 2n;
+
+    expect(grossProfit).to.be.greaterThan(gasPriceCost);
+    expect(grossProfit).to.be.lessThan(maxFeeFloor);
+
+    const result = await maybeExecute({
+      opportunity: { ...opportunity, grossProfit },
+      provider,
+      config,
+      contract,
+    });
+
+    expect(result.submitted).to.equal(false);
+    expect(result.simulated).to.equal(true);
+    expect(result.error).to.include("[SKIPPED] gas cost exceeds profit");
+    expect(calls.map((entry) => entry.method)).to.deep.equal(["estimateGas"]);
+  });
+
+  it("rejects a concurrent call while a transaction is in flight", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({ opportunity, config });
+    const calls = [];
+    let releaseSend;
+    let markSendStarted;
+    const sendGate = new Promise((resolve) => {
+      releaseSend = resolve;
+    });
+    const sendStarted = new Promise((resolve) => {
+      markSendStarted = resolve;
+    });
+    let sendCount = 0;
+    const contract = {
+      startArbitrage: async () => {
+        calls.push("send");
+        sendCount += 1;
+        if (sendCount === 1) {
+          markSendStarted();
+          await sendGate;
+        }
+        return {
+          hash: `0x${"55".repeat(32)}`,
+          wait: async () => ({ status: 1, gasUsed: 300000n, gasPrice: 1n, blockNumber: 1 }),
+        };
+      },
+    };
+    contract.startArbitrage.estimateGas = async () => {
+      calls.push("estimateGas");
+      return 300000n;
+    };
+    contract.startArbitrage.staticCall = async () => {
+      calls.push("staticCall");
+      return true;
+    };
+
+    const firstPromise = maybeExecute({
+      opportunity: freshOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+    });
+    await sendStarted;
+    const second = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+    });
+    releaseSend();
+    const first = await firstPromise;
+
+    expect(second).to.deep.equal({ submitted: false, error: "TRANSACTION_IN_FLIGHT" });
+    expect(first.submitted).to.equal(true);
+    expect(calls).to.deep.equal(["estimateGas", "staticCall", "send"]);
   });
 });

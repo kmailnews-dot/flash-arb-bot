@@ -190,17 +190,19 @@ async function main({
     console.warn(`[RPC ERRORS] ${rpcErrors} erreurs sur ce cycle.`);
   }
 
+  const exitCode = rpcErrors > config.maxRpcErrorsPerScan || scanned === 0 ? 1 : 0;
+
   console.log(
     `\nDone: ${scanned} quotes checked, ${opportunities} opportunit${opportunities === 1 ? "y" : "ies"} found, ` +
       `${executed} transaction attempt(s).`
   );
 
-  return { ethUsdPrice, aaveFlashLoanPremiumBps, scanned, opportunities, executed };
+  return { ethUsdPrice, aaveFlashLoanPremiumBps, scanned, opportunities, executed, exitCode };
 }
 
 if (require.main === module) {
   main()
-    .then(() => process.exit(0))
+    .then((summary) => process.exit(summary.exitCode ?? (summary.refused ? 1 : 0)))
     .catch((err) => {
       console.error("flash-arb-bot scan failed:", err);
       process.exit(1);
