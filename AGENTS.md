@@ -6,6 +6,7 @@ Ces règles s'appliquent à toutes les sessions sur ce projet. Lis-les avant tou
 - Lis le fichier concerné en entier, pas seulement les lignes citées.
 - Vérifie que l'état décrit dans le message correspond au code réel.
 - Si un écart existe, signale-le AVANT de modifier.
+- Si un audit externe (Claude ou autre) décrit un bug ou un état du code, vérifier le fichier réel via `git show <commit>:<path>` avant de le croire. Ne jamais fournir un résumé ou une reconstitution à un auditeur : il lira un texte différent du code réel.
 
 ## 2. MODIFICATIONS
 - Fais des diffs chirurgicaux. Ne réécris jamais un fichier entier.
@@ -41,6 +42,6 @@ Ces règles s'appliquent à toutes les sessions sur ce projet. Lis-les avant tou
 ## 8. CONTEXTE DU PROJET (mis à jour manuellement)
 - **Stack** : Solidity ^0.8.20, Node.js 20, Hardhat, ethers v6, Aave V3, Uniswap V3 (SwapRouter original uniquement, jamais SwapRouter02), SushiSwap V2.
 - **Réseau** : Arbitrum One (42161), Arbitrum Sepolia (421614).
-- **Dernier commit** : d6ac3c7.
-- **Prochaine étape** : Aucune (projet stable, 0 high, 0 critical, monitoring actif, prêt pour DRY_RUN ou live).
-- **Tests** : 107 passing, 2 pending (tests fork).
+- **Dernier commit** : 7bffaec.
+- **Prochaine étape** : Cycle de vie d'une transaction (P0 restants : envoi ambigu, timeout tx.wait(), réservation atomique, breaker revérifié avant envoi, concurrency sur live.yml et deploy.yml).
+- **Tests** : 133 passing, 2 pending (tests fork).
