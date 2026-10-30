@@ -9,6 +9,9 @@ const VALID_CONFIG = {
   minProfitUsd: 5,
   aaveFlashLoanPremiumBps: 5n,
   gasPriceBufferPct: 20,
+  maxGasLimit: 1000000n,
+  maxWalletBalanceEth: 0.1,
+  maxDailyGasEth: 0.01,
 };
 
 const previousEnv = {
@@ -69,7 +72,49 @@ describe("bot/config validateScannerConfig", function () {
 
   it("rejects a negative gasPriceBufferPct", function () {
     expect(() => validateScannerConfig({ ...VALID_CONFIG, gasPriceBufferPct: -5 })).to.throw(
-      "GAS_PRICE_BUFFER_PCT must be a finite number >= 0."
+      "GAS_PRICE_BUFFER_PCT must be a non-negative integer."
+    );
+  });
+
+  it("accepts gasPriceBufferPct = 20", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, gasPriceBufferPct: 20 })).to.not.throw();
+  });
+
+  it("rejects a non-integer gasPriceBufferPct", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, gasPriceBufferPct: 20.5 })).to.throw(
+      "GAS_PRICE_BUFFER_PCT must be a non-negative integer."
+    );
+  });
+
+  it("accepts a positive maxGasLimit", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, maxGasLimit: 1000000n })).to.not.throw();
+  });
+
+  it("rejects a zero maxGasLimit", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, maxGasLimit: 0n })).to.throw(
+      "MAX_GAS_LIMIT must be a positive bigint."
+    );
+  });
+
+  it("rejects a negative maxGasLimit", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, maxGasLimit: -1n })).to.throw(
+      "MAX_GAS_LIMIT must be a positive bigint."
+    );
+  });
+
+  it("accepts a positive maxWalletBalanceEth", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, maxWalletBalanceEth: 0.1 })).to.not.throw();
+  });
+
+  it("rejects a zero maxWalletBalanceEth", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, maxWalletBalanceEth: 0 })).to.throw(
+      "MAX_WALLET_BALANCE_ETH must be a finite number > 0."
+    );
+  });
+
+  it("rejects a zero maxDailyGasEth", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, maxDailyGasEth: 0 })).to.throw(
+      "MAX_DAILY_GAS_ETH must be a finite number > 0."
     );
   });
 });

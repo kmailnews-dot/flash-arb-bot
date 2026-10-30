@@ -204,7 +204,14 @@ function validateSlippageBps() {
   return value;
 }
 
-function validateScannerConfig({ minProfitUsd, aaveFlashLoanPremiumBps, gasPriceBufferPct }) {
+function validateScannerConfig({
+  minProfitUsd,
+  aaveFlashLoanPremiumBps,
+  gasPriceBufferPct,
+  maxGasLimit,
+  maxWalletBalanceEth,
+  maxDailyGasEth,
+}) {
   if (minProfitUsd !== undefined && minProfitUsd !== null) {
     if (typeof minProfitUsd !== "number" || !Number.isFinite(minProfitUsd) || minProfitUsd < 0) {
       throw new Error("MIN_PROFIT_USD must be a finite number >= 0 when set.");
@@ -213,8 +220,25 @@ function validateScannerConfig({ minProfitUsd, aaveFlashLoanPremiumBps, gasPrice
   if (typeof aaveFlashLoanPremiumBps !== "bigint" || aaveFlashLoanPremiumBps < 0n) {
     throw new Error("AAVE_FLASH_LOAN_PREMIUM_BPS must be a non-negative bigint.");
   }
-  if (typeof gasPriceBufferPct !== "number" || !Number.isFinite(gasPriceBufferPct) || gasPriceBufferPct < 0) {
-    throw new Error("GAS_PRICE_BUFFER_PCT must be a finite number >= 0.");
+  if (typeof gasPriceBufferPct !== "number" || !Number.isInteger(gasPriceBufferPct) || gasPriceBufferPct < 0) {
+    throw new Error("GAS_PRICE_BUFFER_PCT must be a non-negative integer.");
+  }
+  if (typeof maxGasLimit !== "bigint" || maxGasLimit <= 0n) {
+    throw new Error("MAX_GAS_LIMIT must be a positive bigint.");
+  }
+  if (
+    typeof maxWalletBalanceEth !== "number" ||
+    !Number.isFinite(maxWalletBalanceEth) ||
+    maxWalletBalanceEth <= 0
+  ) {
+    throw new Error("MAX_WALLET_BALANCE_ETH must be a finite number > 0.");
+  }
+  if (
+    typeof maxDailyGasEth !== "number" ||
+    !Number.isFinite(maxDailyGasEth) ||
+    maxDailyGasEth <= 0
+  ) {
+    throw new Error("MAX_DAILY_GAS_ETH must be a finite number > 0.");
   }
 }
 
@@ -271,6 +295,9 @@ validateScannerConfig({
   minProfitUsd: config.minProfitUsd,
   aaveFlashLoanPremiumBps: config.aaveFlashLoanPremiumBps,
   gasPriceBufferPct: config.gasPriceBufferPct,
+  maxGasLimit: config.maxGasLimit,
+  maxWalletBalanceEth: config.maxWalletBalanceEth,
+  maxDailyGasEth: config.maxDailyGasEth,
 });
 
 module.exports = config;
