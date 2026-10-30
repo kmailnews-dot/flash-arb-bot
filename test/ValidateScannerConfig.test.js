@@ -1,0 +1,75 @@
+const { expect } = require("chai");
+
+const BORROWED = "0x1111111111111111111111111111111111111111";
+const INTERMEDIATE = "0x2222222222222222222222222222222222222222";
+const ROUTER_OUT = "0x3333333333333333333333333333333333333333";
+const ROUTER_BACK = "0x4444444444444444444444444444444444444444";
+
+const VALID_CONFIG = {
+  minProfitUsd: 5,
+  aaveFlashLoanPremiumBps: 5n,
+  gasPriceBufferPct: 20,
+};
+
+const previousEnv = {
+  ARBITRUM_RPC_URL: process.env.ARBITRUM_RPC_URL,
+  PAIRS_CONFIG_JSON: process.env.PAIRS_CONFIG_JSON,
+  ETH_USD_ROUTE_JSON: process.env.ETH_USD_ROUTE_JSON,
+};
+
+process.env.ARBITRUM_RPC_URL = previousEnv.ARBITRUM_RPC_URL || "http://127.0.0.1:8545";
+process.env.PAIRS_CONFIG_JSON = JSON.stringify([
+  {
+    borrowedToken: { address: BORROWED, decimals: 18 },
+    intermediateToken: { address: INTERMEDIATE, decimals: 18 },
+    legOut: { kind: "V2", router: ROUTER_OUT, tokenOut: INTERMEDIATE },
+    legBack: { kind: "V2", router: ROUTER_BACK, tokenOut: BORROWED },
+    tradeSizes: ["0.1"],
+  },
+]);
+process.env.ETH_USD_ROUTE_JSON = "";
+
+const { validateScannerConfig } = require("../bot/config");
+
+for (const [key, value] of Object.entries(previousEnv)) {
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+}
+
+describe("bot/config validateScannerConfig", function () {
+  it("accepts a valid minProfitUsd", function () {
+    expect(() => validateScannerConfig(VALID_CONFIG)).to.not.throw();
+  });
+
+  it("rejects a negative minProfitUsd", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, minProfitUsd: -1 })).to.throw(
+      "MIN_PROFIT_USD must be a finite number >= 0 when set."
+    );
+  });
+
+  it("rejects a NaN minProfitUsd", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, minProfitUsd: NaN })).to.throw(
+      "MIN_PROFIT_USD must be a finite number >= 0 when set."
+    );
+  });
+
+  it("accepts a bigint aaveFlashLoanPremiumBps", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, aaveFlashLoanPremiumBps: 5n })).to.not.throw();
+  });
+
+  it("rejects a Number aaveFlashLoanPremiumBps", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, aaveFlashLoanPremiumBps: 5 })).to.throw(
+      "AAVE_FLASH_LOAN_PREMIUM_BPS must be a non-negative bigint."
+    );
+  });
+
+  it("accepts a valid gasPriceBufferPct", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, gasPriceBufferPct: 20 })).to.not.throw();
+  });
+
+  it("rejects a negative gasPriceBufferPct", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, gasPriceBufferPct: -5 })).to.throw(
+      "GAS_PRICE_BUFFER_PCT must be a finite number >= 0."
+    );
+  });
+});

@@ -204,6 +204,20 @@ function validateSlippageBps() {
   return value;
 }
 
+function validateScannerConfig({ minProfitUsd, aaveFlashLoanPremiumBps, gasPriceBufferPct }) {
+  if (minProfitUsd !== undefined && minProfitUsd !== null) {
+    if (typeof minProfitUsd !== "number" || !Number.isFinite(minProfitUsd) || minProfitUsd < 0) {
+      throw new Error("MIN_PROFIT_USD must be a finite number >= 0 when set.");
+    }
+  }
+  if (typeof aaveFlashLoanPremiumBps !== "bigint" || aaveFlashLoanPremiumBps < 0n) {
+    throw new Error("AAVE_FLASH_LOAN_PREMIUM_BPS must be a non-negative bigint.");
+  }
+  if (typeof gasPriceBufferPct !== "number" || !Number.isFinite(gasPriceBufferPct) || gasPriceBufferPct < 0) {
+    throw new Error("GAS_PRICE_BUFFER_PCT must be a finite number >= 0.");
+  }
+}
+
 const slippageBps = validateSlippageBps();
 
 const minProfitBufferBps = optionalNumber("MIN_PROFIT_BUFFER_BPS", 5000);
@@ -253,6 +267,13 @@ const config = {
   pairs: loadPairs(),
 };
 
+validateScannerConfig({
+  minProfitUsd: config.minProfitUsd,
+  aaveFlashLoanPremiumBps: config.aaveFlashLoanPremiumBps,
+  gasPriceBufferPct: config.gasPriceBufferPct,
+});
+
 module.exports = config;
 module.exports.validatePairs = validatePairs;
 module.exports.validateSlippageBps = validateSlippageBps;
+module.exports.validateScannerConfig = validateScannerConfig;
