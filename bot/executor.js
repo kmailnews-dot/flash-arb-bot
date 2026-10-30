@@ -388,42 +388,76 @@ async function executeMaybe({
     return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
   }
 
-  if (config.minProfitUsd !== undefined && config.minProfitUsd !== null) {
+  const minProfitUsdConfigured = config.minProfitUsd !== undefined && config.minProfitUsd !== null;
+  const minProfitBpsConfigured = config.minProfitBps !== undefined && config.minProfitBps !== null;
+  if (minProfitUsdConfigured || minProfitBpsConfigured) {
     const gasCostFreshInToken = gasCostInBorrowedToken({ gasCostWei, pair, config });
     const token = pair.borrowedToken?.symbol ?? pair.borrowedToken?.address ?? "unknown";
     if (gasCostFreshInToken === null) {
-      const message = `[SKIPPED] cannot price MIN_PROFIT_USD for token ${token}`;
-      console.log(`  ${message} - transaction not sent.`);
-      return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
-    }
-
-    let tokenUsdPrice;
-    if (pair.borrowedToken?.isStable === true) {
-      tokenUsdPrice = 1;
-    } else if (
-      pair.borrowedToken?.isWeth === true &&
-      Number.isFinite(Number(config.ethUsdPrice)) &&
-      Number(config.ethUsdPrice) > 0
-    ) {
-      tokenUsdPrice = Number(config.ethUsdPrice);
-    } else {
-      const message = `[SKIPPED] cannot price MIN_PROFIT_USD for token ${token}`;
+      const message = minProfitUsdConfigured
+        ? `[SKIPPED] cannot price MIN_PROFIT_USD for token ${token}`
+        : `[SKIPPED] cannot price MIN_PROFIT_BPS for token ${token}`;
       console.log(`  ${message} - transaction not sent.`);
       return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
     }
 
     const netProfitFresh = grossProfitFresh - gasCostFreshInToken;
-    const minProfitUsdInToken = usdToTokenUnits({
-      usdAmount: config.minProfitUsd,
-      tokenUsdPrice,
-      decimals: pair.borrowedToken.decimals,
-    });
-    if (netProfitFresh < minProfitUsdInToken) {
-      const message =
-        `[SKIPPED] fresh net profit below MIN_PROFIT_USD ` +
-        `(net=${netProfitFresh}, threshold=${minProfitUsdInToken})`;
-      console.log(`  ${message} - transaction not sent.`);
-      return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
+    const minProfitBps = minProfitBpsConfigured ? BigInt(config.minProfitBps) : null;
+    const netProfitBps = amountIn > 0n ? (netProfitFresh * BPS_DENOMINATOR) / amountIn : 0n;
+
+    let tokenUsdPrice = null;
+    if (minProfitUsdConfigured) {
+      if (pair.borrowedToken?.isStable === true) {
+        tokenUsdPrice = 1;
+      } else if (
+        pair.borrowedToken?.isWeth === true &&
+        Number.isFinite(Number(config.ethUsdPrice)) &&
+        Number(config.ethUsdPrice) > 0
+      ) {
+        tokenUsdPrice = Number(config.ethUsdPrice);
+      } else {
+        const message = `[SKIPPED] cannot price MIN_PROFIT_USD for token ${token}`;
+        console.log(`  ${message} - transaction not sent.`);
+        return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
+      }
+    }
+
+    if (minProfitUsdConfigured) {
+      const minProfitUsdInToken = usdToTokenUnits({
+        usdAmount: config.minProfitUsd,
+        tokenUsdPrice,
+        decimals: pair.borrowedToken.decimals,
+      });
+      if (netProfitFresh < minProfitUsdInToken) {
+        const bpsDetail =
+          minProfitBps !== null ? `, netBps=${netProfitBps}, thresholdBps=${minProfitBps}` : "";
+        const message =
+          `[SKIPPED] fresh net profit below MIN_PROFIT_USD ` +
+          `(net=${netProfitFresh}, threshold=${minProfitUsdInToken}${bpsDetail})`;
+        console.log(`  ${message} - transaction not sent.`);
+        return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
+      }
+    }
+
+    if (minProfitBps !== null) {
+      const meetsMinProfitBps =
+        amountIn > 0n && netProfitFresh * BPS_DENOMINATOR >= amountIn * minProfitBps;
+      if (!meetsMinProfitBps) {
+        const netProfitUsd =
+          tokenUsdPrice !== null
+            ? Number(ethers.formatUnits(netProfitFresh, pair.borrowedToken.decimals)) * tokenUsdPrice
+            : null;
+        const usdDetail =
+          minProfitUsdConfigured && netProfitUsd !== null
+            ? `, netProfitUsd=${netProfitUsd}, minProfitUsd=${config.minProfitUsd}`
+            : "";
+        const message =
+          `[SKIPPED] fresh net profit below MIN_PROFIT_BPS ` +
+          `(net=${netProfitFresh}, notional=${amountIn}, netBps=${netProfitBps}, ` +
+          `thresholdBps=${minProfitBps}${usdDetail})`;
+        console.log(`  ${message} - transaction not sent.`);
+        return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
+      }
     }
   }
 

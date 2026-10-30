@@ -761,6 +761,53 @@ describe("bot/executor maybeExecute", function () {
     expect(calls.map((entry) => entry.method)).to.deep.equal(["estimateGas", "staticCall", "send"]);
   });
 
+  it("skips when fresh net profit passes MIN_PROFIT_USD but is below MIN_PROFIT_BPS", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig({ minProfitUsd: 5, minProfitBps: 30, ethUsdPrice: 1800 });
+    const { contract, calls } = makeSpyContract();
+    const feeData = await ethers.provider.getFeeData();
+    const decisionGasPriceWei = feeData.maxFeePerGas ?? feeData.gasPrice;
+    const gasLimitWithMargin = (300000n * 11500n) / 10000n;
+    const gasCost = gasCostInBorrowedToken({
+      gasCostWei: gasLimitWithMargin * decisionGasPriceWei,
+      pair: opportunity.pair,
+      config,
+    });
+    const amountIn = ethers.parseUnits("10000", 18);
+    const grossProfitFresh = gasCost + ethers.parseEther("10");
+    const premium = (amountIn * 5n) / 10000n;
+    const finalOut = amountIn + premium + grossProfitFresh;
+    const cachedOpportunity = {
+      ...opportunity,
+      amountIn,
+      intermediateOut: amountIn,
+      finalOut,
+      grossProfit: grossProfitFresh,
+    };
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? amountIn : finalOut;
+
+    const result = await maybeExecute({
+      opportunity: cachedOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+
+    const netProfitBps = (ethers.parseEther("10") * 10000n) / amountIn;
+    expect(netProfitBps).to.equal(10n);
+    expect(result.submitted).to.equal(false);
+    expect(result.simulated).to.equal(true);
+    expect(result.error).to.include("[SKIPPED] fresh net profit below MIN_PROFIT_BPS");
+    expect(result.error).to.include(`net=${ethers.parseEther("10")}`);
+    expect(result.error).to.include(`notional=${amountIn}`);
+    expect(result.error).to.include(`netBps=${netProfitBps}`);
+    expect(result.error).to.include("thresholdBps=30");
+    expect(result.error).to.include("minProfitUsd=5");
+    expect(calls.map((entry) => entry.method)).to.deep.equal(["estimateGas"]);
+  });
+
   it("skips when MIN_PROFIT_USD cannot be priced for the borrowed token", async function () {
     const { opportunity, makeConfig } = await deployFixture();
     const pair = {

@@ -3,6 +3,29 @@ const path = require("path");
 const { redactUrls } = require("./sanitizeError");
 
 const DEFAULT_SCAN_LOG_PATH = "./logs/scans.jsonl";
+const DEFAULT_LOG_FORMAT = "text";
+
+function logFormat() {
+  const value = (process.env.LOG_FORMAT || DEFAULT_LOG_FORMAT).toLowerCase();
+  return value === "json" ? "json" : "text";
+}
+
+function jsonReplacer(_key, value) {
+  return typeof value === "bigint" ? value.toString() : value;
+}
+
+/// Formats one log event as either the existing human-readable line (text, the default) or a
+/// single-line JSON object when LOG_FORMAT=json. JSON mode is meant for pm2/journald ingestion.
+function formatLogLine(event, format = logFormat()) {
+  if (format === "json") {
+    return JSON.stringify({ timestamp: new Date().toISOString(), ...event }, jsonReplacer);
+  }
+  return event.message ?? JSON.stringify(event, jsonReplacer);
+}
+
+function logEvent(event) {
+  console.log(formatLogLine(event));
+}
 
 /// Appends one scan result to an append-only JSONL file. JSONL was chosen over SQLite because it
 /// needs no extra dependency/native build, stays human-readable, and is easy to load into pandas or
@@ -58,4 +81,10 @@ async function appendScanResult(logPath = DEFAULT_SCAN_LOG_PATH, result, { chain
   return entry;
 }
 
-module.exports = { DEFAULT_SCAN_LOG_PATH, appendScanResult };
+module.exports = {
+  DEFAULT_SCAN_LOG_PATH,
+  appendScanResult,
+  logFormat,
+  formatLogLine,
+  logEvent,
+};

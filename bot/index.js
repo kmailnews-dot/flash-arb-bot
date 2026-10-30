@@ -1,7 +1,7 @@
 const { ethers } = require("ethers");
 const { getEthUsdPrice, scanPair } = require("./scanner");
 const { maybeExecute } = require("./executor");
-const { DEFAULT_SCAN_LOG_PATH, appendScanResult } = require("./persist");
+const { DEFAULT_SCAN_LOG_PATH, appendScanResult, logEvent } = require("./persist");
 const { NETWORKS } = require("./networks");
 const { checkWalletBalanceLow } = require("./guards");
 
@@ -16,9 +16,12 @@ async function persistResultSafely(logPath, result, chainId) {
 }
 
 function describeError(error) {
-  if (!error) return "unknown error";
-  if (typeof error === "string") return error;
-  return error.shortMessage ?? error.code ?? "unknown error";
+  if (!error) return { code: null, shortMessage: "unknown error" };
+  if (typeof error === "string") return { code: null, shortMessage: error };
+  return {
+    code: error.code ?? null,
+    shortMessage: error.shortMessage ?? error.code ?? "unknown error",
+  };
 }
 
 function hasNetProfit(result) {
@@ -154,16 +157,34 @@ async function main({
 
         if (result.error) {
           rpcErrors += 1;
-          console.log(`  ${result.tradeSizeHuman} ${pair.borrowedToken.symbol}: ERROR - ${describeError(result.error)}`);
+          const errorInfo = describeError(result.error);
+          logEvent({
+            event: "scan_result",
+            level: "error",
+            pair: pair.label,
+            tradeSize: result.tradeSizeHuman,
+            borrowedToken: pair.borrowedToken.symbol,
+            error: errorInfo,
+            message: `  ${result.tradeSizeHuman} ${pair.borrowedToken.symbol}: ERROR - ${errorInfo.shortMessage}`,
+          });
           continue;
         }
 
         const profitStr = ethers.formatUnits(result.grossProfit, pair.borrowedToken.decimals);
         const usdStr = result.netProfitUsd !== null ? ` (~$${result.netProfitUsd.toFixed(2)} net)` : "";
-        console.log(
-          `  ${result.tradeSizeHuman} ${pair.borrowedToken.symbol}: gross profit ${profitStr} ` +
-            `${pair.borrowedToken.symbol}${usdStr}${result.isOpportunity ? " -> OPPORTUNITY" : ""}`
-        );
+        logEvent({
+          event: "scan_result",
+          level: "info",
+          pair: pair.label,
+          tradeSize: result.tradeSizeHuman,
+          borrowedToken: pair.borrowedToken.symbol,
+          grossProfit: profitStr,
+          netProfitUsd: result.netProfitUsd,
+          isOpportunity: result.isOpportunity,
+          message:
+            `  ${result.tradeSizeHuman} ${pair.borrowedToken.symbol}: gross profit ${profitStr} ` +
+            `${pair.borrowedToken.symbol}${usdStr}${result.isOpportunity ? " -> OPPORTUNITY" : ""}`,
+        });
 
         if (result.isOpportunity) opportunities += 1;
       }
@@ -172,9 +193,15 @@ async function main({
       if (best && !best.error) {
         const bestGross = ethers.formatUnits(best.grossProfit, pair.borrowedToken.decimals);
         const bestNet = hasNetProfit(best) ? best.netProfitUsd.toFixed(2) : "n/a";
-        console.log(
-          `  [BEST] pair=${pair.label}, size=${best.tradeSizeHuman}, gross=${bestGross}, net=${bestNet}`
-        );
+        logEvent({
+          event: "best_result",
+          pair: pair.label,
+          tradeSize: best.tradeSizeHuman,
+          gross: bestGross,
+          net: bestNet,
+          isOpportunity: best.isOpportunity,
+          message: `  [BEST] pair=${pair.label}, size=${best.tradeSizeHuman}, gross=${bestGross}, net=${bestNet}`,
+        });
 
         if (best.isOpportunity) {
           const outcome = await maybeExecuteImpl({ opportunity: best, provider, config: executionConfig });

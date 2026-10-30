@@ -206,6 +206,7 @@ function validateSlippageBps() {
 
 function validateScannerConfig({
   minProfitUsd,
+  minProfitBps,
   aaveFlashLoanPremiumBps,
   gasPriceBufferPct,
   maxGasLimit,
@@ -215,6 +216,11 @@ function validateScannerConfig({
   if (minProfitUsd !== undefined && minProfitUsd !== null) {
     if (typeof minProfitUsd !== "number" || !Number.isFinite(minProfitUsd) || minProfitUsd < 0) {
       throw new Error("MIN_PROFIT_USD must be a finite number >= 0 when set.");
+    }
+  }
+  if (minProfitBps !== undefined && minProfitBps !== null) {
+    if (!Number.isInteger(minProfitBps) || minProfitBps < 0 || minProfitBps > 10000) {
+      throw new Error("MIN_PROFIT_BPS must be an integer between 0 and 10000.");
     }
   }
   if (typeof aaveFlashLoanPremiumBps !== "bigint" || aaveFlashLoanPremiumBps < 0n) {
@@ -264,6 +270,9 @@ if (!Number.isInteger(minProfitBufferBps) || minProfitBufferBps < 1 || minProfit
 const config = {
   rpcUrl: required("ARBITRUM_RPC_URL"),
   dryRun,
+  // Persistent runner (bot/run.js): polling interval for HTTP JSON-RPC providers. A ws:// or
+  // wss:// ARBITRUM_RPC_URL uses WebSocketProvider instead.
+  pollIntervalMs: optionalNumber("POLL_INTERVAL_MS", 15000),
   // Only needed when DRY_RUN=false - this wallet needs a small ETH/ARB balance to pay gas.
   // It is NOT the flash loan capital: the flash loan itself always borrows with zero collateral.
   privateKey: process.env.PRIVATE_KEY,
@@ -272,6 +281,7 @@ const config = {
   aaveFlashLoanPremiumBps: BigInt(optionalNumber("AAVE_FLASH_LOAN_PREMIUM_BPS", 5)), // 0.05% Aave V3 default
 
   minProfitUsd: optionalNumber("MIN_PROFIT_USD", 5),
+  minProfitBps: optionalNumber("MIN_PROFIT_BPS", 30), // require net profit >= 0.30% of the borrowed notional
   minProfitBufferBps: BigInt(minProfitBufferBps), // require on-chain minProfit >= 50% of the off-chain estimate, to absorb slippage/front-running between quote and execution
   slippageBps: BigInt(slippageBps), // 0.5% per-leg slippage tolerance for minAmountOut
 
@@ -305,6 +315,7 @@ const config = {
 
 validateScannerConfig({
   minProfitUsd: config.minProfitUsd,
+  minProfitBps: config.minProfitBps,
   aaveFlashLoanPremiumBps: config.aaveFlashLoanPremiumBps,
   gasPriceBufferPct: config.gasPriceBufferPct,
   maxGasLimit: config.maxGasLimit,

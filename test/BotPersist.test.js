@@ -2,7 +2,7 @@ const { expect } = require("chai");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { appendScanResult } = require("../bot/persist");
+const { appendScanResult, logEvent } = require("../bot/persist");
 
 describe("bot/persist appendScanResult", function () {
   it("appends one JSONL line per result with all required fields", async function () {
@@ -221,5 +221,57 @@ describe("bot/persist appendScanResult", function () {
     });
 
     fs.rmSync(logDir, { recursive: true, force: true });
+  });
+
+  it("LOG_FORMAT=json emits one parseable JSON object per log line", function () {
+    const previousFormat = process.env.LOG_FORMAT;
+    const lines = [];
+    const originalLog = console.log;
+    console.log = (line) => lines.push(String(line));
+
+    try {
+      process.env.LOG_FORMAT = "json";
+      logEvent({
+        event: "scan_result",
+        pair: "WETH/ARB test pair",
+        tradeSize: "0.1",
+        grossProfit: "1500000000000000",
+        netProfitUsd: 1.25,
+        isOpportunity: true,
+        message: "  human-readable line",
+      });
+      logEvent({
+        event: "scan_result",
+        error: { code: "CALL_EXCEPTION", shortMessage: "execution reverted" },
+        message: "  ERROR - execution reverted",
+      });
+    } finally {
+      console.log = originalLog;
+      if (previousFormat === undefined) delete process.env.LOG_FORMAT;
+      else process.env.LOG_FORMAT = previousFormat;
+    }
+
+    expect(lines).to.have.length(2);
+    for (const line of lines) {
+      expect(line).to.not.include("\n");
+      expect(JSON.parse(line)).to.be.an("object");
+    }
+
+    const result = JSON.parse(lines[0]);
+    expect(result).to.include({
+      event: "scan_result",
+      pair: "WETH/ARB test pair",
+      tradeSize: "0.1",
+      grossProfit: "1500000000000000",
+      netProfitUsd: 1.25,
+      isOpportunity: true,
+    });
+    expect(result.timestamp).to.be.a("string");
+
+    const failure = JSON.parse(lines[1]);
+    expect(failure.error).to.deep.equal({
+      code: "CALL_EXCEPTION",
+      shortMessage: "execution reverted",
+    });
   });
 });

@@ -243,6 +243,17 @@ Two lightweight checks surface operational problems in the workflow logs:
 Both messages appear in the Actions run log; the per-result errors are also written to
 `SCAN_LOG_PATH` for later analysis.
 
+## Persistent runner (VPS/laptop)
+
+`npm run scan` runs one cycle (the GitHub Actions model). For a long-lived process, use
+`npm run start:run` (`bot/run.js`): it creates a WebSocket provider when `ARBITRUM_RPC_URL` is a
+`ws://`/`wss://` URL, otherwise a `JsonRpcProvider` polling every `POLL_INTERVAL_MS` (default
+15000 ms), and re-runs the scan until `SIGTERM`/`SIGINT`. Guard state is already persisted
+atomically by `bot/guards.js`; shutdown waits for the in-flight cycle before closing the provider.
+
+`ecosystem.config.js` provides a pm2 app (`pm2 start ecosystem.config.js`) with `LOG_FORMAT=json`,
+`DRY_RUN=true`, fork mode, autorestart and a 512M memory limit.
+
 ## Configuring pairs & DEXs
 
 `PAIRS_CONFIG_JSON` is a JSON array — each entry is one borrow/swap/swap-back route to scan,
@@ -315,7 +326,7 @@ DRY_RUN=false npm run scan                               # exercises the full on
 ```
 
 This is also what the test suite (`npm test`) exercises at the unit level — see
-`test/FlashArbExecutor.test.js`. The fast suite is **107 passing, 2 pending** (the pending tests
+`test/FlashArbExecutor.test.js`. The fast suite is **146 passing, 2 pending** (the pending tests
 are the optional fork tests below), and CI runs it via
 [`ci.yml`](.github/workflows/ci.yml).
 
@@ -342,11 +353,17 @@ instead of failing.
 ## Configuration reference
 
 See [`.env.example`](.env.example) for every environment variable / secret this project reads,
-with inline explanations — RPC URL, `DRY_RUN`, gas and slippage tuning, `MIN_PROFIT_USD`,
-`SCAN_LOG_PATH`, the loss-guard limits (`EXPECTED_CHAIN_ID`, `MAX_WALLET_BALANCE_ETH`,
+with inline explanations — RPC URL, `DRY_RUN`, gas and slippage tuning, `MIN_PROFIT_USD`
+(default 5) and `MIN_PROFIT_BPS` (default 30, i.e. 0.30% of the borrowed notional),
+`SCAN_LOG_PATH`, `LOG_FORMAT` / `POLL_INTERVAL_MS` for the persistent runner, the loss-guard
+limits (`EXPECTED_CHAIN_ID`, `MAX_WALLET_BALANCE_ETH`,
 `MAX_DAILY_GAS_ETH`, `MAX_CONSECUTIVE_FAILURES`, `CIRCUIT_BREAKER_COOLDOWN_MINUTES`), the
 monitoring thresholds (`MIN_WALLET_BALANCE_ETH`, `MAX_RPC_ERRORS_PER_SCAN`), the fork-test block,
 and the `PAIRS_CONFIG_JSON` / `ETH_USD_ROUTE_JSON` shapes.
+
+The pair set documented in `.env.example` defaults to WETH/USDC and WETH/ARB, both routed through
+Uniswap V3 0.05% (fee tier 500) + SushiSwap V2 legs. `PAIRS_CONFIG_JSON` remains required, so a
+VPS/laptop deployment must still provide the concrete addresses (or a secret with the same name).
 
 ## Security notes
 
