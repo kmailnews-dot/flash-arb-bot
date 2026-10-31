@@ -317,6 +317,7 @@ describe("bot/executor maybeExecute", function () {
     expect(staticCall.args[2].minProfit).to.equal(
       bufferedMinProfit > gasFloor ? bufferedMinProfit : gasFloor
     );
+    expect(staticCall.args[2].minProfitBps).to.equal(BigInt(config.minProfitBps ?? 0));
     expect(send.args[3].gasLimit).to.equal((300000n * 11500n) / 10000n);
   });
 
@@ -391,6 +392,7 @@ describe("bot/executor maybeExecute", function () {
     expect(send.args[2].minProfit).to.equal(
       bufferedMinProfit > gasFloor ? bufferedMinProfit : gasFloor
     );
+    expect(send.args[2].minProfitBps).to.equal(BigInt(config.minProfitBps ?? 0));
   });
 
   it("skips when the fresh re-quote profit falls below the gas floor", async function () {

@@ -268,6 +268,7 @@ async function execute({
     leg1: buildLeg(pair.legOut, fresh.intermediateOutFresh, config.slippageBps),
     leg2: buildLeg(pair.legBack, fresh.finalOutFresh, config.slippageBps),
     minProfit: finalMinProfit,
+    minProfitBps: BigInt(config.minProfitBps ?? 0),
     deadline: Math.floor(Date.now() / 1000) + 300,
   };
 

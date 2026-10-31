@@ -13,7 +13,7 @@ const V3_QUOTER_ABI = [
 const LEG_TUPLE = "(uint8 kind,address router,address tokenOut,uint24 v3Fee,uint256 minAmountOut)";
 
 const FLASH_ARB_EXECUTOR_ABI = [
-  `function startArbitrage(address borrowedToken, uint256 amount, (${LEG_TUPLE} leg1, ${LEG_TUPLE} leg2, uint256 minProfit, uint256 deadline) params) external`,
+  `function startArbitrage(address borrowedToken, uint256 amount, (${LEG_TUPLE} leg1, ${LEG_TUPLE} leg2, uint256 minProfit, uint256 minProfitBps, uint256 deadline) params) external`,
   "event ArbitrageExecuted(address indexed initiator, address indexed borrowedToken, uint256 amountBorrowed, uint256 premium, uint256 profit)",
 ];
 

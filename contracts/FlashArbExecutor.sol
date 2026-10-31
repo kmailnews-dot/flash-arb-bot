@@ -41,6 +41,9 @@ contract FlashArbExecutor is FlashLoanSimpleReceiverBase, Ownable, ReentrancyGua
         Leg leg1; // borrowed token -> intermediate token
         Leg leg2; // intermediate token -> borrowed token
         uint256 minProfit; // minimum net profit required (borrowed token units), else revert
+        uint256 minProfitBps; // minimum net profit in bps of
+                              // borrowed notional, in addition to
+                              // minProfit absolute
         uint256 deadline;
     }
 
@@ -89,7 +92,7 @@ contract FlashArbExecutor is FlashLoanSimpleReceiverBase, Ownable, ReentrancyGua
         uint256 intermediateOut = _swapAndMeasure(arb.leg1, asset, amount);
         _swap(arb.leg2, arb.leg1.tokenOut, intermediateOut);
 
-        _settle(asset, amount, premium, arb.minProfit, balanceBefore, initiator);
+        _settle(asset, amount, premium, arb.minProfit, arb.minProfitBps, balanceBefore, initiator);
         return true;
     }
 
@@ -112,11 +115,16 @@ contract FlashArbExecutor is FlashLoanSimpleReceiverBase, Ownable, ReentrancyGua
         uint256 amount,
         uint256 premium,
         uint256 minProfit,
+        uint256 minProfitBps,
         uint256 balanceBefore,
         address initiator
     ) internal {
         uint256 balanceAfter = IERC20(asset).balanceOf(address(this));
-        require(balanceAfter >= balanceBefore + premium + minProfit, "NOT_PROFITABLE");
+        require(
+            balanceAfter >= balanceBefore + premium + minProfit &&
+                (balanceAfter - balanceBefore - premium) * 10_000 >= amount * minProfitBps,
+            "NOT_PROFITABLE"
+        );
 
         uint256 profit = balanceAfter - balanceBefore - premium;
         if (!poolApproved[asset]) {

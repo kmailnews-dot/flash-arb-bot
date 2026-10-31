@@ -86,6 +86,7 @@ async function maybeExecute({
       // so a price move between quoting and mining reverts the whole (borrowed-capital) trade
       // instead of executing at a worse-than-expected profit.
       minProfit: (effectiveGrossProfit * config.minProfitBufferBps) / BPS_DENOMINATOR,
+      minProfitBps: BigInt(config.minProfitBps ?? 0),
       deadline: Math.floor(Date.now() / 1000) + 300,
     };
 

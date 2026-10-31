@@ -31,7 +31,7 @@ describe("FlashArbExecutor", function () {
     return { owner, other, borrowToken, midToken, pool, addressesProvider, executor, routerA, routerB };
   }
 
-  function buildParams({ routerA, routerB, midToken, minProfit, deadline }) {
+  function buildParams({ routerA, routerB, midToken, minProfit, minProfitBps = 0n, deadline }) {
     return {
       leg1: {
         kind: DEX_KIND.V2,
@@ -48,6 +48,7 @@ describe("FlashArbExecutor", function () {
         minAmountOut: 1n,
       },
       minProfit,
+      minProfitBps: minProfitBps ?? 0n,
       deadline,
     };
   }
@@ -360,6 +361,32 @@ describe("FlashArbExecutor", function () {
     );
     expect(await borrowToken.allowance(await executor.getAddress(), await executor.POOL())).to.equal(
       ethers.MaxUint256
+    );
+  });
+
+  it("reverts when minProfitBps is not met even if minProfit absolute passes", async function () {
+    const { borrowToken, midToken, executor, routerA, routerB } = await deployFixture();
+
+    const borrowAddr = await borrowToken.getAddress();
+    const midAddr = await midToken.getAddress();
+
+    await routerA.setRate(borrowAddr, midAddr, RATE_1_TO_1);
+    await routerB.setRate(midAddr, borrowAddr, ethers.parseEther("1.02"));
+
+    const amount = ethers.parseEther("1000");
+    const deadline = (await ethers.provider.getBlock("latest")).timestamp + 3600;
+    const params = buildParams({
+      routerA: await routerA.getAddress(),
+      routerB: await routerB.getAddress(),
+      midToken: midAddr,
+      minProfit: 0n,
+      minProfitBps: 10_000n,
+      deadline,
+    });
+    params.leg2.tokenOut = borrowAddr;
+
+    await expect(executor.startArbitrage(borrowAddr, amount, params)).to.be.revertedWith(
+      "NOT_PROFITABLE"
     );
   });
 
