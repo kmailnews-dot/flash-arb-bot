@@ -42,9 +42,9 @@ Ces règles s'appliquent à toutes les sessions sur ce projet. Lis-les avant tou
 ## 8. CONTEXTE DU PROJET (mis à jour manuellement)
 - **Stack** : Solidity ^0.8.20, Node.js 20, Hardhat, ethers v6, Aave V3, Uniswap V3 (SwapRouter original uniquement, jamais SwapRouter02), SushiSwap V2.
 - **Réseau** : Arbitrum One (42161), Arbitrum Sepolia (421614).
-- **Dernier commit** : c143406.
-- **Prochaine étape** : Refactor promptable terminé (étapes 1–5 faites : domain, pricing, decide, execute, executor, ARCHITECTURE.md, AGENTS.md, adaptive, resilient, throttle). Prochaine passe : intégration de resilient et throttle dans execute.js / scanner.js.
-- **Tests** : 188 passing, 2 pending (tests fork).
+- **Dernier commit** : cdcede8.
+- **Prochaine étape** : P1 code (receipt tardif, logs JSON partiels, sanitizeError étendu, bornes ethUsdPrice, MIN_PROFIT_USD=0, persist.js enrichi). Refactor promptable et trois modules (adaptive, resilient, throttle) fermés.
+- **Tests** : 192 passing, 2 pending (tests fork).
 
 ## 9. ARCHITECTURE
 - Carte du bot : bot/ARCHITECTURE.md (flux, modules, invariants, pièges).
