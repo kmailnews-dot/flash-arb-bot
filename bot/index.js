@@ -1,9 +1,15 @@
 const { ethers } = require("ethers");
 const { getEthUsdPrice, scanPair } = require("./scanner");
 const { maybeExecute } = require("./executor");
-const { DEFAULT_SCAN_LOG_PATH, appendScanResult, logEvent } = require("./persist");
+const { DEFAULT_SCAN_LOG_PATH, appendScanResult, logEvent, logFormat } = require("./persist");
 const { NETWORKS } = require("./networks");
 const { checkWalletBalanceLow } = require("./guards");
+const {
+  DEFAULT_ADAPTIVE_PATH,
+  applyAdaptive,
+  loadAdaptive,
+  recordOutcome,
+} = require("./adaptive");
 
 const AAVE_POOL_PREMIUM_ABI = ["function FLASHLOAN_PREMIUM_TOTAL() view returns (uint128)"];
 
@@ -88,6 +94,35 @@ async function main({
   maybeExecute: maybeExecuteImpl = maybeExecute,
 } = {}) {
   const config = injectedConfig || require("./config");
+  const adaptivePath = config.adaptivePath ?? DEFAULT_ADAPTIVE_PATH;
+  let cycleConfig = config;
+  try {
+    const adaptiveState = await loadAdaptive({ filePath: adaptivePath, config });
+    cycleConfig = applyAdaptive({ config, state: adaptiveState });
+    const adaptiveMessage =
+      `[ADAPTIVE] state=loaded bps=${adaptiveState.effectiveMinProfitBps} ` +
+      `factor=${adaptiveState.effectiveMaxTradeSize}`;
+    if (logFormat() === "json") {
+      logEvent({
+        event: "adaptive_state",
+        level: "info",
+        effectiveMinProfitBps: adaptiveState.effectiveMinProfitBps,
+        effectiveMaxTradeSize: adaptiveState.effectiveMaxTradeSize,
+        message: adaptiveMessage,
+      });
+    } else {
+      console.log(adaptiveMessage);
+    }
+  } catch (err) {
+    const adaptiveMessage =
+      `WARNING: could not load adaptive state from ${adaptivePath}: ${err.message}. ` +
+      "Continuing with base config.";
+    if (logFormat() === "json") {
+      logEvent({ event: "adaptive_state_error", level: "warn", message: adaptiveMessage });
+    } else {
+      console.warn(adaptiveMessage);
+    }
+  }
   const provider = injectedProvider || new ethers.JsonRpcProvider(config.rpcUrl);
   const scanLogPath = config.scanLogPath || DEFAULT_SCAN_LOG_PATH;
 
@@ -144,12 +179,12 @@ async function main({
   let opportunities = 0;
   let executed = 0;
   let rpcErrors = 0;
-  const executionConfig = { ...config, ethUsdPrice, aaveFlashLoanPremiumBps };
+  const executionConfig = { ...cycleConfig, ethUsdPrice, aaveFlashLoanPremiumBps };
 
-  for (const pair of config.pairs) {
+  for (const pair of cycleConfig.pairs) {
     try {
       console.log(`\nScanning ${pair.label} ...`);
-      const results = await scanPairImpl({ provider, pair, config, gasPriceWei, ethUsdPrice });
+      const results = await scanPairImpl({ provider, pair, config: cycleConfig, gasPriceWei, ethUsdPrice });
 
       for (const result of results) {
         scanned += 1;
@@ -206,6 +241,23 @@ async function main({
         if (best.isOpportunity) {
           const outcome = await maybeExecuteImpl({ opportunity: best, provider, config: executionConfig });
           if (outcome.submitted) executed += 1;
+
+          if (config.dryRun !== true) {
+            let adaptiveOutcome = "FAILURE";
+            if (outcome.submitted && outcome.receipt && outcome.receipt.status === 1) {
+              adaptiveOutcome = "SUCCESS";
+            }
+            if (outcome.error && String(outcome.error).includes("TRANSACTION_IN_FLIGHT")) {
+              adaptiveOutcome = "UNKNOWN";
+            }
+            try {
+              await recordOutcome({ filePath: adaptivePath, outcome: adaptiveOutcome, config });
+            } catch (err) {
+              console.warn(
+                `WARNING: could not record adaptive outcome to ${adaptivePath}: ${err.message}`
+              );
+            }
+          }
         }
       }
     } catch (err) {

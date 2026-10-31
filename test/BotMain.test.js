@@ -181,6 +181,107 @@ describe("bot/index main", function () {
     expect(summary.exitCode ?? (summary.refused ? 1 : 0)).to.equal(1);
   });
 
+  it("records adaptive outcomes only outside DRY_RUN", async function () {
+    const MockERC20 = await ethers.getContractFactory("MockERC20");
+    const borrowToken = await MockERC20.deploy("Borrow Token", "BOR");
+    const midToken = await MockERC20.deploy("Intermediate Token", "MID");
+    const MockRouter = await ethers.getContractFactory("MockRouter");
+    const router = await MockRouter.deploy();
+
+    const borrowAddr = await borrowToken.getAddress();
+    const midAddr = await midToken.getAddress();
+    await router.setRate(borrowAddr, midAddr, ethers.parseEther("1"));
+    const routerAddr = await router.getAddress();
+
+    const pair = {
+      label: "BOR/MID adaptive pair",
+      borrowedToken: { address: borrowAddr, decimals: 18, symbol: "BOR" },
+      intermediateToken: { address: midAddr, decimals: 18, symbol: "MID" },
+      legOut: { kind: "V2", router: routerAddr, tokenOut: midAddr },
+      legBack: { kind: "V2", router: routerAddr, tokenOut: borrowAddr },
+      tradeSizes: ["1000"],
+    };
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-adaptive-main-"));
+    const adaptivePath = path.join(tmpDir, "adaptive.json");
+    const config = {
+      dryRun: true,
+      scanLogPath: path.join(tmpDir, "scans.jsonl"),
+      adaptivePath,
+      pairs: [pair],
+      aaveFlashLoanPremiumBps: 5n,
+      minProfitBps: 30,
+      minProfitUsd: 5,
+      gasLimitEstimate: 700000n,
+      gasPriceBufferPct: 20,
+      maxRpcErrorsPerScan: 0,
+      ethUsdRoute: {
+        kind: "V2",
+        router: routerAddr,
+        weth: borrowAddr,
+        usdc: midAddr,
+        usdcDecimals: 18,
+      },
+    };
+    const opportunity = {
+      tradeSizeHuman: "1000",
+      grossProfit: 1n,
+      netProfitUsd: 10,
+      isOpportunity: true,
+    };
+    const success = { submitted: true, receipt: { status: 1 } };
+
+    let dryExecutions = 0;
+    await main({
+      provider: ethers.provider,
+      config,
+      scanPair: async () => [opportunity],
+      maybeExecute: async () => {
+        dryExecutions += 1;
+        return success;
+      },
+    });
+
+    expect(dryExecutions).to.equal(1);
+    expect(fs.existsSync(adaptivePath)).to.equal(false);
+
+    fs.writeFileSync(
+      adaptivePath,
+      `${JSON.stringify(
+        {
+          effectiveMinProfitBps: 60,
+          effectiveMaxTradeSize: "1.00",
+          history: [
+            { outcome: "SUCCESS", at: 1000 },
+            { outcome: "SUCCESS", at: 2000 },
+          ],
+        },
+        null,
+        2
+      )}\n`,
+      "utf8"
+    );
+
+    let liveExecutions = 0;
+    await main({
+      provider: ethers.provider,
+      config: { ...config, dryRun: false },
+      scanPair: async () => [opportunity],
+      maybeExecute: async () => {
+        liveExecutions += 1;
+        return success;
+      },
+    });
+
+    expect(liveExecutions).to.equal(1);
+    const state = JSON.parse(fs.readFileSync(adaptivePath, "utf8"));
+    expect(state.history).to.have.lengthOf(3);
+    expect(state.history[2].outcome).to.equal("SUCCESS");
+    expect(state.effectiveMinProfitBps).to.equal(55);
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
   it("sets exitCode 1 when rpcErrors exceeds maxRpcErrorsPerScan", async function () {
     const scanDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-rpc-errors-"));
     const pair = {
