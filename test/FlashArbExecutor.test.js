@@ -390,6 +390,33 @@ describe("FlashArbExecutor", function () {
     );
   });
 
+  it("executes when both minProfit and minProfitBps pass", async function () {
+    const { borrowToken, midToken, executor, routerA, routerB } = await deployFixture();
+
+    const borrowAddr = await borrowToken.getAddress();
+    const midAddr = await midToken.getAddress();
+
+    await routerA.setRate(borrowAddr, midAddr, RATE_1_TO_1);
+    await routerB.setRate(midAddr, borrowAddr, ethers.parseEther("1.02"));
+
+    const amount = ethers.parseEther("1000");
+    const deadline = (await ethers.provider.getBlock("latest")).timestamp + 3600;
+    const params = buildParams({
+      routerA: await routerA.getAddress(),
+      routerB: await routerB.getAddress(),
+      midToken: midAddr,
+      minProfit: 0n,
+      minProfitBps: 10n,
+      deadline,
+    });
+    params.leg2.tokenOut = borrowAddr;
+
+    await expect(executor.startArbitrage(borrowAddr, amount, params)).to.emit(
+      executor,
+      "ArbitrageExecuted"
+    );
+  });
+
   it("reverts when an EOA calls executeOperation directly", async function () {
     const { owner, executor } = await deployFixture();
     const borrowAddr = await executor.POOL();

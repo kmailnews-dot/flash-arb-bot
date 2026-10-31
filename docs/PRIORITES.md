@@ -2,7 +2,7 @@
 
 Date : 31 octobre 2026
 Source : liste fournie par l'utilisateur, corrigée après
-authentification du contrat à HEAD 847003f.
+authentification du contrat à HEAD 5337cb3 (P0 fermé côté code).
 
 > **Avertissement.** La liste initiale a été rédigée sans lecture
 > du contrat. Les statuts P0 ci-dessous sont authentifiés à HEAD.
@@ -13,16 +13,16 @@ authentification du contrat à HEAD 847003f.
 
 | # | Statut | Effort | Constat | Référence | Critère d'acceptation |
 |---|---|---|---|---|---|
-| P0-1 | FERMÉ | — | msg.sender==POOL et initiator==address(this) déjà en tête de executeOperation | contracts/FlashArbExecutor.sol:76-77 | Aucun code à écrire |
-| P0-2 | NON APPLICABLE | — | sqrtPriceLimitX96=0 n'est pas un bug : le slippage est borné par amountOutMinimum (P0-3) | contracts/FlashArbExecutor.sol:140 | Aucune action |
-| P0-3 | À FAIRE | S | Aucun require(minAmountOut > 0) on-chain ; les tests passent 0n | contracts/FlashArbExecutor.sol:127,139 ; test/FlashArbExecutor.test.js:41,48 | require(leg.minAmountOut > 0, "ZERO_MIN_OUT") dans _swap, test négatif |
-| P0-4 | À FAIRE | M | minProfit absolu on-chain ; minProfitBps uniquement off-chain (bot/decide.js:195-209) | contracts/FlashArbExecutor.sol:40,107-109 | Ajouter minProfitBps dans ArbParams ; require(profit >= minProfit && profit*10000 >= amount*minProfitBps) ; ABI + bot/execute.js + bot/decide.js + tests |
-| P0-5 | DÉCLASSÉ P2 | — | Contrôle require(block.timestamp <= arb.deadline) existe à :64 et :80 ; la non-propagation aux routers n'est pas un bug démontré | contracts/FlashArbExecutor.sol:64,80,127,137 | Aucune action en P0 |
-| P0-6 | À FAIRE | S | Approves par trade (forceApprove(leg.router, amountIn) et forceApprove(POOL, amount+premium)), sans reset | contracts/FlashArbExecutor.sol:110,120 | mapping(address => bool) approved + forceApprove(POOL, max) au premier usage par token ; suppression des approves par trade ; tests |
-| P0-7 | FERMÉ | — | Profit payé en ERC-20 via safeTransfer(owner(), profit) | contracts/FlashArbExecutor.sol:113 | Aucun code à écrire |
-| P0-8 | À FAIRE | S | Aucun Pausable, aucune variable paused ; onlyOwner+nonReentrant présents | contracts/FlashArbExecutor.sol:61-62 | whenNotPaused sur startArbitrage UNIQUEMENT (pas sur executeOperation, pas sur sweep*) ; tests positif+négatif |
+| P0-1 | FERMÉ | — | msg.sender==POOL et initiator==address(this) déjà en tête de executeOperation | contracts/FlashArbExecutor.sol:83-84 | Aucun code à écrire |
+| P0-2 | NON APPLICABLE | — | sqrtPriceLimitX96=0 n'est pas un bug : le slippage est borné par amountOutMinimum (P0-3) | contracts/FlashArbExecutor.sol:164 | Aucune action |
+| P0-3 | FERMÉ | S | require ZERO_MIN_OUT dans _swap ; buildParams passe minAmountOut 1n | contracts/FlashArbExecutor.sol:142-167 ; test/FlashArbExecutor.test.js:303-328 | require(leg.minAmountOut > 0, "ZERO_MIN_OUT") dans _swap, test négatif |
+| P0-4 | FERMÉ | M | minProfit absolu et minProfitBps appliqués on-chain dans _settle ; filtre off-chain dans bot/decide.js | contracts/FlashArbExecutor.sol:40-48,113-140 ; bot/execute.js ; bot/executor.js ; test/FlashArbExecutor.test.js:367-418 | Ajouter minProfitBps dans ArbParams ; require(profit >= minProfit && profit*10000 >= amount*minProfitBps) ; ABI + bot/execute.js + bot/executor.js + tests |
+| P0-5 | DÉCLASSÉ P2 | — | Contrôle require(block.timestamp <= arb.deadline) existe à :71 et :87 ; la non-propagation aux routers n'est pas un bug démontré | contracts/FlashArbExecutor.sol:71,87,151,161 | Aucune action en P0 |
+| P0-6 | FERMÉ | S | Approve POOL paresseux (max, une fois par token) ; approves router par trade conservés | contracts/FlashArbExecutor.sol:130-133,144 ; test/FlashArbExecutor.test.js:330-365 | mapping(address => bool) approved + forceApprove(POOL, max) au premier usage par token ; approves router conservés ; test |
+| P0-7 | FERMÉ | — | Profit payé en ERC-20 via safeTransfer(owner(), profit) | contracts/FlashArbExecutor.sol:135-137 | Aucun code à écrire |
+| P0-8 | FERMÉ | S | Pausable ajouté ; whenNotPaused sur startArbitrage uniquement ; pause/unpause onlyOwner | contracts/FlashArbExecutor.sol:65-74,99-105 ; test/FlashArbExecutor.test.js:244-301 | whenNotPaused sur startArbitrage UNIQUEMENT (pas sur executeOperation, pas sur sweep*) ; tests positif+négatif |
 | P0-9 | À FAIRE | S | Revue de clôture P0 (pas d'écriture de tests) | — | Couverture vérifiée, npx hardhat test vert, docs/PRIORITES.md statuts FERMÉ |
-| P0-10 | À FAIRE | S | Aucun test négatif CALLER_NOT_POOL ; seul le chemin nominal est exercé | test/FlashArbExecutor.test.js:84-86 | Test : EOA appelle executeOperation → revert("CALLER_NOT_POOL") |
+| P0-10 | FERMÉ | S | Test négatif CALLER_NOT_POOL ajouté | test/FlashArbExecutor.test.js:420-432 | Test : EOA appelle executeOperation → revert("CALLER_NOT_POOL") |
 
 Ordre d'exécution : P0-8 → P0-3 → P0-6 → P0-4 → P0-10 → P0-9.
 Raison : du plus simple au plus invasif. P0-4 en dernier des
@@ -85,7 +85,7 @@ authentification préalable.
 
 ## Ce qui n'est pas dans la liste initiale
 
-- P0-10 (test négatif CALLER_NOT_POOL) : ajouté après authentification. P0-1 est fermé mais non testé négativement.
+- P0-10 (test négatif CALLER_NOT_POOL) : ajouté après authentification. P0-1 est fermé ; CALLER_NOT_POOL est couvert, mais UNTRUSTED_INITIATOR reste sans test négatif direct.
 - P0-9 (revue de clôture) : précisé comme revue, pas écriture de tests.
 - P0-4 : reformulé en double contrôle on-chain (minProfit absolu + minProfitBps), pas simple passage bps.
 - P0-2, P0-5 : sortis de P0 (non applicables, contrôle existant).
