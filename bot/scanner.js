@@ -1,6 +1,7 @@
 const { ethers } = require("ethers");
 const { quoteLeg, quoteV2, quoteV3 } = require("./prices");
 const { createThrottle, withThrottle } = require("./throttle");
+const { GAS_PROFIT_MULTIPLIER } = require("./pricing");
 
 const BPS_DENOMINATOR = 10000n;
 
@@ -80,6 +81,12 @@ function profitInUsd(profitTokenUnits, borrowedToken, ethUsdPrice) {
   return null;
 }
 
+function effectiveMinProfitUsd(gasCostUsd, config) {
+  const absolute = Number(config.minProfitUsd);
+  const gasMultiple = gasCostUsd !== null ? Number(gasCostUsd) * Number(GAS_PROFIT_MULTIPLIER) : 0;
+  return Math.max(absolute, gasMultiple);
+}
+
 /// Scans one configured trade size for one pair and returns an opportunity descriptor
 /// (profitable or not) - never throws for "just not profitable", only for real errors.
 async function scanTradeSize({
@@ -132,7 +139,10 @@ async function scanTradeSize({
     gasCostUsd,
     netProfitUsd,
     priced,
-    isOpportunity: priced === true && grossProfit > 0n && netProfitUsd >= config.minProfitUsd,
+    isOpportunity:
+      priced === true &&
+      grossProfit > 0n &&
+      netProfitUsd >= effectiveMinProfitUsd(gasCostUsd, config),
   };
 }
 

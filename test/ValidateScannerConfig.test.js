@@ -141,4 +141,41 @@ describe("bot/config validateScannerConfig", function () {
       "MAX_DAILY_GAS_ETH must be <= 10."
     );
   });
+
+  it("defaults MIN_PROFIT_USD to 0.50 when unset", function () {
+    const configPath = require.resolve("../bot/config");
+    const cachedConfig = require.cache[configPath];
+    const previous = {
+      MIN_PROFIT_USD: process.env.MIN_PROFIT_USD,
+      ARBITRUM_RPC_URL: process.env.ARBITRUM_RPC_URL,
+      PAIRS_CONFIG_JSON: process.env.PAIRS_CONFIG_JSON,
+      ETH_USD_ROUTE_JSON: process.env.ETH_USD_ROUTE_JSON,
+    };
+
+    process.env.MIN_PROFIT_USD = "";
+    process.env.ARBITRUM_RPC_URL = previous.ARBITRUM_RPC_URL || "http://127.0.0.1:8545";
+    process.env.PAIRS_CONFIG_JSON = JSON.stringify([
+      {
+        borrowedToken: { address: BORROWED, decimals: 18 },
+        intermediateToken: { address: INTERMEDIATE, decimals: 18 },
+        legOut: { kind: "V2", router: ROUTER_OUT, tokenOut: INTERMEDIATE },
+        legBack: { kind: "V2", router: ROUTER_BACK, tokenOut: BORROWED },
+        tradeSizes: ["0.1"],
+      },
+    ]);
+    process.env.ETH_USD_ROUTE_JSON = "";
+    delete require.cache[configPath];
+
+    try {
+      const config = require("../bot/config");
+      expect(config.minProfitUsd).to.equal(0.50);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      if (cachedConfig) require.cache[configPath] = cachedConfig;
+      else delete require.cache[configPath];
+    }
+  });
 });

@@ -1,6 +1,7 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { decide } = require("../bot/decide");
+const { usdToTokenUnits } = require("../bot/minProfitUsd");
 
 const AMOUNT_IN = ethers.parseEther("1000");
 const GAS_PRICE = 1n;
@@ -157,6 +158,45 @@ describe("bot/decide decide", function () {
     expect(result.shouldExecute).to.equal(false);
     expect(result.reason).to.include("maxFeePerGas exceeds profit cap");
     expect(result.maxFeeCostInToken).to.be.greaterThan(ethers.parseEther("10"));
+  });
+
+  it("raises the USD floor to 3x the gas cost when gas is expensive", function () {
+    const config = makeConfig({ minProfitUsd: 0.10 });
+    const feeData = makeFeeData({
+      gasPrice: 2_000_000_000n,
+      maxFeePerGas: 2_000_000_000n,
+      maxPriorityFeePerGas: 1n,
+    });
+    const baseline = runDecide({
+      opportunity: makeOpportunity({ grossProfit: ethers.parseEther("1000") }),
+      config,
+      feeData,
+    });
+    const gasCostInToken = baseline.gasCostInToken;
+    const gasCostUsd = Number(gasCostInToken) / 1e18;
+    const effectiveMinProfitUsd = Math.max(0.10, gasCostUsd * 3);
+    const threshold = usdToTokenUnits({
+      usdAmount: effectiveMinProfitUsd,
+      tokenUsdPrice: 1,
+      decimals: pair.borrowedToken.decimals,
+    });
+
+    const above = runDecide({
+      opportunity: makeOpportunity({ grossProfit: gasCostInToken + threshold + 1n }),
+      config,
+      feeData,
+    });
+    const below = runDecide({
+      opportunity: makeOpportunity({ grossProfit: gasCostInToken + threshold - 1n }),
+      config,
+      feeData,
+    });
+
+    expect(above.shouldExecute).to.equal(true);
+    expect(above.reason).to.equal("OK");
+    expect(below.shouldExecute).to.equal(false);
+    expect(below.reason).to.include("fresh net profit below MIN_PROFIT_USD");
+    expect(below.netProfitBps).to.be.greaterThan(30n);
   });
 
   it("ne fait aucun appel réseau et reste synchrone", function () {

@@ -304,7 +304,7 @@ const config = {
 
   aaveFlashLoanPremiumBps: BigInt(optionalNumber("AAVE_FLASH_LOAN_PREMIUM_BPS", 5)), // 0.05% Aave V3 default
 
-  minProfitUsd: optionalNumber("MIN_PROFIT_USD", 5),
+  minProfitUsd: optionalNumber("MIN_PROFIT_USD", 0.50),
   minProfitBps: optionalNumber("MIN_PROFIT_BPS", 30), // require net profit >= 0.30% of the borrowed notional
   minProfitBufferBps: BigInt(minProfitBufferBps), // require on-chain minProfit >= 50% of the off-chain estimate, to absorb slippage/front-running between quote and execution
   slippageBps: BigInt(slippageBps), // 0.5% per-leg slippage tolerance for minAmountOut

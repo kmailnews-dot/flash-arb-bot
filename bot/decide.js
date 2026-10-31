@@ -5,6 +5,7 @@ const {
   BPS_DENOMINATOR,
   GAS_COST_MARGIN_BPS,
   GAS_LIMIT_MARGIN_BPS,
+  GAS_PROFIT_MULTIPLIER,
 } = require("./pricing");
 
 function buildDecision({
@@ -163,8 +164,16 @@ function decideInternal({ opportunity, config, feeData, estimatedGas }) {
       : (Number(netProfitFresh) / 10 ** pair.borrowedToken.decimals) * tokenUsdPrice;
 
   if (minProfitUsdConfigured) {
+    const gasCostUsd =
+      tokenUsdPrice !== null
+        ? (Number(gasCostInToken) / 10 ** pair.borrowedToken.decimals) * tokenUsdPrice
+        : null;
+    const effectiveMinProfitUsd =
+      gasCostUsd !== null
+        ? Math.max(Number(config.minProfitUsd), gasCostUsd * Number(GAS_PROFIT_MULTIPLIER))
+        : Number(config.minProfitUsd);
     const minProfitUsdInToken = usdToTokenUnits({
-      usdAmount: config.minProfitUsd,
+      usdAmount: effectiveMinProfitUsd,
       tokenUsdPrice,
       decimals: pair.borrowedToken.decimals,
     });

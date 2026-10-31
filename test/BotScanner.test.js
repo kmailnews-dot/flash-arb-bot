@@ -85,4 +85,33 @@ describe("bot/scanner scanTradeSize", function () {
     expect(result.netProfitUsd).to.be.below(config.minProfitUsd);
     expect(result.isOpportunity).to.equal(false);
   });
+
+  it("raises the USD floor to 3x the gas cost when gas is expensive", async function () {
+    const expensiveConfig = {
+      ...config,
+      minProfitUsd: 0.10,
+      gasLimitEstimate: 462_963n,
+    };
+    const scanWith = (grossProfit) => {
+      const finalOut = AMOUNT_IN + PREMIUM + grossProfit;
+      return scanTradeSize({
+        provider: {},
+        pair,
+        tradeSizeHuman: "1000",
+        config: expensiveConfig,
+        gasPriceWei: GAS_PRICE_WEI,
+        ethUsdPrice: ETH_USD_PRICE,
+        quoteLeg: makeQuoteLeg(finalOut),
+      });
+    };
+
+    const below = await scanWith(1_500_000n);
+    expect(below.gasCostUsd).to.be.closeTo(1, 0.01);
+    expect(below.netProfitUsd).to.be.closeTo(0.50, 0.01);
+    expect(below.isOpportunity).to.equal(false);
+
+    const above = await scanWith(4_500_000n);
+    expect(above.netProfitUsd).to.be.closeTo(3.50, 0.01);
+    expect(above.isOpportunity).to.equal(true);
+  });
 });

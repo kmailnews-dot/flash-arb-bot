@@ -2,6 +2,7 @@ const BPS_DENOMINATOR = 10000n;
 const WEI_PER_ETHER = 10n ** 18n;
 const GAS_COST_MARGIN_BPS = 11000n;
 const GAS_LIMIT_MARGIN_BPS = 11500n;
+const GAS_PROFIT_MULTIPLIER = 3n;
 
 function withSlippage(amount, slippageBps) {
   return (amount * (BPS_DENOMINATOR - slippageBps)) / BPS_DENOMINATOR;
@@ -57,6 +58,7 @@ module.exports = {
   BPS_DENOMINATOR,
   GAS_COST_MARGIN_BPS,
   GAS_LIMIT_MARGIN_BPS,
+  GAS_PROFIT_MULTIPLIER,
   WEI_PER_ETHER,
   buildFeeOverrides,
   gasCostInBorrowedToken,
