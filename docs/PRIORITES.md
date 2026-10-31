@@ -21,7 +21,7 @@ authentification du contrat à HEAD 5337cb3 (P0 fermé côté code).
 | P0-6 | FERMÉ | S | Approve POOL paresseux (max, une fois par token) ; approves router par trade conservés | contracts/FlashArbExecutor.sol:130-133,144 ; test/FlashArbExecutor.test.js:330-365 | mapping(address => bool) approved + forceApprove(POOL, max) au premier usage par token ; approves router conservés ; test |
 | P0-7 | FERMÉ | — | Profit payé en ERC-20 via safeTransfer(owner(), profit) | contracts/FlashArbExecutor.sol:135-137 | Aucun code à écrire |
 | P0-8 | FERMÉ | S | Pausable ajouté ; whenNotPaused sur startArbitrage uniquement ; pause/unpause onlyOwner | contracts/FlashArbExecutor.sol:65-74,99-105 ; test/FlashArbExecutor.test.js:244-301 | whenNotPaused sur startArbitrage UNIQUEMENT (pas sur executeOperation, pas sur sweep*) ; tests positif+négatif |
-| P0-9 | À FAIRE | S | Revue de clôture P0 (pas d'écriture de tests) | — | Couverture vérifiée, npx hardhat test vert, docs/PRIORITES.md statuts FERMÉ |
+| P0-9 | FERMÉ | S | Revue de clôture P0 : 13 références corrigées, test positif minProfitBps ajouté, doc à jour | AGENTS.md §8, docs/PRIORITES.md, test/FlashArbExecutor.test.js:393-418 | npx hardhat test vert (202 passing) |
 | P0-10 | FERMÉ | S | Test négatif CALLER_NOT_POOL ajouté | test/FlashArbExecutor.test.js:420-432 | Test : EOA appelle executeOperation → revert("CALLER_NOT_POOL") |
 
 Ordre d'exécution : P0-8 → P0-3 → P0-6 → P0-4 → P0-10 → P0-9.

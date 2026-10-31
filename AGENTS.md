@@ -42,8 +42,8 @@ Ces règles s'appliquent à toutes les sessions sur ce projet. Lis-les avant tou
 ## 8. CONTEXTE DU PROJET (mis à jour manuellement)
 - **Stack** : Solidity ^0.8.20, Node.js 20, Hardhat, ethers v6, Aave V3, Uniswap V3 (SwapRouter original uniquement, jamais SwapRouter02), SushiSwap V2.
 - **Réseau** : Arbitrum One (42161), Arbitrum Sepolia (421614).
-- **Dernier commit** : 5337cb3.
-- **Prochaine étape** : P0-9 (revue de clôture, en cours), puis F-06 (timeout RPC dans txInFlight).
+- **Dernier commit** : e6c43df.
+- **Prochaine étape** : F-06 (timeout RPC dans txInFlight), ou P1 selon priorité. P0 fermé.
 - **Tests** : 202 passing, 2 pending (tests fork), 0 failing.
 
 ## 9. ARCHITECTURE
