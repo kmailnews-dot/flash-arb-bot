@@ -116,6 +116,10 @@ describe("bot/executor maybeExecute", function () {
     return { contract: { startArbitrage }, calls };
   }
 
+  function makeMockTx({ wait }) {
+    return { hash: `0x${"66".repeat(32)}`, wait };
+  }
+
   async function opportunityAboveGasFloor({ opportunity, config, estimatedGas = 300000n }) {
     const feeData = await ethers.provider.getFeeData();
     const decisionGasPriceWei = feeData.maxFeePerGas ?? feeData.gasPrice;
@@ -951,6 +955,100 @@ describe("bot/executor maybeExecute", function () {
     expect(result.error).to.include("TIMEOUT_WAIT_RECEIPT");
     expect(breaker.consecutiveFailures).to.equal(1);
     expect(gasSpent.gasSpentWei).to.equal(reservedGasWei.toString());
+  });
+
+  it("retries waitForReceipt on transient ETIMEDOUT until the receipt arrives", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({ opportunity, config });
+    let waitCalls = 0;
+    const contract = {
+      startArbitrage: async () =>
+        makeMockTx({
+          wait: async () => {
+            waitCalls += 1;
+            if (waitCalls < 3) {
+              throw Object.assign(new Error("timed out"), { code: "ETIMEDOUT" });
+            }
+            return { status: 1, gasUsed: 100000n, gasPrice: 1n, blockNumber: 1 };
+          },
+        }),
+    };
+    contract.startArbitrage.estimateGas = async () => 300000n;
+    contract.startArbitrage.staticCall = async () => true;
+
+    const result = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+    });
+
+    expect(waitCalls).to.equal(3);
+    expect(result.submitted).to.equal(true);
+    expect(result.error).to.equal(undefined);
+    expect(result.receipt.status).to.equal(1);
+  });
+
+  it("throws the last transient wait error after three attempts and counts one breaker failure", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({ opportunity, config });
+    let waitCalls = 0;
+    const contract = {
+      startArbitrage: async () =>
+        makeMockTx({
+          wait: async () => {
+            waitCalls += 1;
+            throw Object.assign(new Error(`timed out ${waitCalls}`), { code: "ETIMEDOUT" });
+          },
+        }),
+    };
+    contract.startArbitrage.estimateGas = async () => 300000n;
+    contract.startArbitrage.staticCall = async () => true;
+
+    const result = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+    });
+
+    const breaker = JSON.parse(fs.readFileSync(config.circuitBreakerPath, "utf8"));
+
+    expect(waitCalls).to.equal(3);
+    expect(result.submitted).to.equal(true);
+    expect(result.error).to.include("timed out 3");
+    expect(breaker.consecutiveFailures).to.equal(1);
+  });
+
+  it("does not retry waitForReceipt on a permanent error", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({ opportunity, config });
+    let waitCalls = 0;
+    const contract = {
+      startArbitrage: async () =>
+        makeMockTx({
+          wait: async () => {
+            waitCalls += 1;
+            throw Object.assign(new Error("NOT_PROFITABLE"), { code: "NOT_PROFITABLE" });
+          },
+        }),
+    };
+    contract.startArbitrage.estimateGas = async () => 300000n;
+    contract.startArbitrage.staticCall = async () => true;
+
+    const result = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+    });
+
+    expect(waitCalls).to.equal(1);
+    expect(result.submitted).to.equal(true);
+    expect(result.error).to.include("NOT_PROFITABLE");
   });
 
   it("treats a send error without receipt as ambiguous and keeps the gas reservation", async function () {

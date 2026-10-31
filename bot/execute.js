@@ -13,6 +13,12 @@ const {
 } = require("./guards");
 const { quoteLeg } = require("./prices");
 const { BPS_DENOMINATOR, withSlippage } = require("./pricing");
+const {
+  classifyError,
+  shouldRetry,
+  backoffMs,
+  DEFAULT_MAX_ATTEMPTS,
+} = require("./resilient");
 
 const WAIT_RECEIPT_TIMEOUT_MS = 120_000;
 const DEX_KIND = { V2: 0, V3: 1 };
@@ -100,14 +106,28 @@ function timeoutWaitReceiptError(txHash) {
   return err;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function waitForReceipt(tx) {
-  try {
-    return await tx.wait(1, WAIT_RECEIPT_TIMEOUT_MS);
-  } catch (err) {
-    if (err?.code === "TIMEOUT" && !err.receipt) {
-      throw timeoutWaitReceiptError(tx.hash);
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await tx.wait(1, WAIT_RECEIPT_TIMEOUT_MS);
+    } catch (err) {
+      if (err?.code === "TIMEOUT" && !err.receipt) {
+        throw timeoutWaitReceiptError(tx.hash);
+      }
+      attempt += 1;
+      if (
+        classifyError(err) !== "TRANSIENT" ||
+        !shouldRetry({ error: err, attempt, maxAttempts: DEFAULT_MAX_ATTEMPTS })
+      ) {
+        throw err;
+      }
+      await sleep(backoffMs({ attempt }));
     }
-    throw err;
   }
 }
 
