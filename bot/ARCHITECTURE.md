@@ -126,6 +126,20 @@ bot/run.js run() (process persistant)
 - **`adaptive` ajuste la config par cycle.** `loadAdaptive` lit `logs/adaptive.json`,
   `applyAdaptive` produit un `cycleConfig` distinct, `recordOutcome` n'est appelé qu'hors
   `DRY_RUN`. Réf. : `bot/index.js:109-140`, `:256-275`.
+- **Les chemins d'état sont absolus et ancrés sur le module.** `gasSpentPath`,
+  `circuitBreakerPath`, `DEFAULT_SCAN_LOG_PATH` et `DEFAULT_ADAPTIVE_PATH` dérivent de
+  `path.resolve(__dirname, "..", "logs")` (`bot/guards.js:5-7`, `bot/persist.js:5-6`,
+  `bot/adaptive.js:11-12`). `writeState` écrit un temporaire, appelle `fh.sync()` puis `rename`
+  (`bot/guards.js:25-34`). `readState` renvoie le fallback sur `ENOENT` et convertit une
+  `SyntaxError` en `STATE_FILE_CORRUPT` (`bot/guards.js:13-22`).
+- **Un rejet certain avant broadcast est non ambigu.** Dans le catch de `startArbitrage`
+  (`bot/execute.js:326-347`), `REJECTED_BEFORE_ACCEPTANCE` (`INSUFFICIENT_FUNDS`, `NONCE_EXPIRED`,
+  `REPLACEMENT_UNDERPRICED`, `INVALID_ARGUMENT` ; `bot/execute.js:24-37`) libère la réservation
+  (`bot/execute.js:337-342`) et n'incrémente pas le breaker. Toute autre erreur reste ambiguë :
+  réservation conservée, `recordFailureSafely` appelé, `submitted: true` (`bot/execute.js:344-346`).
+  La libération s'applique aussi au breaker final après réservation (`bot/execute.js:306-313`).
+  La branche `if (err.receipt)` est défensive : mocks uniquement, pas de receipt sur
+  `sendTransaction` en ethers v6 (`bot/execute.js:329-335`).
 
 ## Les typedefs
 
