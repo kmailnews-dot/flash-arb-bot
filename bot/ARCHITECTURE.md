@@ -115,6 +115,17 @@ bot/run.js run() (process persistant)
 - **Le throttle est par instance.** Deux `createThrottle` distincts n'interfèrent pas. Les appels
   sur le même throttle sont strictement sérialisés et espacés d'au moins `minIntervalMs`
   (défaut 250 ms) : `bot/throttle.js:1-2`, `4`, `20-42`, `44-78`.
+- **`resilient` est intégré dans `waitForReceipt`.** Les erreurs `TRANSIENT`
+  (ETIMEDOUT, ECONNRESET, RATE_LIMITED, ...) sont retentées avec un backoff borné (1 s puis 2 s)
+  avant de propager la dernière erreur. `TIMEOUT_WAIT_RECEIPT` reste court-circuité. Réf. :
+  `bot/execute.js:126-145`, `bot/resilient.js:1-3`, `:84-113`.
+- **`throttle` est intégré par module.** Un throttle dédié par module (`scanner`, `execute`,
+  `executor`, `main`), créé paresseusement à la première utilisation avec
+  `THROTTLE_MIN_INTERVAL_MS` (défaut 250 ms). Deux throttles distincts restent indépendants. Réf. :
+  `bot/scanner.js:7-17`, `bot/execute.js:27-37`, `bot/executor.js:16-26`, `bot/index.js:17-27`.
+- **`adaptive` ajuste la config par cycle.** `loadAdaptive` lit `logs/adaptive.json`,
+  `applyAdaptive` produit un `cycleConfig` distinct, `recordOutcome` n'est appelé qu'hors
+  `DRY_RUN`. Réf. : `bot/index.js:109-140`, `:256-275`.
 
 ## Les typedefs
 
@@ -144,6 +155,10 @@ Contrat de types : `bot/domain.js` (aucun export runtime, `bot/domain.js:172`).
 - `bot/adaptive.js` : `loadAdaptive`, `recordOutcome`, `applyAdaptive`.
 - `bot/resilient.js` : `classifyError`, `shouldRetry`, `backoffMs`.
 - `bot/throttle.js` : `createThrottle`, `withThrottle`, `getStats`.
+- `bot/scanner.js` : `getScannerThrottle`.
+- `bot/execute.js` : `getExecuteThrottle`.
+- `bot/executor.js` : `getExecutorThrottle`.
+- `bot/index.js` : `getMainThrottle`.
 - `bot/executor.js` : façade `maybeExecute` (`bot/executor.js:19`) ; verrou mono-transaction
   `txInFlight` (`bot/executor.js:14`, `26-30`, `180-182`).
 - npm scripts : `scan` → `node bot/index.js`, `start:run` → `node bot/run.js`
@@ -181,6 +196,20 @@ Contrat de types : `bot/domain.js` (aucun export runtime, `bot/domain.js:172`).
 - **`throttle.js` ne borne pas la chaîne de promesses.** Si `fn` reste bloqué, les appels suivants
   s'accumulent en mémoire sans limite ni timeout ni annulation. À noter pour une future limite
   `maxQueueSize` ou timeout par appel (`bot/throttle.js:44-78`).
+- **Écart de timing sur `waitForReceipt`.** Le message de commit `f66804f` mentionne
+  « 500 ms, 1 s, 2 s », mais `attempt` est incrémenté avant le sleep, donc l'implémentation réelle
+  applique 1 s puis 2 s (soit 3 s de backoff cumulé). Le comportement reste borné et sûr ; c'est la
+  doc qui doit être lue avec cette correction. Réf. : `bot/execute.js:127-144`.
+- **Création paresseuse du throttle.** Le premier appel fixe `throttleMinIntervalMs` pour tout le
+  process. Si la config change à chaud, le nouvel intervalle est ignoré. Réf. :
+  `bot/scanner.js:7-17`, `bot/execute.js:27-37`, `bot/executor.js:16-26`, `bot/index.js:17-27`.
+- **Sur-sérialisation de `main`.** `getNetwork` et `getFeeData` partagent `mainThrottle` et sont
+  donc espacés de 250 ms au lieu d'être réellement parallèles. Acceptable (2 appels par cycle), à
+  noter si le cycle devient sensible à la latence. Réf. : `bot/index.js:147-153`.
+- **Test `throttle` non flaky.** L'ancien test `respects minIntervalMs and measures the actual
+  wait` mesurait une durée réelle et pouvait échouer si l'event loop était bloqué. Il a été
+  remplacé par `accumulates wait time in stats when the min interval has not elapsed`, qui vérifie
+  `stats.totalWaitMs > 0` sans dépendre d'une durée précise. Réf. : `test/BotThrottle.test.js:127-135`.
 
 ## Ce que le bot ne fait PAS
 
