@@ -2,7 +2,8 @@ const fs = require("fs/promises");
 const path = require("path");
 const { redactUrls } = require("./sanitizeError");
 
-const DEFAULT_SCAN_LOG_PATH = "./logs/scans.jsonl";
+const LOG_DIR = path.resolve(__dirname, "..", "logs");
+const DEFAULT_SCAN_LOG_PATH = path.join(LOG_DIR, "scans.jsonl");
 const DEFAULT_LOG_FORMAT = "text";
 
 function logFormat() {

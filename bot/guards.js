@@ -2,8 +2,9 @@ const fs = require("fs/promises");
 const path = require("path");
 const { ethers } = require("ethers");
 
-const DEFAULT_GAS_SPENT_PATH = "./logs/gas_spent.json";
-const DEFAULT_CIRCUIT_BREAKER_PATH = "./logs/circuit_breaker.json";
+const LOG_DIR = path.resolve(__dirname, "..", "logs");
+const DEFAULT_GAS_SPENT_PATH = path.join(LOG_DIR, "gas_spent.json");
+const DEFAULT_CIRCUIT_BREAKER_PATH = path.join(LOG_DIR, "circuit_breaker.json");
 
 function utcDay(now = Date.now()) {
   return new Date(now).toISOString().slice(0, 10);
@@ -14,6 +15,9 @@ async function readState(filePath, fallback) {
     return JSON.parse(await fs.readFile(filePath, "utf8"));
   } catch (err) {
     if (err.code === "ENOENT") return fallback;
+    if (err instanceof SyntaxError) {
+      throw new Error(`STATE_FILE_CORRUPT: ${filePath}`);
+    }
     throw err;
   }
 }
@@ -21,7 +25,13 @@ async function readState(filePath, fallback) {
 async function writeState(filePath, state) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const tmpPath = `${filePath}.${process.pid}.tmp`;
-  await fs.writeFile(tmpPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  const fh = await fs.open(tmpPath, "w");
+  try {
+    await fh.writeFile(`${JSON.stringify(state, null, 2)}\n`, "utf8");
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
   await fs.rename(tmpPath, filePath);
 }
 

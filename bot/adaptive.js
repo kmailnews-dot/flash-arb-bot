@@ -8,7 +8,8 @@ const ADAPTIVE_MAX_SIZE_FACTOR = 1.00;
 const ADAPTIVE_WINDOW = 20;
 const ADAPTIVE_STEP_BPS = 5;
 const ADAPTIVE_STEP_SIZE = 0.10;
-const DEFAULT_ADAPTIVE_PATH = "./logs/adaptive.json";
+const LOG_DIR = path.resolve(__dirname, "..", "logs");
+const DEFAULT_ADAPTIVE_PATH = path.join(LOG_DIR, "adaptive.json");
 
 const ADAPTIVE_OUTCOMES = new Set(["SUCCESS", "FAILURE", "UNKNOWN"]);
 const STREAK_LENGTH = 3;

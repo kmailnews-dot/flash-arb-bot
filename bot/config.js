@@ -1,5 +1,6 @@
 require("dotenv").config();
 const { ethers } = require("ethers");
+const path = require("path");
 
 function required(name) {
   const value = process.env[name];
@@ -273,6 +274,8 @@ if (!Number.isInteger(minProfitBufferBps) || minProfitBufferBps < 1 || minProfit
   throw new Error("MIN_PROFIT_BUFFER_BPS must be an integer between 1 and 10000.");
 }
 
+const LOG_DIR = path.resolve(__dirname, "..", "logs");
+
 const config = {
   rpcUrl: required("ARBITRUM_RPC_URL"),
   dryRun,
@@ -305,11 +308,11 @@ const config = {
   maxDailyGasEth: optionalNumber("MAX_DAILY_GAS_ETH", 0.01),
   maxConsecutiveFailures: optionalNumber("MAX_CONSECUTIVE_FAILURES", 5),
   circuitBreakerCooldownMinutes: optionalNumber("CIRCUIT_BREAKER_COOLDOWN_MINUTES", 60),
-  gasSpentPath: optionalString("GAS_SPENT_PATH", "./logs/gas_spent.json"),
-  circuitBreakerPath: optionalString("CIRCUIT_BREAKER_PATH", "./logs/circuit_breaker.json"),
+  gasSpentPath: optionalString("GAS_SPENT_PATH", path.join(LOG_DIR, "gas_spent.json")),
+  circuitBreakerPath: optionalString("CIRCUIT_BREAKER_PATH", path.join(LOG_DIR, "circuit_breaker.json")),
 
   // Append-only JSONL log of every scan result, used to measure opportunities over time.
-  scanLogPath: optionalString("SCAN_LOG_PATH", "./logs/scans.jsonl"),
+  scanLogPath: optionalString("SCAN_LOG_PATH", path.join(LOG_DIR, "scans.jsonl")),
 
   // Optional: lets the bot price gas in USD by quoting 1 WETH -> a stablecoin on a live DEX pool.
   // Required only for pairs whose borrowed token is WETH or a stablecoin (see README). Leave unset
