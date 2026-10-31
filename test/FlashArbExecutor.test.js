@@ -390,6 +390,20 @@ describe("FlashArbExecutor", function () {
     );
   });
 
+  it("reverts when an EOA calls executeOperation directly", async function () {
+    const { owner, executor } = await deployFixture();
+    const borrowAddr = await executor.POOL();
+    await expect(
+      executor.executeOperation(
+        borrowAddr,
+        0n,
+        0n,
+        owner.address,
+        "0x"
+      )
+    ).to.be.revertedWith("CALLER_NOT_POOL");
+  });
+
   it("lets the owner sweep stray ERC20 balances", async function () {
     const { owner, borrowToken, executor } = await deployFixture();
 
