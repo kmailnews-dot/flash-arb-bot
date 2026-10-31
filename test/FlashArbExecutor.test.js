@@ -38,14 +38,14 @@ describe("FlashArbExecutor", function () {
         router: routerA,
         tokenOut: midToken,
         v3Fee: 0,
-        minAmountOut: 0n,
+        minAmountOut: 1n,
       },
       leg2: {
         kind: DEX_KIND.V3,
         router: routerB,
         tokenOut: undefined, // filled by caller (borrowToken address)
         v3Fee: 3000,
-        minAmountOut: 0n,
+        minAmountOut: 1n,
       },
       minProfit,
       deadline,
@@ -296,6 +296,33 @@ describe("FlashArbExecutor", function () {
     await expect(executor.startArbitrage(borrowAddr, amount, params)).to.emit(
       executor,
       "ArbitrageExecuted"
+    );
+  });
+
+  it("reverts when minAmountOut is zero on a leg", async function () {
+    const { borrowToken, midToken, executor, routerA, routerB } = await deployFixture();
+
+    const borrowAddr = await borrowToken.getAddress();
+    const midAddr = await midToken.getAddress();
+
+    await routerA.setRate(borrowAddr, midAddr, RATE_1_TO_1);
+    await routerB.setRate(midAddr, borrowAddr, ethers.parseEther("1.02"));
+
+    const amount = ethers.parseEther("1000");
+    const deadline = (await ethers.provider.getBlock("latest")).timestamp + 3600;
+    const params = buildParams({
+      routerA: await routerA.getAddress(),
+      routerB: await routerB.getAddress(),
+      midToken: midAddr,
+      minProfit: 0n,
+      deadline,
+    });
+    params.leg1.minAmountOut = 0n;
+    params.leg2.minAmountOut = 1n;
+    params.leg2.tokenOut = borrowAddr;
+
+    await expect(executor.startArbitrage(borrowAddr, amount, params)).to.be.revertedWith(
+      "ZERO_MIN_OUT"
     );
   });
 

@@ -127,6 +127,7 @@ contract FlashArbExecutor is FlashLoanSimpleReceiverBase, Ownable, ReentrancyGua
     }
 
     function _swap(Leg memory leg, address tokenIn, uint256 amountIn) internal returns (uint256) {
+        require(leg.minAmountOut > 0, "ZERO_MIN_OUT");
         IERC20(tokenIn).forceApprove(leg.router, amountIn);
 
         if (leg.kind == DexKind.V2) {
