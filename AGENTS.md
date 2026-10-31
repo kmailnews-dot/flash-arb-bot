@@ -65,3 +65,19 @@ Ces règles s'appliquent à toutes les sessions sur ce projet. Lis-les avant tou
 - `bot/executor.js` réexporte `buildFeeOverrides`, `gasCostInBorrowedToken`,
   `BPS_DENOMINATOR`, `GAS_COST_MARGIN_BPS`, `GAS_LIMIT_MARGIN_BPS`
   depuis `bot/pricing.js` pour compatibilité des tests existants.
+
+## 10. PROTOCOLE DE DÉGEL DU CONTRAT
+
+Le contrat `contracts/FlashArbExecutor.sol` est gelé par défaut.
+Il est dégelé exclusivement pour les points P0 listés dans
+`docs/PRIORITES.md`, un point par commit.
+
+Règles :
+- Un commit P0 = un point. Pas de commit groupé.
+- Chaque commit inclut : diff minimal, au moins un test (positif
+  ou négatif), `npx hardhat test` vert.
+- Interdiction de refactor opportuniste (AGENTS.md §2).
+- Interdiction de modifier `FlashLoanSimpleReceiverBase` ou
+  `executeOperation` sans relecture ciblée.
+- Après P0-9 fermé, le contrat est regelé. Toute nouvelle
+  modification exige une nouvelle authentification.
