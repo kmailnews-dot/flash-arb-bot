@@ -10,8 +10,20 @@ const {
 } = require("./pricing");
 const { execute, buildLeg, errorMessage } = require("./execute");
 const { decide } = require("./decide");
+const { createThrottle, withThrottle } = require("./throttle");
 
 let txInFlight = false;
+let executorThrottle = null;
+
+function getExecutorThrottle(config = {}) {
+  if (!executorThrottle) {
+    executorThrottle = createThrottle({
+      minIntervalMs: config.throttleMinIntervalMs,
+      name: "executor",
+    });
+  }
+  return executorThrottle;
+}
 
 /// Either logs the opportunity (DRY_RUN, the default) or submits the flash-loan transaction
 /// against the deployed FlashArbExecutor contract. Never throws for an execution failure - a
@@ -79,7 +91,11 @@ async function maybeExecute({
 
     let estimatedGas;
     try {
-      estimatedGas = await contract.startArbitrage.estimateGas(pair.borrowedToken.address, amountIn, params);
+      estimatedGas = (
+        await withThrottle(getExecutorThrottle(config), () =>
+          contract.startArbitrage.estimateGas(pair.borrowedToken.address, amountIn, params)
+        )
+      ).result;
     } catch (err) {
       const message = errorMessage(err);
       console.log(`  [SKIP FREE] gas estimation failed: ${message} - transaction not sent.`);
@@ -101,7 +117,9 @@ async function maybeExecute({
       return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
     }
 
-    const feeData = await provider.getFeeData();
+    const feeData = (
+      await withThrottle(getExecutorThrottle(config), () => provider.getFeeData())
+    ).result;
 
     let intermediateOutFresh;
     let finalOutFresh;

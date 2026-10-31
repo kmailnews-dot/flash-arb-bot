@@ -6,6 +6,7 @@ const {
   DEFAULT_MIN_INTERVAL_MS,
   DEFAULT_NAME,
 } = require("../bot/throttle");
+const { getScannerThrottle, scanTradeSize } = require("../bot/scanner");
 
 describe("bot/throttle", function () {
   it("initializes stats and defaults", function () {
@@ -152,5 +153,49 @@ describe("bot/throttle", function () {
       42, 42, 42, 42, 42,
     ]);
     expect(getStats(throttle).calls).to.equal(5);
+  });
+
+  it("uses the scanner throttle for quote calls", async function () {
+    const config = {
+      aaveFlashLoanPremiumBps: 5n,
+      gasLimitEstimate: 700000n,
+      gasPriceBufferPct: 20,
+      minProfitUsd: 5,
+      throttleMinIntervalMs: 0,
+    };
+    const pair = {
+      borrowedToken: {
+        address: "0x1111111111111111111111111111111111111111",
+        decimals: 18,
+      },
+      intermediateToken: {
+        address: "0x2222222222222222222222222222222222222222",
+        decimals: 18,
+      },
+      legOut: {
+        kind: "V2",
+        router: "0x3333333333333333333333333333333333333333",
+        tokenOut: "0x2222222222222222222222222222222222222222",
+      },
+      legBack: {
+        kind: "V2",
+        router: "0x4444444444444444444444444444444444444444",
+        tokenOut: "0x1111111111111111111111111111111111111111",
+      },
+    };
+    const throttle = getScannerThrottle(config);
+    const callsBefore = getStats(throttle).calls;
+
+    await scanTradeSize({
+      provider: {},
+      pair,
+      tradeSizeHuman: "1",
+      config,
+      gasPriceWei: null,
+      ethUsdPrice: null,
+      quoteLeg: async () => 1000n,
+    });
+
+    expect(getStats(throttle).calls).to.equal(callsBefore + 2);
   });
 });

@@ -10,8 +10,21 @@ const {
   loadAdaptive,
   recordOutcome,
 } = require("./adaptive");
+const { createThrottle, withThrottle } = require("./throttle");
 
 const AAVE_POOL_PREMIUM_ABI = ["function FLASHLOAN_PREMIUM_TOTAL() view returns (uint128)"];
+
+let mainThrottle = null;
+
+function getMainThrottle(config = {}) {
+  if (!mainThrottle) {
+    mainThrottle = createThrottle({
+      minIntervalMs: config.throttleMinIntervalMs,
+      name: "main",
+    });
+  }
+  return mainThrottle;
+}
 
 async function persistResultSafely(logPath, result, chainId) {
   try {
@@ -131,11 +144,13 @@ async function main({
     console.log("Running in SIMULATION mode: opportunities are logged, no transaction is sent.");
   }
 
-  const [network, feeData, ethUsdPrice] = await Promise.all([
-    provider.getNetwork(),
-    provider.getFeeData(),
-    getEthUsdPrice(provider, config.ethUsdRoute),
+  const [networkOutcome, feeDataOutcome, ethUsdPrice] = await Promise.all([
+    withThrottle(getMainThrottle(config), () => provider.getNetwork()),
+    withThrottle(getMainThrottle(config), () => provider.getFeeData()),
+    getEthUsdPrice(provider, config.ethUsdRoute, config),
   ]);
+  const network = networkOutcome.result;
+  const feeData = feeDataOutcome.result;
   const chainId = Number(network.chainId);
 
   if (config.privateKey) {

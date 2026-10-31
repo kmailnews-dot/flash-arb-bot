@@ -19,9 +19,22 @@ const {
   backoffMs,
   DEFAULT_MAX_ATTEMPTS,
 } = require("./resilient");
+const { createThrottle, withThrottle } = require("./throttle");
 
 const WAIT_RECEIPT_TIMEOUT_MS = 120_000;
 const DEX_KIND = { V2: 0, V3: 1 };
+
+let executeThrottle = null;
+
+function getExecuteThrottle(config = {}) {
+  if (!executeThrottle) {
+    executeThrottle = createThrottle({
+      minIntervalMs: config.throttleMinIntervalMs,
+      name: "execute",
+    });
+  }
+  return executeThrottle;
+}
 
 function buildLeg(leg, quotedOut, slippageBps) {
   return {
@@ -169,17 +182,11 @@ async function execute({
           ? opportunity.finalOut - amountIn - opportunity.grossProfit
           : (amountIn * effectivePremiumBps) / BPS_DENOMINATOR;
       const owedFresh = amountIn + premiumFresh;
-      const intermediateOutFresh = await injectedQuoteLeg(
-        provider,
-        pair.legOut,
-        pair.borrowedToken.address,
-        amountIn
+      const { result: intermediateOutFresh } = await withThrottle(getExecuteThrottle(config), () =>
+        injectedQuoteLeg(provider, pair.legOut, pair.borrowedToken.address, amountIn)
       );
-      const finalOutFresh = await injectedQuoteLeg(
-        provider,
-        pair.legBack,
-        pair.intermediateToken.address,
-        intermediateOutFresh
+      const { result: finalOutFresh } = await withThrottle(getExecuteThrottle(config), () =>
+        injectedQuoteLeg(provider, pair.legBack, pair.intermediateToken.address, intermediateOutFresh)
       );
       fresh = {
         intermediateOutFresh,
@@ -249,7 +256,9 @@ async function execute({
   };
 
   try {
-    await contract.startArbitrage.staticCall(pair.borrowedToken.address, amountIn, finalParams);
+    await withThrottle(getExecuteThrottle(config), () =>
+      contract.startArbitrage.staticCall(pair.borrowedToken.address, amountIn, finalParams)
+    );
   } catch (err) {
     const message = errorMessage(err);
     const reason = isNotProfitableError(err) ? "NOT_PROFITABLE" : "simulation failed";

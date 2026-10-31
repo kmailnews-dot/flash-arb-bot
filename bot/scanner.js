@@ -1,7 +1,20 @@
 const { ethers } = require("ethers");
 const { quoteLeg, quoteV2, quoteV3 } = require("./prices");
+const { createThrottle, withThrottle } = require("./throttle");
 
 const BPS_DENOMINATOR = 10000n;
+
+let scannerThrottle = null;
+
+function getScannerThrottle(config = {}) {
+  if (!scannerThrottle) {
+    scannerThrottle = createThrottle({
+      minIntervalMs: config.throttleMinIntervalMs,
+      name: "scanner",
+    });
+  }
+  return scannerThrottle;
+}
 
 function redactUrls(value) {
   if (typeof value !== "string") return value;
@@ -22,17 +35,18 @@ function sanitizeError(err) {
 /// A failed quote (wrong-network addresses, missing pool, revert, undecodable return data, ...)
 /// is non-fatal: USD pricing is an optional convenience, so warn and return null. Callers then
 /// mark the result unpriced instead of crashing the whole scan.
-async function getEthUsdPrice(provider, ethUsdRoute) {
+async function getEthUsdPrice(provider, ethUsdRoute, config = {}) {
   if (!ethUsdRoute) return null;
 
   const routeAddress = ethUsdRoute.kind === "V3" ? ethUsdRoute.quoter : ethUsdRoute.router;
 
   try {
     const oneEth = ethers.parseUnits("1", 18);
-    const out =
+    const { result: out } = await withThrottle(getScannerThrottle(config), () =>
       ethUsdRoute.kind === "V2"
-        ? await quoteV2(provider, ethUsdRoute.router, ethUsdRoute.weth, ethUsdRoute.usdc, oneEth)
-        : await quoteV3(provider, ethUsdRoute.quoter, ethUsdRoute.weth, ethUsdRoute.usdc, ethUsdRoute.fee, oneEth);
+        ? quoteV2(provider, ethUsdRoute.router, ethUsdRoute.weth, ethUsdRoute.usdc, oneEth)
+        : quoteV3(provider, ethUsdRoute.quoter, ethUsdRoute.weth, ethUsdRoute.usdc, ethUsdRoute.fee, oneEth)
+    );
 
     return Number(ethers.formatUnits(out, ethUsdRoute.usdcDecimals));
   } catch (err) {
@@ -80,8 +94,12 @@ async function scanTradeSize({
   const quoteTimestamp = new Date().toISOString();
   const amountIn = ethers.parseUnits(tradeSizeHuman, pair.borrowedToken.decimals);
 
-  const intermediateOut = await injectedQuoteLeg(provider, pair.legOut, pair.borrowedToken.address, amountIn);
-  const finalOut = await injectedQuoteLeg(provider, pair.legBack, pair.intermediateToken.address, intermediateOut);
+  const { result: intermediateOut } = await withThrottle(getScannerThrottle(config), () =>
+    injectedQuoteLeg(provider, pair.legOut, pair.borrowedToken.address, amountIn)
+  );
+  const { result: finalOut } = await withThrottle(getScannerThrottle(config), () =>
+    injectedQuoteLeg(provider, pair.legBack, pair.intermediateToken.address, intermediateOut)
+  );
 
   const premium = (amountIn * config.aaveFlashLoanPremiumBps) / BPS_DENOMINATOR;
   const owed = amountIn + premium;
@@ -136,4 +154,11 @@ async function scanPair({ provider, pair, config, gasPriceWei, ethUsdPrice }) {
   });
 }
 
-module.exports = { getEthUsdPrice, estimateGasCostUsd, sanitizeError, scanTradeSize, scanPair };
+module.exports = {
+  getEthUsdPrice,
+  estimateGasCostUsd,
+  sanitizeError,
+  scanTradeSize,
+  scanPair,
+  getScannerThrottle,
+};

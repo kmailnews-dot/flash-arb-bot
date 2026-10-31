@@ -212,6 +212,7 @@ function validateScannerConfig({
   maxGasLimit,
   maxWalletBalanceEth,
   maxDailyGasEth,
+  throttleMinIntervalMs,
 }) {
   if (minProfitUsd !== undefined && minProfitUsd !== null) {
     if (typeof minProfitUsd !== "number" || !Number.isFinite(minProfitUsd) || minProfitUsd < 0) {
@@ -258,6 +259,11 @@ function validateScannerConfig({
   if (maxDailyGasEth > 10) {
     throw new Error("MAX_DAILY_GAS_ETH must be <= 10.");
   }
+  if (throttleMinIntervalMs !== undefined && throttleMinIntervalMs !== null) {
+    if (!Number.isInteger(throttleMinIntervalMs) || throttleMinIntervalMs < 0) {
+      throw new Error("THROTTLE_MIN_INTERVAL_MS must be a non-negative integer.");
+    }
+  }
 }
 
 const slippageBps = validateSlippageBps();
@@ -273,6 +279,7 @@ const config = {
   // Persistent runner (bot/run.js): polling interval for HTTP JSON-RPC providers. A ws:// or
   // wss:// ARBITRUM_RPC_URL uses WebSocketProvider instead.
   pollIntervalMs: optionalNumber("POLL_INTERVAL_MS", 15000),
+  throttleMinIntervalMs: optionalNumber("THROTTLE_MIN_INTERVAL_MS", 250),
   // Only needed when DRY_RUN=false - this wallet needs a small ETH/ARB balance to pay gas.
   // It is NOT the flash loan capital: the flash loan itself always borrows with zero collateral.
   privateKey: process.env.PRIVATE_KEY,
@@ -321,6 +328,7 @@ validateScannerConfig({
   maxGasLimit: config.maxGasLimit,
   maxWalletBalanceEth: config.maxWalletBalanceEth,
   maxDailyGasEth: config.maxDailyGasEth,
+  throttleMinIntervalMs: config.throttleMinIntervalMs,
 });
 
 module.exports = config;
