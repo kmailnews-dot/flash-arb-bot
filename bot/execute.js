@@ -20,6 +20,7 @@ const {
   DEFAULT_MAX_ATTEMPTS,
 } = require("./resilient");
 const { createThrottle, withThrottle } = require("./throttle");
+const { withTimeout } = require("./timeout");
 
 // Codes ethers v6 correspondant à un rejet du nœud AVANT acceptation.
 // Vérifiés dans node_modules/ethers@6.17.0 :
@@ -274,7 +275,11 @@ async function execute({
 
   try {
     await withThrottle(getExecuteThrottle(config), () =>
-      contract.startArbitrage.staticCall(pair.borrowedToken.address, amountIn, finalParams)
+      withTimeout(
+        contract.startArbitrage.staticCall(pair.borrowedToken.address, amountIn, finalParams),
+        config.rpcTimeoutMs ?? 30_000,
+        "STATIC_CALL"
+      )
     );
   } catch (err) {
     const message = errorMessage(err);

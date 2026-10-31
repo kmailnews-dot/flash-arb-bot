@@ -1257,6 +1257,114 @@ describe("bot/executor maybeExecute", function () {
     expect(calls).to.deep.equal(["estimateGas", "staticCall", "send"]);
   });
 
+  it("returns TIMEOUT_ESTIMATE_GAS and releases txInFlight when estimateGas hangs", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig({ rpcTimeoutMs: 50 });
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({ opportunity, config });
+    const provider = {
+      getFeeData: async () => ({ gasPrice: 1n, maxFeePerGas: null }),
+      getNetwork: () => ethers.provider.getNetwork(),
+      getBalance: (address) => ethers.provider.getBalance(address),
+    };
+    const { contract: hangingContract } = makeSpyContract();
+    let releaseEstimate;
+    const estimateGate = new Promise((resolve) => {
+      releaseEstimate = resolve;
+    });
+    hangingContract.startArbitrage.estimateGas = async () => {
+      await estimateGate;
+      return 300000n;
+    };
+
+    let first;
+    try {
+      first = await maybeExecute({
+        opportunity: freshOpportunity,
+        provider,
+        config,
+        contract: hangingContract,
+      });
+    } finally {
+      releaseEstimate();
+    }
+
+    expect(first.submitted).to.equal(false);
+    expect(first.error).to.include("TIMEOUT_ESTIMATE_GAS");
+
+    const { contract } = makeSpyContract();
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : opportunity.finalOut;
+    const second = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+
+    expect(second.submitted).to.equal(true);
+  });
+
+  it("returns TRANSACTION_IN_FLIGHT_STALE when txInFlight exceeds txInFlightMaxMs", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig({ txInFlightMaxMs: 50 });
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({ opportunity, config });
+    const provider = {
+      getFeeData: async () => ({ gasPrice: 1n, maxFeePerGas: null }),
+      getNetwork: () => ethers.provider.getNetwork(),
+      getBalance: (address) => ethers.provider.getBalance(address),
+    };
+    const { contract } = makeSpyContract();
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : opportunity.finalOut;
+    let releaseEstimate;
+    let markEstimateStarted;
+    const estimateGate = new Promise((resolve) => {
+      releaseEstimate = resolve;
+    });
+    const estimateStarted = new Promise((resolve) => {
+      markEstimateStarted = resolve;
+    });
+    contract.startArbitrage.estimateGas = async () => {
+      markEstimateStarted();
+      await estimateGate;
+      return 300000n;
+    };
+
+    let first;
+    let firstPromise;
+    try {
+      firstPromise = maybeExecute({
+        opportunity: freshOpportunity,
+        provider,
+        config,
+        contract,
+        quoteLeg,
+      });
+      await estimateStarted;
+      await new Promise((resolve) => setTimeout(resolve, 60));
+
+      const second = await maybeExecute({
+        opportunity: freshOpportunity,
+        provider,
+        config,
+        contract,
+        quoteLeg,
+      });
+      expect(second.submitted).to.equal(false);
+      expect(second.error).to.equal("TRANSACTION_IN_FLIGHT_STALE");
+      expect(second.stale).to.equal(true);
+      expect(second.elapsedMs).to.be.greaterThan(50);
+    } finally {
+      releaseEstimate();
+      if (firstPromise) {
+        first = await firstPromise;
+      }
+    }
+
+    expect(first.submitted).to.equal(true);
+  });
+
   it("releases the gas reservation and skips the breaker on INSUFFICIENT_FUNDS", async function () {
     const { opportunity, makeConfig } = await deployFixture();
     const config = makeConfig({ maxDailyGasEth: 0.01 });

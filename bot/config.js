@@ -214,6 +214,8 @@ function validateScannerConfig({
   maxWalletBalanceEth,
   maxDailyGasEth,
   throttleMinIntervalMs,
+  rpcTimeoutMs,
+  txInFlightMaxMs,
 }) {
   if (minProfitUsd !== undefined && minProfitUsd !== null) {
     if (typeof minProfitUsd !== "number" || !Number.isFinite(minProfitUsd) || minProfitUsd < 0) {
@@ -265,6 +267,16 @@ function validateScannerConfig({
       throw new Error("THROTTLE_MIN_INTERVAL_MS must be a non-negative integer.");
     }
   }
+  if (rpcTimeoutMs !== undefined && rpcTimeoutMs !== null) {
+    if (!Number.isInteger(rpcTimeoutMs) || rpcTimeoutMs <= 0) {
+      throw new Error("RPC_TIMEOUT_MS must be a positive integer.");
+    }
+  }
+  if (txInFlightMaxMs !== undefined && txInFlightMaxMs !== null) {
+    if (!Number.isInteger(txInFlightMaxMs) || txInFlightMaxMs <= 0) {
+      throw new Error("TX_IN_FLIGHT_MAX_MS must be a positive integer.");
+    }
+  }
 }
 
 const slippageBps = validateSlippageBps();
@@ -283,6 +295,8 @@ const config = {
   // wss:// ARBITRUM_RPC_URL uses WebSocketProvider instead.
   pollIntervalMs: optionalNumber("POLL_INTERVAL_MS", 15000),
   throttleMinIntervalMs: optionalNumber("THROTTLE_MIN_INTERVAL_MS", 250),
+  rpcTimeoutMs: optionalNumber("RPC_TIMEOUT_MS", 30_000),
+  txInFlightMaxMs: optionalNumber("TX_IN_FLIGHT_MAX_MS", 180_000),
   // Only needed when DRY_RUN=false - this wallet needs a small ETH/ARB balance to pay gas.
   // It is NOT the flash loan capital: the flash loan itself always borrows with zero collateral.
   privateKey: process.env.PRIVATE_KEY,
@@ -332,6 +346,8 @@ validateScannerConfig({
   maxWalletBalanceEth: config.maxWalletBalanceEth,
   maxDailyGasEth: config.maxDailyGasEth,
   throttleMinIntervalMs: config.throttleMinIntervalMs,
+  rpcTimeoutMs: config.rpcTimeoutMs,
+  txInFlightMaxMs: config.txInFlightMaxMs,
 });
 
 module.exports = config;

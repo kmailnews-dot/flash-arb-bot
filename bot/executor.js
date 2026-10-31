@@ -11,8 +11,10 @@ const {
 const { execute, buildLeg, errorMessage } = require("./execute");
 const { decide } = require("./decide");
 const { createThrottle, withThrottle } = require("./throttle");
+const { withTimeout } = require("./timeout");
 
 let txInFlight = false;
+let txInFlightSince = null;
 let executorThrottle = null;
 
 function getExecutorThrottle(config = {}) {
@@ -36,10 +38,24 @@ async function maybeExecute({
   quoteLeg: injectedQuoteLeg = quoteLeg,
 }) {
   if (txInFlight) {
+    const maxMs = config.txInFlightMaxMs ?? 180_000;
+    const elapsed = txInFlightSince === null ? 0 : Date.now() - txInFlightSince;
+    if (elapsed > maxMs) {
+      console.log(
+        `  [STUCK] txInFlight stuck for ${elapsed}ms - manual reconciliation required.`
+      );
+      return {
+        submitted: false,
+        error: "TRANSACTION_IN_FLIGHT_STALE",
+        stale: true,
+        elapsedMs: elapsed,
+      };
+    }
     return { submitted: false, error: "TRANSACTION_IN_FLIGHT" };
   }
 
   txInFlight = true;
+  txInFlightSince = Date.now();
   try {
     // Le breaker compte les échecs coûteux (reverts on-chain) et les issues ambiguës après
     // acceptation (envoi sans receipt, timeout de confirmation). Les échecs avant acceptation
@@ -94,7 +110,11 @@ async function maybeExecute({
     try {
       estimatedGas = (
         await withThrottle(getExecutorThrottle(config), () =>
-          contract.startArbitrage.estimateGas(pair.borrowedToken.address, amountIn, params)
+          withTimeout(
+            contract.startArbitrage.estimateGas(pair.borrowedToken.address, amountIn, params),
+            config.rpcTimeoutMs ?? 30_000,
+            "ESTIMATE_GAS"
+          )
         )
       ).result;
     } catch (err) {
@@ -118,9 +138,18 @@ async function maybeExecute({
       return { submitted: false, simulated: true, estimatedGas, gasLimitWithMargin, error: message };
     }
 
-    const feeData = (
-      await withThrottle(getExecutorThrottle(config), () => provider.getFeeData())
-    ).result;
+    let feeData;
+    try {
+      feeData = (
+        await withThrottle(getExecutorThrottle(config), () =>
+          withTimeout(provider.getFeeData(), config.rpcTimeoutMs ?? 30_000, "FEE_DATA")
+        )
+      ).result;
+    } catch (err) {
+      const message = errorMessage(err);
+      console.log(`  [SKIP FREE] getFeeData failed: ${message} - transaction not sent.`);
+      return { submitted: false, simulated: false, error: message };
+    }
 
     let intermediateOutFresh;
     let finalOutFresh;
@@ -128,17 +157,20 @@ async function maybeExecute({
     let premiumFresh;
     let owedFresh;
     try {
-      intermediateOutFresh = await injectedQuoteLeg(
-        provider,
-        pair.legOut,
-        pair.borrowedToken.address,
-        amountIn
+      intermediateOutFresh = await withTimeout(
+        injectedQuoteLeg(provider, pair.legOut, pair.borrowedToken.address, amountIn),
+        config.rpcTimeoutMs ?? 30_000,
+        "REQUOTE_LEG1"
       );
-      finalOutFresh = await injectedQuoteLeg(
-        provider,
-        pair.legBack,
-        pair.intermediateToken.address,
-        intermediateOutFresh
+      finalOutFresh = await withTimeout(
+        injectedQuoteLeg(
+          provider,
+          pair.legBack,
+          pair.intermediateToken.address,
+          intermediateOutFresh
+        ),
+        config.rpcTimeoutMs ?? 30_000,
+        "REQUOTE_LEG2"
       );
       premiumFresh =
         effectivePremiumBps === null
@@ -198,6 +230,7 @@ async function maybeExecute({
     });
   } finally {
     txInFlight = false;
+    txInFlightSince = null;
   }
 }
 
