@@ -66,6 +66,9 @@ bot/run.js run() (process persistant)
 | `bot/scanner.js` | Scan des paires/tailles, prix ETH/USD, coût gaz USD | `scanPair`, `scanTradeSize`, `getEthUsdPrice` | `ethers`, `prices` |
 | `bot/index.js` | Un cycle complet (`main`) | `main` | `ethers`, `scanner`, `executor`, `persist`, `networks`, `guards`, `config` (lazy) |
 | `bot/run.js` | Boucle persistante et gestion provider/signaux | `run` | `ethers`, `index` |
+| `bot/adaptive.js` | Seuils adaptatifs bornés (MIN_PROFIT_BPS, taille de trade), historique | `loadAdaptive`, `recordOutcome`, `applyAdaptive` | `fs/promises`, `path` |
+| `bot/resilient.js` | Classification d'erreur + retry borné + backoff | `classifyError`, `shouldRetry`, `backoffMs` | aucune |
+| `bot/throttle.js` | Sérialisation RPC + intervalle minimum + stats | `createThrottle`, `withThrottle`, `getStats` | aucune |
 | `bot/config.js` | Environnement → `Config` validée | `config` | `dotenv`, `ethers` |
 | `bot/abis.js` | ABIs ERC-20, routeurs V2, QuoterV2, exécuteur | `FLASH_ARB_EXECUTOR_ABI` (et autres) | aucune |
 | `bot/networks.js` | Adresses Aave par chaîne | `NETWORKS` | aucune |
@@ -102,6 +105,16 @@ bot/run.js run() (process persistant)
   `{ ok: true }` / `{ ok: false, error }` (`bot/guards.js:28-29`) ; `runGuard` convertit toute
   exception en `{ ok: false }` (`bot/execute.js:44-51`) et chaque échec retourne avant l'envoi
   (ex. `bot/execute.js:188-191`, `204-207`, `216-219`).
+- **L'adaptive est borné.** `effectiveMinProfitBps` reste dans
+  `[minProfitBps, min(minProfitBps * 2, 10000)]`, et `effectiveMaxTradeSize` dans
+  `[0.10, 1.00]`. Un `logs/adaptive.json` corrompu ne peut pas sortir de ces bornes :
+  `bot/adaptive.js:4-11`, `20-40`, `84-98`, `154-182`.
+- **Le retry est borné.** `shouldRetry` ne retente que les erreurs `TRANSIENT`, strictement sous
+  `maxAttempts` (défaut 3), avec un backoff exponentiel plafonné à 4 s :
+  `bot/resilient.js:1-3`, `19-30`, `84-104`.
+- **Le throttle est par instance.** Deux `createThrottle` distincts n'interfèrent pas. Les appels
+  sur le même throttle sont strictement sérialisés et espacés d'au moins `minIntervalMs`
+  (défaut 250 ms) : `bot/throttle.js:1-2`, `4`, `20-42`, `44-78`.
 
 ## Les typedefs
 
@@ -128,6 +141,9 @@ Contrat de types : `bot/domain.js` (aucun export runtime, `bot/domain.js:172`).
   (`bot/index.js:230-237`).
 - `bot/run.js` : process persistant (`run`, `bot/run.js:57`), CLI et arrêt propre
   (`bot/run.js:161-178`).
+- `bot/adaptive.js` : `loadAdaptive`, `recordOutcome`, `applyAdaptive`.
+- `bot/resilient.js` : `classifyError`, `shouldRetry`, `backoffMs`.
+- `bot/throttle.js` : `createThrottle`, `withThrottle`, `getStats`.
 - `bot/executor.js` : façade `maybeExecute` (`bot/executor.js:19`) ; verrou mono-transaction
   `txInFlight` (`bot/executor.js:14`, `26-30`, `180-182`).
 - npm scripts : `scan` → `node bot/index.js`, `start:run` → `node bot/run.js`
@@ -153,6 +169,18 @@ Contrat de types : `bot/domain.js` (aucun export runtime, `bot/domain.js:172`).
   `gasCostInBorrowedToken`, `BPS_DENOMINATOR`, `GAS_COST_MARGIN_BPS`, `GAS_LIMIT_MARGIN_BPS`
   (`bot/executor.js:4-10`, `185-192`) pour compatibilité des tests. À terme, les tests pourront
   importer directement depuis `pricing.js`.
+- **Divergence breaker / adaptive.** Un timeout ambigu avec receipt tardif `status=1` est classé
+  `SUCCESS` par `index.js` (l'issue adaptative reflète le résultat on-chain), alors que
+  `execute.js` a déjà compté un échec breaker (`bot/execute.js:323-335`). C'est voulu : l'adaptive
+  et le breaker mesurent des choses différentes (`bot/index.js:245-252`).
+- **`resilient.js` ne traverse pas `error.error` / `error.cause` / `error.info.error`.** Un
+  `NOT_PROFITABLE` uniquement présent dans ces champs imbriqués serait classé `UNKNOWN`.
+  `isNotProfitableError` dans `execute.js` traverse ces chaînes pour la logique de skip
+  (`bot/execute.js:114-127`). À noter si un test d'intégration révèle un mauvais classement
+  (`bot/resilient.js:64-70`).
+- **`throttle.js` ne borne pas la chaîne de promesses.** Si `fn` reste bloqué, les appels suivants
+  s'accumulent en mémoire sans limite ni timeout ni annulation. À noter pour une future limite
+  `maxQueueSize` ou timeout par appel (`bot/throttle.js:44-78`).
 
 ## Ce que le bot ne fait PAS
 
@@ -165,9 +193,9 @@ Contrat de types : `bot/domain.js` (aucun export runtime, `bot/domain.js:172`).
 - **Pas de live sans `DRY_RUN=false` + `PRIVATE_KEY` + `CONTRACT_ADDRESS`.** `dryRun` vaut `true`
   par défaut (`bot/config.js:197`), et `maybeExecute()` refuse d'envoyer sans les deux secrets
   (`bot/executor.js:51-64`). Le live exige aussi un prix ETH/USD (`bot/index.js:121-126`).
-- **Pas d'apprentissage de code.** `AdaptiveState`, `ErrorClass` et `ThrottleStats` ne sont que des
-  typedefs (`bot/domain.js:151-170`), sans usage runtime. Des seuils adaptatifs bornés restent à
-  implémenter.
+- **Pas d'apprentissage de code.** L'adaptive ajuste deux paramètres dans des bornes fixes
+  (`logs/adaptive.json`), sans jamais modifier la logique. `resilient` et `throttle` bornent
+  respectivement le retry et la pression RPC. Aucun de ces modules ne réécrit de code source.
 - **Pas de garantie de profit.** Les filtres de `decide()` (`bot/decide.js:93-253`), le `staticCall`
   (`bot/execute.js:231-238`) et les guards réduisent le risque mais ne garantissent rien. Rappel
   MEV point 7 : la configuration actuelle est jugée économiquement défavorable.

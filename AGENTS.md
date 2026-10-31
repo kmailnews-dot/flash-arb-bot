@@ -42,9 +42,9 @@ Ces règles s'appliquent à toutes les sessions sur ce projet. Lis-les avant tou
 ## 8. CONTEXTE DU PROJET (mis à jour manuellement)
 - **Stack** : Solidity ^0.8.20, Node.js 20, Hardhat, ethers v6, Aave V3, Uniswap V3 (SwapRouter original uniquement, jamais SwapRouter02), SushiSwap V2.
 - **Réseau** : Arbitrum One (42161), Arbitrum Sepolia (421614).
-- **Dernier commit** : e1a33f3.
-- **Prochaine étape** : Refactor promptable (étapes 1–4 faites : domain, pricing, decide, execute, ARCHITECTURE.md ; étape 5 = mise à jour AGENTS.md en cours).
-- **Tests** : 153 passing, 2 pending (tests fork).
+- **Dernier commit** : c143406.
+- **Prochaine étape** : Refactor promptable terminé (étapes 1–5 faites : domain, pricing, decide, execute, executor, ARCHITECTURE.md, AGENTS.md, adaptive, resilient, throttle). Prochaine passe : intégration de resilient et throttle dans execute.js / scanner.js.
+- **Tests** : 188 passing, 2 pending (tests fork).
 
 ## 9. ARCHITECTURE
 - Carte du bot : bot/ARCHITECTURE.md (flux, modules, invariants, pièges).
@@ -58,6 +58,9 @@ Ces règles s'appliquent à toutes les sessions sur ce projet. Lis-les avant tou
   - bot/guards.js — checks fail-closed + état gaz/breaker.
   - bot/index.js — un cycle (`main`).
   - bot/run.js — process persistant (`run`).
+  - bot/adaptive.js — seuils adaptatifs bornés (MIN_PROFIT_BPS, taille de trade).
+  - bot/resilient.js — classification d'erreur + retry borné + backoff.
+  - bot/throttle.js — sérialisation RPC + intervalle minimum.
 - Avant de modifier du code, lire bot/ARCHITECTURE.md en plus du fichier concerné.
 - `bot/executor.js` réexporte `buildFeeOverrides`, `gasCostInBorrowedToken`,
   `BPS_DENOMINATOR`, `GAS_COST_MARGIN_BPS`, `GAS_LIMIT_MARGIN_BPS`
