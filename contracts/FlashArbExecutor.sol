@@ -22,6 +22,8 @@ import {ISwapRouterV3Like} from "./interfaces/ISwapRouterV3Like.sol";
 contract FlashArbExecutor is FlashLoanSimpleReceiverBase, Ownable, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
+    mapping(address => bool) private poolApproved;
+
     enum DexKind {
         V2,
         V3
@@ -117,7 +119,10 @@ contract FlashArbExecutor is FlashLoanSimpleReceiverBase, Ownable, ReentrancyGua
         require(balanceAfter >= balanceBefore + premium + minProfit, "NOT_PROFITABLE");
 
         uint256 profit = balanceAfter - balanceBefore - premium;
-        IERC20(asset).forceApprove(address(POOL), amount + premium);
+        if (!poolApproved[asset]) {
+            poolApproved[asset] = true;
+            IERC20(asset).forceApprove(address(POOL), type(uint256).max);
+        }
 
         if (profit > 0) {
             IERC20(asset).safeTransfer(owner(), profit);
