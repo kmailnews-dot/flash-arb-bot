@@ -1254,4 +1254,92 @@ describe("bot/executor maybeExecute", function () {
     expect(first.submitted).to.equal(true);
     expect(calls).to.deep.equal(["estimateGas", "staticCall", "send"]);
   });
+
+  it("releases the gas reservation and skips the breaker on INSUFFICIENT_FUNDS", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig({ maxDailyGasEth: 0.01 });
+    const sendError = Object.assign(new Error("insufficient funds"), {
+      code: "INSUFFICIENT_FUNDS",
+    });
+    const { contract } = makeSpyContract({ sendError });
+    const provider = {
+      getFeeData: async () => ({ gasPrice: 1n, maxFeePerGas: null }),
+      getNetwork: () => ethers.provider.getNetwork(),
+      getBalance: (address) => ethers.provider.getBalance(address),
+    };
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : opportunity.finalOut;
+
+    const result = await maybeExecute({ opportunity, provider, config, contract, quoteLeg });
+
+    expect(result.submitted).to.equal(false);
+    expect(result.error).to.include("insufficient funds");
+    const state = JSON.parse(fs.readFileSync(config.gasSpentPath, "utf8"));
+    expect(state.gasSpentWei).to.equal("0");
+  });
+
+  it("treats UNSUPPORTED_OPERATION as ambiguous and keeps the reservation", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig({ maxDailyGasEth: 0.01 });
+    const sendError = Object.assign(new Error("unsupported operation"), {
+      code: "UNSUPPORTED_OPERATION",
+    });
+    const { contract } = makeSpyContract({ sendError });
+    const provider = {
+      getFeeData: async () => ({ gasPrice: 1n, maxFeePerGas: null }),
+      getNetwork: () => ethers.provider.getNetwork(),
+      getBalance: (address) => ethers.provider.getBalance(address),
+    };
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : opportunity.finalOut;
+
+    const result = await maybeExecute({ opportunity, provider, config, contract, quoteLeg });
+
+    expect(result.submitted).to.equal(true);
+    expect(result.error).to.include("unsupported operation");
+    const feeData = await provider.getFeeData();
+    const decisionGasPriceWei = feeData.maxFeePerGas ?? feeData.gasPrice;
+    const reserved = ((300000n * 11500n) / 10000n) * decisionGasPriceWei;
+    const state = JSON.parse(fs.readFileSync(config.gasSpentPath, "utf8"));
+    expect(state.gasSpentWei).to.equal(reserved.toString());
+  });
+
+  it("releases the reservation when breakerBeforeSend fails after reservation", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const breakerPath = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-prebreaker-")),
+      "circuit_breaker.json"
+    );
+    const config = makeConfig({
+      maxDailyGasEth: 0.01,
+      circuitBreakerPath: breakerPath,
+    });
+    const { contract } = makeSpyContract();
+    contract.startArbitrage.staticCall = async (...args) => {
+      fs.writeFileSync(
+        breakerPath,
+        `${JSON.stringify({
+          consecutiveFailures: 5,
+          openUntil: Date.now() + 60_000,
+          lastFailureAt: Date.now(),
+        })}\n`,
+        "utf8"
+      );
+      return true;
+    };
+    const provider = {
+      getFeeData: async () => ({ gasPrice: 1n, maxFeePerGas: null }),
+      getNetwork: () => ethers.provider.getNetwork(),
+      getBalance: (address) => ethers.provider.getBalance(address),
+    };
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : opportunity.finalOut;
+
+    const result = await maybeExecute({ opportunity, provider, config, contract, quoteLeg });
+
+    expect(result.submitted).to.equal(false);
+    expect(result.guard).to.equal("circuitBreaker");
+    const state = JSON.parse(fs.readFileSync(config.gasSpentPath, "utf8"));
+    expect(state.gasSpentWei).to.equal("0");
+  });
 });

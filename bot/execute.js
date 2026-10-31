@@ -21,6 +21,22 @@ const {
 } = require("./resilient");
 const { createThrottle, withThrottle } = require("./throttle");
 
+// Codes ethers v6 correspondant à un rejet du nœud AVANT acceptation.
+// Vérifiés dans node_modules/ethers@6.17.0 :
+//   INSUFFICIENT_FUNDS      provider-jsonrpc.js:720-723
+//   NONCE_EXPIRED           provider-jsonrpc.js:725-726
+//   REPLACEMENT_UNDERPRICED provider-jsonrpc.js:729-730
+//   INVALID_ARGUMENT        errors.js:168 (validation locale)
+// Volontairement exclus :
+//   ACTION_REJECTED         inatteignable (pas de wallet navigateur)
+//   UNSUPPORTED_OPERATION   course provider détruit après _send (provider-jsonrpc.js:281-288)
+const REJECTED_BEFORE_ACCEPTANCE = new Set([
+  "INSUFFICIENT_FUNDS",
+  "NONCE_EXPIRED",
+  "REPLACEMENT_UNDERPRICED",
+  "INVALID_ARGUMENT",
+]);
+
 const WAIT_RECEIPT_TIMEOUT_MS = 120_000;
 const DEX_KIND = { V2: 0, V3: 1 };
 
@@ -291,6 +307,8 @@ async function execute({
     checkCircuitBreaker({ filePath: settings.circuitBreakerPath })
   );
   if (!breakerBeforeSend.ok) {
+    // Réservation posée juste au-dessus : aucune tx n'a été envoyée, on la libère.
+    await addGasSpentSafely(settings, -decision.gasCostWei);
     console.log(`  [CIRCUIT BREAKER] ${breakerBeforeSend.error} - transaction not sent.`);
     return { submitted: false, guard: "circuitBreaker", error: breakerBeforeSend.error };
   }
@@ -313,6 +331,13 @@ async function execute({
       await addGasSpentSafely(settings, actualGasCostWei - decision.gasCostWei);
       await recordFailureSafely(settings);
       console.error(`  [FAILED] ${message}`);
+      return { submitted: false, error: message, estimatedGas };
+    }
+
+    if (REJECTED_BEFORE_ACCEPTANCE.has(err?.code)) {
+      // Rejet certain avant broadcast : libérer la réservation, ne pas toucher au breaker.
+      await addGasSpentSafely(settings, -decision.gasCostWei);
+      console.log(`  [SKIP FREE] broadcast rejected (${err.code}): ${message} - transaction not sent.`);
       return { submitted: false, error: message, estimatedGas };
     }
 
