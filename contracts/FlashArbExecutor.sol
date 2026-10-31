@@ -6,6 +6,7 @@ import {IPoolAddressesProvider} from "@aave/core-v3/contracts/interfaces/IPoolAd
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {IUniswapV2Router02Like} from "./interfaces/IUniswapV2Router02Like.sol";
@@ -18,7 +19,7 @@ import {ISwapRouterV3Like} from "./interfaces/ISwapRouterV3Like.sol";
 ///         clear `minProfit`, the `NOT_PROFITABLE` require reverts everything (including the
 ///         swaps and the loan itself), so an unprofitable attempt never touches borrowed capital
 ///         — the caller only loses the gas spent submitting it.
-contract FlashArbExecutor is FlashLoanSimpleReceiverBase, Ownable, ReentrancyGuard {
+contract FlashArbExecutor is FlashLoanSimpleReceiverBase, Ownable, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
     enum DexKind {
@@ -60,6 +61,7 @@ contract FlashArbExecutor is FlashLoanSimpleReceiverBase, Ownable, ReentrancyGua
         external
         onlyOwner
         nonReentrant
+        whenNotPaused
     {
         require(block.timestamp <= params.deadline, "EXPIRED");
         bytes memory data = abi.encode(params);
@@ -87,6 +89,14 @@ contract FlashArbExecutor is FlashLoanSimpleReceiverBase, Ownable, ReentrancyGua
 
         _settle(asset, amount, premium, arb.minProfit, balanceBefore, initiator);
         return true;
+    }
+
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
     }
 
     function _swapAndMeasure(Leg memory leg, address tokenIn, uint256 amountIn) internal returns (uint256) {

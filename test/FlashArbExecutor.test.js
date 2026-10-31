@@ -240,6 +240,65 @@ describe("FlashArbExecutor", function () {
     ).to.be.revertedWithCustomError(executor, "OwnableUnauthorizedAccount");
   });
 
+  it("pauses startArbitrage but still allows sweepToken", async function () {
+    const { owner, borrowToken, midToken, executor, routerA, routerB } = await deployFixture();
+
+    const borrowAddr = await borrowToken.getAddress();
+    const midAddr = await midToken.getAddress();
+    const deadline = (await ethers.provider.getBlock("latest")).timestamp + 3600;
+
+    const params = buildParams({
+      routerA: await routerA.getAddress(),
+      routerB: await routerB.getAddress(),
+      midToken: midAddr,
+      minProfit: 0n,
+      deadline,
+    });
+    params.leg2.tokenOut = borrowAddr;
+
+    await executor.pause();
+    expect(await executor.paused()).to.equal(true);
+
+    await expect(
+      executor.startArbitrage(borrowAddr, ethers.parseEther("1"), params)
+    ).to.be.revertedWithCustomError(executor, "EnforcedPause");
+
+    await borrowToken.mint(await executor.getAddress(), ethers.parseEther("5"));
+    await executor.sweepToken(borrowAddr, owner.address);
+
+    expect(await borrowToken.balanceOf(await executor.getAddress())).to.equal(0);
+  });
+
+  it("unpause restores startArbitrage", async function () {
+    const { borrowToken, midToken, executor, routerA, routerB } = await deployFixture();
+
+    const borrowAddr = await borrowToken.getAddress();
+    const midAddr = await midToken.getAddress();
+
+    await routerA.setRate(borrowAddr, midAddr, RATE_1_TO_1);
+    await routerB.setRate(midAddr, borrowAddr, ethers.parseEther("1.02"));
+
+    const amount = ethers.parseEther("1000");
+    const deadline = (await ethers.provider.getBlock("latest")).timestamp + 3600;
+    const params = buildParams({
+      routerA: await routerA.getAddress(),
+      routerB: await routerB.getAddress(),
+      midToken: midAddr,
+      minProfit: 0n,
+      deadline,
+    });
+    params.leg2.tokenOut = borrowAddr;
+
+    await executor.pause();
+    await executor.unpause();
+    expect(await executor.paused()).to.equal(false);
+
+    await expect(executor.startArbitrage(borrowAddr, amount, params)).to.emit(
+      executor,
+      "ArbitrageExecuted"
+    );
+  });
+
   it("lets the owner sweep stray ERC20 balances", async function () {
     const { owner, borrowToken, executor } = await deployFixture();
 
