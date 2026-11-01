@@ -1667,6 +1667,81 @@ describe("bot/executor maybeExecute", function () {
     expect(state.gasSpentWei).to.equal("0");
   });
 
+  it("does not count a TRANSIENT send error against the breaker", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+      opportunity,
+      config,
+    });
+    const sendError = Object.assign(new Error("timed out"), { code: "ETIMEDOUT" });
+    const { contract } = makeSpyContract({ sendError });
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : opportunity.finalOut;
+    const result = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+    expect(result.submitted).to.equal(true);
+    expect(result.journalStatus).to.equal("UNKNOWN");
+    expect(result.error).to.include("timed out");
+    const breaker = fs.existsSync(config.circuitBreakerPath)
+      ? JSON.parse(fs.readFileSync(config.circuitBreakerPath, "utf8"))
+      : { consecutiveFailures: 0 };
+    expect(breaker.consecutiveFailures ?? 0).to.equal(0);
+  });
+
+  it("counts a PERMANENT send error against the breaker", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+      opportunity,
+      config,
+    });
+    const sendError = Object.assign(new Error("not profitable"), { code: "NOT_PROFITABLE" });
+    const { contract } = makeSpyContract({ sendError });
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : opportunity.finalOut;
+    const result = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+    expect(result.submitted).to.equal(true);
+    expect(result.journalStatus).to.equal("UNKNOWN");
+    expect(result.error).to.include("not profitable");
+    const breaker = JSON.parse(fs.readFileSync(config.circuitBreakerPath, "utf8"));
+    expect(breaker.consecutiveFailures).to.equal(1);
+  });
+
+  it("counts an UNKNOWN send error against the breaker", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+      opportunity,
+      config,
+    });
+    const { contract } = makeSpyContract({ sendError: new Error("broadcast failed") });
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : opportunity.finalOut;
+    const result = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+    expect(result.submitted).to.equal(true);
+    expect(result.journalStatus).to.equal("UNKNOWN");
+    const breaker = JSON.parse(fs.readFileSync(config.circuitBreakerPath, "utf8"));
+    expect(breaker.consecutiveFailures).to.equal(1);
+  });
+
   describe("bot/executor execution journal", function () {
     function readJournal(filePath) {
       return JSON.parse(fs.readFileSync(filePath, "utf8"));

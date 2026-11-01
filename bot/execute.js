@@ -456,7 +456,14 @@ async function execute({
       return { submitted: false, error: message, estimatedGas, journalId, journalStatus: "REJECTED" };
     }
 
-    await recordFailureSafely(settings);
+    const errorClass = classifyError(err);
+    if (errorClass !== "TRANSIENT") {
+      await recordFailureSafely(settings);
+    } else {
+      console.log(
+        `  [TRANSIENT] broadcast outcome ambiguous (${errorClass}) - breaker not incremented.`
+      );
+    }
     await upsertExecutionRecord(
       {
         ...journalBase,
