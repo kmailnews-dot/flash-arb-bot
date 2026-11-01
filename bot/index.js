@@ -1,6 +1,7 @@
 const { ethers } = require("ethers");
 const { getEthUsdPrice, scanPair } = require("./scanner");
 const { maybeExecute } = require("./executor");
+const { reconcilePendingExecutions } = require("./execute");
 const { DEFAULT_SCAN_LOG_PATH, appendScanResult, logEvent, logFormat } = require("./persist");
 const { NETWORKS } = require("./networks");
 const { checkWalletBalanceLow } = require("./guards");
@@ -138,6 +139,10 @@ async function main({
   }
   const provider = injectedProvider || new ethers.JsonRpcProvider(config.rpcUrl);
   const scanLogPath = config.scanLogPath || DEFAULT_SCAN_LOG_PATH;
+
+  await reconcilePendingExecutions({ provider, config }).catch((err) => {
+    console.warn(`[RECONCILE] startup reconciliation failed: ${err.message}`);
+  });
 
   console.log(`flash-arb-bot scan starting - DRY_RUN=${config.dryRun} - ${new Date().toISOString()}`);
   if (config.dryRun) {

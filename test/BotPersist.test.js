@@ -2,7 +2,17 @@ const { expect } = require("chai");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { appendScanResult, logEvent } = require("../bot/persist");
+const {
+  appendScanResult,
+  logEvent,
+  DEFAULT_EXECUTION_JOURNAL_PATH,
+  EXECUTION_JOURNAL_VERSION,
+  readExecutionJournal,
+  writeExecutionJournal,
+  upsertExecutionRecord,
+  deleteExecutionRecord,
+  listPendingExecutions,
+} = require("../bot/persist");
 
 describe("bot/persist appendScanResult", function () {
   it("appends one JSONL line per result with all required fields", async function () {
@@ -273,5 +283,150 @@ describe("bot/persist appendScanResult", function () {
       code: "CALL_EXCEPTION",
       shortMessage: "execution reverted",
     });
+  });
+});
+
+describe("bot/persist execution journal", function () {
+  function makeJournalDir(prefix = "flash-arb-journal-") {
+    return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  }
+
+  it("returns an empty journal when the file does not exist", async function () {
+    const dir = makeJournalDir();
+    const filePath = path.join(dir, "missing.json");
+
+    const journal = await readExecutionJournal(filePath);
+
+    expect(journal).to.deep.equal({ version: EXECUTION_JOURNAL_VERSION, records: {} });
+    expect(DEFAULT_EXECUTION_JOURNAL_PATH).to.equal(
+      path.resolve(__dirname, "..", "logs", "executions.json")
+    );
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("creates parent directories and the journal file on write", async function () {
+    const dir = makeJournalDir();
+    const filePath = path.join(dir, "nested", "executions.json");
+
+    await writeExecutionJournal({ version: EXECUTION_JOURNAL_VERSION, records: {} }, filePath);
+
+    expect(fs.existsSync(filePath)).to.equal(true);
+    expect(await readExecutionJournal(filePath)).to.deep.equal({
+      version: EXECUTION_JOURNAL_VERSION,
+      records: {},
+    });
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("rejects a corrupt JSON journal", async function () {
+    const dir = makeJournalDir();
+    const filePath = path.join(dir, "executions.json");
+    fs.writeFileSync(filePath, "{not json", "utf8");
+
+    await expect(readExecutionJournal(filePath)).to.be.rejectedWith("STATE_FILE_CORRUPT");
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("rejects a journal with an unsupported version", async function () {
+    const dir = makeJournalDir();
+    const filePath = path.join(dir, "executions.json");
+    fs.writeFileSync(filePath, `${JSON.stringify({ version: 999, records: {} })}\n`, "utf8");
+
+    await expect(readExecutionJournal(filePath)).to.be.rejectedWith("STATE_FILE_CORRUPT");
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("upserts a record and reads it back", async function () {
+    const dir = makeJournalDir();
+    const filePath = path.join(dir, "executions.json");
+    const record = {
+      id: "record-1",
+      opportunityId: "opp-1",
+      pairLabel: "BOR/MID",
+      amountIn: "1000",
+      status: "SIGNED",
+      txHash: null,
+      nonce: null,
+      reservedGasWei: "42",
+      submittedAt: 1000,
+      confirmedAt: null,
+      receiptStatus: null,
+      gasPaidWei: null,
+      error: null,
+    };
+
+    const stored = await upsertExecutionRecord(record, filePath);
+    const journal = await readExecutionJournal(filePath);
+
+    expect(stored.lastUpdateAt).to.be.a("number");
+    expect(journal.records["record-1"]).to.include(record);
+    expect(journal.records["record-1"].lastUpdateAt).to.equal(stored.lastUpdateAt);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("keeps one entry per id when the same record is upserted twice", async function () {
+    const dir = makeJournalDir();
+    const filePath = path.join(dir, "executions.json");
+
+    await upsertExecutionRecord({ id: "record-1", status: "SIGNED", amountIn: "1000" }, filePath);
+    await upsertExecutionRecord(
+      { id: "record-1", status: "SUBMITTED", amountIn: "1000", txHash: "0xabc" },
+      filePath
+    );
+
+    const journal = await readExecutionJournal(filePath);
+
+    expect(Object.keys(journal.records)).to.deep.equal(["record-1"]);
+    expect(journal.records["record-1"]).to.include({
+      id: "record-1",
+      status: "SUBMITTED",
+      txHash: "0xabc",
+    });
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("deletes a record idempotently", async function () {
+    const dir = makeJournalDir();
+    const filePath = path.join(dir, "executions.json");
+    await upsertExecutionRecord({ id: "record-1", status: "SIGNED", amountIn: "1000" }, filePath);
+
+    await deleteExecutionRecord("record-1", filePath);
+    await deleteExecutionRecord("record-1", filePath);
+
+    const journal = await readExecutionJournal(filePath);
+    expect(journal.records).to.deep.equal({});
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("lists only pending executions sorted by submittedAt", async function () {
+    const dir = makeJournalDir();
+    const filePath = path.join(dir, "executions.json");
+    await writeExecutionJournal(
+      {
+        version: EXECUTION_JOURNAL_VERSION,
+        records: {
+          a: { id: "a", status: "SUBMITTED", submittedAt: 300 },
+          b: { id: "b", status: "CONFIRMED", submittedAt: 100 },
+          c: { id: "c", status: "SIGNED", submittedAt: 100 },
+          d: { id: "d", status: "UNKNOWN", submittedAt: 200 },
+          e: { id: "e", status: "STALE", submittedAt: 50 },
+          f: { id: "f", status: "REVERTED", submittedAt: 10 },
+        },
+      },
+      filePath
+    );
+
+    const pending = await listPendingExecutions(filePath);
+
+    expect(pending.map((record) => record.id)).to.deep.equal(["e", "c", "d", "a"]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });

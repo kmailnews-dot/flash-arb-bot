@@ -101,6 +101,25 @@
  */
 
 /**
+ * Enregistrement durable d'une tentative d'exécution.
+ * @typedef {Object} ExecutionRecord
+ * @property {string} id
+ * @property {string|null} opportunityId
+ * @property {string|null} pairLabel
+ * @property {string} amountIn
+ * @property {"SIGNED"|"SUBMITTED"|"CONFIRMED"|"REVERTED"|"UNKNOWN"|"DROPPED"|"STALE"|"REJECTED"} status
+ * @property {string|null} txHash
+ * @property {number|null} nonce
+ * @property {string} reservedGasWei
+ * @property {number} submittedAt
+ * @property {number} lastUpdateAt
+ * @property {number|null} confirmedAt
+ * @property {number|null} receiptStatus
+ * @property {string|null} gasPaidWei
+ * @property {string|null} error
+ */
+
+/**
  * Résultat d'une tentative d'exécution.
  * @typedef {Object} ExecutionResult
  * @property {boolean} submitted
@@ -111,6 +130,8 @@
  * @property {bigint} [gasLimitWithMargin]
  * @property {string} [txHash]
  * @property {Object} [receipt]
+ * @property {string} [journalId]
+ * @property {string} [journalStatus]
  */
 
 /**

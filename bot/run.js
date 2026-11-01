@@ -1,5 +1,6 @@
 const { ethers } = require("ethers");
 const { main } = require("./index");
+const { reconcilePendingExecutions } = require("./execute");
 
 const DEFAULT_POLL_INTERVAL_MS = 15000;
 
@@ -143,7 +144,12 @@ function run({
     process.on("SIGINT", onSigint);
   }
 
-  startCycle();
+  (async () => {
+    await reconcilePendingExecutions({ provider, config }).catch((err) => {
+      console.warn(`[RUN] startup reconciliation failed: ${err.message}`);
+    });
+    startCycle();
+  })();
 
   return {
     done,

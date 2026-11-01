@@ -5,6 +5,8 @@ const os = require("os");
 const path = require("path");
 const { main } = require("../bot/index");
 const { NETWORKS } = require("../bot/networks");
+const { reconcilePendingExecutions } = require("../bot/execute");
+const { readExecutionJournal, writeExecutionJournal } = require("../bot/persist");
 
 describe("bot/index main", function () {
   it("keeps scanning when the ETH/USD route points at an address with no code", async function () {
@@ -366,5 +368,86 @@ describe("bot/index main", function () {
     expect(summary.scanned).to.equal(1);
     expect(summary.exitCode).to.equal(0);
     fs.rmSync(scanDir, { recursive: true, force: true });
+  });
+});
+
+describe("bot/index reconcilePendingExecutions", function () {
+  it("marks a SIGNED record without a tx hash as DROPPED", async function () {
+    const journalDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-reconcile-signed-"));
+    const executionJournalPath = path.join(journalDir, "executions.json");
+    await writeExecutionJournal(
+      {
+        version: 1,
+        records: {
+          "record-1": {
+            id: "record-1",
+            status: "SIGNED",
+            txHash: null,
+            submittedAt: Date.now(),
+          },
+        },
+      },
+      executionJournalPath
+    );
+    const provider = {
+      getTransactionReceipt: async () => {
+        throw new Error("getTransactionReceipt must not be called without a tx hash");
+      },
+    };
+
+    const outcome = await reconcilePendingExecutions({
+      provider,
+      config: { executionJournalPath },
+    });
+
+    expect(outcome).to.deep.equal({ reconciled: 1, skipped: 0 });
+    const journal = await readExecutionJournal(executionJournalPath);
+    expect(journal.records["record-1"]).to.include({
+      status: "DROPPED",
+      error: "recovered: crashed before submit",
+    });
+
+    fs.rmSync(journalDir, { recursive: true, force: true });
+  });
+
+  it("marks a SUBMITTED record with a successful receipt as CONFIRMED", async function () {
+    const journalDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-reconcile-submitted-"));
+    const executionJournalPath = path.join(journalDir, "executions.json");
+    const txHash = `0x${"44".repeat(32)}`;
+    await writeExecutionJournal(
+      {
+        version: 1,
+        records: {
+          "record-2": {
+            id: "record-2",
+            status: "SUBMITTED",
+            txHash,
+            submittedAt: Date.now(),
+          },
+        },
+      },
+      executionJournalPath
+    );
+    const provider = {
+      getTransactionReceipt: async (hash) => {
+        expect(hash).to.equal(txHash);
+        return { status: 1, gasUsed: 100000n, gasPrice: 2n };
+      },
+    };
+
+    const outcome = await reconcilePendingExecutions({
+      provider,
+      config: { executionJournalPath },
+    });
+
+    expect(outcome).to.deep.equal({ reconciled: 1, skipped: 0 });
+    const journal = await readExecutionJournal(executionJournalPath);
+    expect(journal.records["record-2"]).to.include({
+      status: "CONFIRMED",
+      receiptStatus: 1,
+      gasPaidWei: "200000",
+    });
+
+    fs.rmSync(journalDir, { recursive: true, force: true });
   });
 });

@@ -81,6 +81,7 @@ describe("bot/executor maybeExecute", function () {
         circuitBreakerCooldownMinutes: 60,
         gasSpentPath: path.join(guardDir, "gas_spent.json"),
         circuitBreakerPath: path.join(guardDir, "circuit_breaker.json"),
+        executionJournalPath: path.join(guardDir, "executions.json"),
         ...overrides,
       };
     }
@@ -1509,5 +1510,150 @@ describe("bot/executor maybeExecute", function () {
     expect(result.guard).to.equal("circuitBreaker");
     const state = JSON.parse(fs.readFileSync(config.gasSpentPath, "utf8"));
     expect(state.gasSpentWei).to.equal("0");
+  });
+
+  describe("bot/executor execution journal", function () {
+    function readJournal(filePath) {
+      return JSON.parse(fs.readFileSync(filePath, "utf8"));
+    }
+
+    it("writes SIGNED before the transaction is sent", async function () {
+      const { opportunity, makeConfig } = await deployFixture();
+      const config = makeConfig();
+      const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+        opportunity,
+        config,
+      });
+      const txHash = `0x${"77".repeat(32)}`;
+      let statusDuringSend;
+      const contract = {
+        startArbitrage: async () => {
+          statusDuringSend = Object.values(
+            readJournal(config.executionJournalPath).records
+          )[0]?.status;
+          return {
+            hash: txHash,
+            wait: async () => ({ status: 1, gasUsed: 100000n, gasPrice: 1n, blockNumber: 1 }),
+          };
+        },
+      };
+      contract.startArbitrage.estimateGas = async () => 300000n;
+      contract.startArbitrage.staticCall = async () => true;
+
+      const result = await maybeExecute({
+        opportunity: freshOpportunity,
+        provider: ethers.provider,
+        config,
+        contract,
+      });
+
+      expect(statusDuringSend).to.equal("SIGNED");
+      expect(result.journalId).to.be.a("string");
+      expect(result.journalStatus).to.equal("CONFIRMED");
+      expect(readJournal(config.executionJournalPath).records[result.journalId]).to.include({
+        status: "CONFIRMED",
+        txHash,
+      });
+    });
+
+    it("records SUBMITTED with the tx hash before waiting for the receipt", async function () {
+      const { opportunity, makeConfig } = await deployFixture();
+      const config = makeConfig();
+      const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+        opportunity,
+        config,
+      });
+      const txHash = `0x${"78".repeat(32)}`;
+      let statusDuringWait;
+      let hashDuringWait;
+      const contract = {
+        startArbitrage: async () => ({
+          hash: txHash,
+          nonce: 7,
+          wait: async () => {
+            const record = Object.values(
+              readJournal(config.executionJournalPath).records
+            )[0];
+            statusDuringWait = record?.status;
+            hashDuringWait = record?.txHash;
+            return { status: 1, gasUsed: 100000n, gasPrice: 1n, blockNumber: 1 };
+          },
+        }),
+      };
+      contract.startArbitrage.estimateGas = async () => 300000n;
+      contract.startArbitrage.staticCall = async () => true;
+
+      const result = await maybeExecute({
+        opportunity: freshOpportunity,
+        provider: ethers.provider,
+        config,
+        contract,
+      });
+
+      expect(statusDuringWait).to.equal("SUBMITTED");
+      expect(hashDuringWait).to.equal(txHash);
+      expect(result.journalStatus).to.equal("CONFIRMED");
+      expect(readJournal(config.executionJournalPath).records[result.journalId]).to.include({
+        status: "CONFIRMED",
+        txHash,
+        nonce: 7,
+      });
+    });
+
+    it("deletes the journal record on a certain pre-broadcast rejection", async function () {
+      const { opportunity, makeConfig } = await deployFixture();
+      const config = makeConfig();
+      const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+        opportunity,
+        config,
+      });
+      const sendError = Object.assign(new Error("nonce too low"), { code: "NONCE_EXPIRED" });
+      const { contract } = makeSpyContract({ sendError });
+
+      const result = await maybeExecute({
+        opportunity: freshOpportunity,
+        provider: ethers.provider,
+        config,
+        contract,
+      });
+
+      expect(result.submitted).to.equal(false);
+      expect(result.journalStatus).to.equal("REJECTED");
+      expect(readJournal(config.executionJournalPath).records).to.deep.equal({});
+    });
+
+    it("marks the record UNKNOWN when the receipt times out", async function () {
+      const { opportunity, makeConfig } = await deployFixture();
+      const config = makeConfig();
+      const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+        opportunity,
+        config,
+      });
+      const txHash = `0x${"79".repeat(32)}`;
+      const contract = {
+        startArbitrage: async () => ({
+          hash: txHash,
+          wait: async () => {
+            throw Object.assign(new Error("timed out"), { code: "TIMEOUT" });
+          },
+        }),
+      };
+      contract.startArbitrage.estimateGas = async () => 300000n;
+      contract.startArbitrage.staticCall = async () => true;
+
+      const result = await maybeExecute({
+        opportunity: freshOpportunity,
+        provider: ethers.provider,
+        config,
+        contract,
+      });
+
+      expect(result.submitted).to.equal(true);
+      expect(result.journalStatus).to.equal("UNKNOWN");
+      expect(readJournal(config.executionJournalPath).records[result.journalId]).to.include({
+        status: "UNKNOWN",
+        txHash,
+      });
+    });
   });
 });

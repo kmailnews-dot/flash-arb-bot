@@ -82,10 +82,83 @@ async function appendScanResult(logPath = DEFAULT_SCAN_LOG_PATH, result, { chain
   return entry;
 }
 
+const crypto = require("crypto");
+const DEFAULT_EXECUTION_JOURNAL_PATH = path.join(LOG_DIR, "executions.json");
+const EXECUTION_JOURNAL_VERSION = 1;
+
+async function readExecutionJournal(filePath = DEFAULT_EXECUTION_JOURNAL_PATH) {
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error(`STATE_FILE_CORRUPT: ${filePath}`);
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`STATE_FILE_CORRUPT: ${filePath}`);
+    }
+    if (parsed.version !== EXECUTION_JOURNAL_VERSION) {
+      throw new Error(`STATE_FILE_CORRUPT: ${filePath}`);
+    }
+    if (!parsed.records || typeof parsed.records !== "object" || Array.isArray(parsed.records)) {
+      throw new Error(`STATE_FILE_CORRUPT: ${filePath}`);
+    }
+    return parsed;
+  } catch (err) {
+    if (err.code === "ENOENT") return { version: EXECUTION_JOURNAL_VERSION, records: {} };
+    throw err;
+  }
+}
+
+async function writeExecutionJournal(journal, filePath = DEFAULT_EXECUTION_JOURNAL_PATH) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const tmpPath = `${filePath}.${process.pid}.tmp`;
+  const fh = await fs.open(tmpPath, "w");
+  try {
+    await fh.writeFile(`${JSON.stringify(journal, jsonReplacer, 2)}\n`, "utf8");
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+  await fs.rename(tmpPath, filePath);
+}
+
+async function upsertExecutionRecord(record, filePath = DEFAULT_EXECUTION_JOURNAL_PATH) {
+  if (!record || typeof record.id !== "string" || record.id.length === 0) {
+    throw new Error("upsertExecutionRecord: record.id is required");
+  }
+  const journal = await readExecutionJournal(filePath);
+  journal.records[record.id] = { ...record, lastUpdateAt: Date.now() };
+  await writeExecutionJournal(journal, filePath);
+  return journal.records[record.id];
+}
+
+async function deleteExecutionRecord(id, filePath = DEFAULT_EXECUTION_JOURNAL_PATH) {
+  const journal = await readExecutionJournal(filePath);
+  delete journal.records[id];
+  await writeExecutionJournal(journal, filePath);
+}
+
+async function listPendingExecutions(filePath = DEFAULT_EXECUTION_JOURNAL_PATH) {
+  const journal = await readExecutionJournal(filePath);
+  const PENDING = new Set(["SIGNED", "SUBMITTED", "UNKNOWN", "STALE"]);
+  return Object.values(journal.records)
+    .filter((r) => PENDING.has(r.status))
+    .sort((a, b) => (a.submittedAt ?? 0) - (b.submittedAt ?? 0));
+}
+
 module.exports = {
   DEFAULT_SCAN_LOG_PATH,
+  DEFAULT_EXECUTION_JOURNAL_PATH,
+  EXECUTION_JOURNAL_VERSION,
   appendScanResult,
   logFormat,
   formatLogLine,
   logEvent,
+  readExecutionJournal,
+  writeExecutionJournal,
+  upsertExecutionRecord,
+  deleteExecutionRecord,
+  listPendingExecutions,
 };

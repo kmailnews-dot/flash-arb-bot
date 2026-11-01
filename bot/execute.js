@@ -21,6 +21,13 @@ const {
 } = require("./resilient");
 const { createThrottle, withThrottle } = require("./throttle");
 const { withTimeout } = require("./timeout");
+const { randomUUID } = require("crypto");
+const {
+  DEFAULT_EXECUTION_JOURNAL_PATH,
+  upsertExecutionRecord,
+  deleteExecutionRecord,
+  listPendingExecutions,
+} = require("./persist");
 
 // Codes ethers v6 correspondant à un rejet du nœud AVANT acceptation.
 // Vérifiés dans node_modules/ethers@6.17.0 :
@@ -188,6 +195,24 @@ async function execute({
   const { pair, amountIn } = opportunity;
   const settings = guardSettings(config);
   const wallet = new ethers.Wallet(config.privateKey, provider);
+  const journalId = randomUUID();
+  const journalPath = config.executionJournalPath || DEFAULT_EXECUTION_JOURNAL_PATH;
+  const journalBase = {
+    id: journalId,
+    opportunityId: opportunity.opportunityId ?? null,
+    pairLabel: pair.label ?? null,
+    amountIn: amountIn.toString(),
+    status: "SIGNED",
+    txHash: null,
+    nonce: null,
+    reservedGasWei: decision.gasCostWei.toString(),
+    submittedAt: Date.now(),
+    lastUpdateAt: Date.now(),
+    confirmedAt: null,
+    receiptStatus: null,
+    gasPaidWei: null,
+    error: null,
+  };
 
   let fresh = reQuoted;
   if (!fresh) {
@@ -324,6 +349,10 @@ async function execute({
   const estimatedGas = decision.estimatedGas;
   const gasLimitWithMargin = decision.gasLimitWithMargin;
 
+  await upsertExecutionRecord(journalBase, journalPath).catch((err) =>
+    console.warn(`  [JOURNAL WARNING] SIGNED: ${err.message}`)
+  );
+
   let tx;
   try {
     tx = await contract.startArbitrage(pair.borrowedToken.address, amountIn, finalParams, {
@@ -336,25 +365,63 @@ async function execute({
       const actualGasCostWei = err.receipt.gasUsed * (err.receipt.gasPrice ?? gasPriceWei);
       await addGasSpentSafely(settings, actualGasCostWei - decision.gasCostWei);
       await recordFailureSafely(settings);
+      const journalStatus = err.receipt.status === 1 ? "CONFIRMED" : "REVERTED";
+      await upsertExecutionRecord(
+        {
+          ...journalBase,
+          status: journalStatus,
+          confirmedAt: Date.now(),
+          receiptStatus: err.receipt.status ?? null,
+          gasPaidWei: actualGasCostWei.toString(),
+          error: message,
+          lastUpdateAt: Date.now(),
+        },
+        journalPath
+      ).catch((journalErr) =>
+        console.warn(`  [JOURNAL WARNING] ${journalStatus}: ${journalErr.message}`)
+      );
       console.error(`  [FAILED] ${message}`);
-      return { submitted: false, error: message, estimatedGas };
+      return { submitted: false, error: message, estimatedGas, journalId, journalStatus };
     }
 
     if (REJECTED_BEFORE_ACCEPTANCE.has(err?.code)) {
       // Rejet certain avant broadcast : libérer la réservation, ne pas toucher au breaker.
       await addGasSpentSafely(settings, -decision.gasCostWei);
+      await deleteExecutionRecord(journalId, journalPath).catch((journalErr) =>
+        console.warn(`  [JOURNAL WARNING] REJECTED: ${journalErr.message}`)
+      );
       console.log(`  [SKIP FREE] broadcast rejected (${err.code}): ${message} - transaction not sent.`);
-      return { submitted: false, error: message, estimatedGas };
+      return { submitted: false, error: message, estimatedGas, journalId, journalStatus: "REJECTED" };
     }
 
     await recordFailureSafely(settings);
+    await upsertExecutionRecord(
+      {
+        ...journalBase,
+        status: "UNKNOWN",
+        error: message,
+        lastUpdateAt: Date.now(),
+      },
+      journalPath
+    ).catch((journalErr) => console.warn(`  [JOURNAL WARNING] UNKNOWN: ${journalErr.message}`));
     console.error(`  [FAILED] broadcast outcome unknown (tx may be mined): ${message}`);
-    return { submitted: true, error: message, estimatedGas };
+    return { submitted: true, error: message, estimatedGas, journalId, journalStatus: "UNKNOWN" };
   }
 
   console.log(
     `  [SUBMITTED] tx ${tx.hash} (gas limit ${gasLimitWithMargin}, estimated ${estimatedGas})`
   );
+  await upsertExecutionRecord(
+    {
+      ...journalBase,
+      status: "SUBMITTED",
+      txHash: tx.hash,
+      nonce: typeof tx.nonce === "number" ? tx.nonce : null,
+      lastUpdateAt: Date.now(),
+    },
+    journalPath
+  ).catch((err) => console.warn(`  [JOURNAL WARNING] SUBMITTED: ${err.message}`));
+
   try {
     const receipt = await waitForReceipt(tx);
     const actualGasCostWei = receipt.gasUsed * (receipt.gasPrice ?? gasPriceWei);
@@ -363,21 +430,90 @@ async function execute({
     if (receipt.status !== 1) {
       const message = `Transaction ${tx.hash} reverted on-chain (status ${receipt.status})`;
       await recordFailureSafely(settings);
+      await upsertExecutionRecord(
+        {
+          ...journalBase,
+          status: "REVERTED",
+          txHash: tx.hash,
+          nonce: typeof tx.nonce === "number" ? tx.nonce : null,
+          confirmedAt: Date.now(),
+          receiptStatus: receipt.status ?? null,
+          gasPaidWei: actualGasCostWei.toString(),
+          error: message,
+          lastUpdateAt: Date.now(),
+        },
+        journalPath
+      ).catch((journalErr) =>
+        console.warn(`  [JOURNAL WARNING] REVERTED: ${journalErr.message}`)
+      );
       console.error(`  [FAILED] ${message}`);
-      return { submitted: true, error: message, estimatedGas, receipt };
+      return {
+        submitted: true,
+        error: message,
+        estimatedGas,
+        receipt,
+        journalId,
+        journalStatus: "REVERTED",
+      };
     }
 
     await recordSuccessSafely(settings);
+    await upsertExecutionRecord(
+      {
+        ...journalBase,
+        status: "CONFIRMED",
+        txHash: tx.hash,
+        nonce: typeof tx.nonce === "number" ? tx.nonce : null,
+        confirmedAt: Date.now(),
+        receiptStatus: receipt.status,
+        gasPaidWei: actualGasCostWei.toString(),
+        lastUpdateAt: Date.now(),
+      },
+      journalPath
+    ).catch((journalErr) =>
+      console.warn(`  [JOURNAL WARNING] CONFIRMED: ${journalErr.message}`)
+    );
     console.log(`  [CONFIRMED] block ${receipt.blockNumber}, status success`);
-    return { submitted: true, txHash: tx.hash, receipt, estimatedGas };
+    return {
+      submitted: true,
+      txHash: tx.hash,
+      receipt,
+      estimatedGas,
+      journalId,
+      journalStatus: "CONFIRMED",
+    };
   } catch (err) {
     const message = err.shortMessage || err.message;
     if (err.receipt) {
       const actualGasCostWei = err.receipt.gasUsed * (err.receipt.gasPrice ?? gasPriceWei);
       await addGasSpentSafely(settings, actualGasCostWei - decision.gasCostWei);
       await recordFailureSafely(settings);
+      const journalStatus = err.receipt.status === 1 ? "CONFIRMED" : "REVERTED";
+      await upsertExecutionRecord(
+        {
+          ...journalBase,
+          status: journalStatus,
+          txHash: tx.hash,
+          nonce: typeof tx.nonce === "number" ? tx.nonce : null,
+          confirmedAt: Date.now(),
+          receiptStatus: err.receipt.status ?? null,
+          gasPaidWei: actualGasCostWei.toString(),
+          error: message,
+          lastUpdateAt: Date.now(),
+        },
+        journalPath
+      ).catch((journalErr) =>
+        console.warn(`  [JOURNAL WARNING] ${journalStatus}: ${journalErr.message}`)
+      );
       console.error(`  [FAILED] ${message}`);
-      return { submitted: true, error: message, estimatedGas, receipt: err.receipt };
+      return {
+        submitted: true,
+        error: message,
+        estimatedGas,
+        receipt: err.receipt,
+        journalId,
+        journalStatus,
+      };
     }
 
     await recordFailureSafely(settings);
@@ -391,9 +527,118 @@ async function execute({
       }
     }
 
+    if (lateReceipt) {
+      const journalStatus = lateReceipt.status === 1 ? "CONFIRMED" : "REVERTED";
+      await upsertExecutionRecord(
+        {
+          ...journalBase,
+          status: journalStatus,
+          txHash: tx.hash,
+          nonce: typeof tx.nonce === "number" ? tx.nonce : null,
+          confirmedAt: Date.now(),
+          receiptStatus: lateReceipt.status ?? null,
+          gasPaidWei: (
+            lateReceipt.gasUsed * (lateReceipt.gasPrice ?? gasPriceWei)
+          ).toString(),
+          error: message,
+          lastUpdateAt: Date.now(),
+        },
+        journalPath
+      ).catch((journalErr) =>
+        console.warn(`  [JOURNAL WARNING] ${journalStatus}: ${journalErr.message}`)
+      );
+      console.error(`  [FAILED] confirmation outcome unknown (tx may be mined): ${message}`);
+      return {
+        submitted: true,
+        error: message,
+        estimatedGas,
+        receipt: lateReceipt,
+        journalId,
+        journalStatus,
+      };
+    }
+
+    await upsertExecutionRecord(
+      {
+        ...journalBase,
+        status: "UNKNOWN",
+        txHash: tx.hash,
+        nonce: typeof tx.nonce === "number" ? tx.nonce : null,
+        error: message,
+        lastUpdateAt: Date.now(),
+      },
+      journalPath
+    ).catch((journalErr) => console.warn(`  [JOURNAL WARNING] UNKNOWN: ${journalErr.message}`));
+
     console.error(`  [FAILED] confirmation outcome unknown (tx may be mined): ${message}`);
-    return { submitted: true, error: message, estimatedGas, receipt: lateReceipt };
+    return {
+      submitted: true,
+      error: message,
+      estimatedGas,
+      receipt: lateReceipt,
+      journalId,
+      journalStatus: "UNKNOWN",
+    };
   }
 }
 
-module.exports = { execute, buildLeg, errorMessage };
+async function reconcilePendingExecutions({ provider, config } = {}) {
+  const filePath = config?.executionJournalPath || DEFAULT_EXECUTION_JOURNAL_PATH;
+  const pendings = await listPendingExecutions(filePath);
+  if (pendings.length === 0) return { reconciled: 0, skipped: 0 };
+  let reconciled = 0;
+  let skipped = 0;
+  for (const record of pendings) {
+    if (!record.txHash) {
+      await upsertExecutionRecord(
+        {
+          ...record,
+          status: "DROPPED",
+          error: "recovered: crashed before submit",
+          lastUpdateAt: Date.now(),
+        },
+        filePath
+      ).catch((e) => console.warn(`  [RECONCILE WARNING] ${e.message}`));
+      reconciled += 1;
+      continue;
+    }
+    if (typeof provider.getTransactionReceipt !== "function") {
+      skipped += 1;
+      continue;
+    }
+    const receipt = await provider.getTransactionReceipt(record.txHash).catch(() => null);
+    if (!receipt) {
+      const age = Date.now() - (record.submittedAt ?? 0);
+      if (age > 24 * 3600_000) {
+        await upsertExecutionRecord(
+          {
+            ...record,
+            status: "STALE",
+            error: "recovered: no receipt after 24h",
+            lastUpdateAt: Date.now(),
+          },
+          filePath
+        ).catch((e) => console.warn(`  [RECONCILE WARNING] ${e.message}`));
+        reconciled += 1;
+      } else {
+        skipped += 1;
+      }
+      continue;
+    }
+    await upsertExecutionRecord(
+      {
+        ...record,
+        status: receipt.status === 1 ? "CONFIRMED" : "REVERTED",
+        confirmedAt: Date.now(),
+        receiptStatus: receipt.status,
+        gasPaidWei: (receipt.gasUsed * (receipt.gasPrice ?? 0n)).toString(),
+        lastUpdateAt: Date.now(),
+      },
+      filePath
+    ).catch((e) => console.warn(`  [RECONCILE WARNING] ${e.message}`));
+    reconciled += 1;
+  }
+  return { reconciled, skipped };
+}
+
+module.exports = { execute, buildLeg, errorMessage, reconcilePendingExecutions };
