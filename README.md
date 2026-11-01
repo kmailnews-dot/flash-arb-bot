@@ -163,7 +163,7 @@ version.
 
 ### 6. Watch it scan
 
-The **Flash arb scan** workflow runs automatically every ~10 minutes (and you can trigger it by
+The **Flash arb scan** workflow runs automatically every 5 minutes (and you can trigger it by
 hand from the Actions tab). It is read-only: `DRY_RUN` is hard-coded to `true` and the job has no
 access to `PRIVATE_KEY` or `CONTRACT_ADDRESS`. Check its logs — you'll see every trade size it
 checked and any opportunities found, with zero cost or risk.
@@ -171,8 +171,8 @@ checked and any opportunities found, with zero cost or risk.
 ### 7. Go live (optional, real money)
 
 Live execution lives in [`.github/workflows/live.yml`](.github/workflows/live.yml) and is
-manual-only by design: it has a `workflow_dispatch` trigger and no cron. It is the only workflow
-that receives `PRIVATE_KEY`. Before trading, it runs `scripts/deploy-live.js` to verify that the
+manual-only by design: it has a `workflow_dispatch` trigger and no cron. Only live.yml and
+deploy.yml receive `PRIVATE_KEY`. Before trading, it runs `scripts/deploy-live.js` to verify that the
 configured contract matches the current `FlashArbExecutor` source, then runs one scan cycle with
 `DRY_RUN=false`.
 
@@ -326,9 +326,7 @@ DRY_RUN=false npm run scan                               # exercises the full on
 ```
 
 This is also what the test suite (`npm test`) exercises at the unit level — see
-`test/FlashArbExecutor.test.js`. The fast suite is **146 passing, 2 pending** (the pending tests
-are the optional fork tests below), and CI runs it via
-[`ci.yml`](.github/workflows/ci.yml).
+`test/FlashArbExecutor.test.js`. The test count is reported by the CI workflow run logs.
 
 **Known local-deployment limitation:** `npx hardhat run scripts/deploy.js --network hardhat` fails
 because chainId `31337` has no Aave V3 addresses in `bot/networks.js`. This is a known limitation,
@@ -354,7 +352,8 @@ instead of failing.
 
 See [`.env.example`](.env.example) for every environment variable / secret this project reads,
 with inline explanations — RPC URL, `DRY_RUN`, gas and slippage tuning, `MIN_PROFIT_USD`
-(default 5) and `MIN_PROFIT_BPS` (default 30, i.e. 0.30% of the borrowed notional),
+(default 0.50 in code and .env.example; live.yml and scan.yml inject 5 by default) and
+`MIN_PROFIT_BPS` (default 30, i.e. 0.30% of the borrowed notional),
 `SCAN_LOG_PATH`, `LOG_FORMAT` / `POLL_INTERVAL_MS` for the persistent runner, the loss-guard
 limits (`EXPECTED_CHAIN_ID`, `MAX_WALLET_BALANCE_ETH`,
 `MAX_DAILY_GAS_ETH`, `MAX_CONSECUTIVE_FAILURES`, `CIRCUIT_BREAKER_COOLDOWN_MINUTES`), the
@@ -362,7 +361,7 @@ monitoring thresholds (`MIN_WALLET_BALANCE_ETH`, `MAX_RPC_ERRORS_PER_SCAN`), the
 and the `PAIRS_CONFIG_JSON` / `ETH_USD_ROUTE_JSON` shapes.
 
 The pair set documented in `.env.example` defaults to WETH/USDC and WETH/ARB, both routed through
-Uniswap V3 0.05% (fee tier 500) + SushiSwap V2 legs. `PAIRS_CONFIG_JSON` remains required, so a
+Uniswap V3 0.01% (fee tier 100) on both legs (P1-11). `PAIRS_CONFIG_JSON` remains required, so a
 VPS/laptop deployment must still provide the concrete addresses (or a secret with the same name).
 
 ## Security notes

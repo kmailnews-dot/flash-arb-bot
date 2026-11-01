@@ -111,6 +111,20 @@ bot/run.js run() (process persistant)
   `bot/adaptive.js:4-11`, `20-40`, `84-98`, `154-182`.
 - **Le plafond de profondeur (0,5 %) est vérifié par quote d'impact dans `scanPair`
   (`bot/scanner.js`). Aucune quote au-delà du plafond n'est émise.**
+- **Profils par paire (P1-10).** Chaque paire doit déclarer
+  `profile: "majors" | "longtail"` et un `minProfitBps`
+  obligatoire, borné : majors [10, 15], longtail [60, 100].
+  `tradeSizes` est plafonné (0.1 majors, 1 longtail) en unités
+  du borrowedToken (pas en USD). Validation dans
+  `bot/config.js` `validatePairs`; `VALID_PROFILES` et
+  `PROFILE_BOUNDS` sont des constantes de module.
+- **Seuil de profit effectif (D7).** `decide`, `execute` et
+  `executor` calculent
+  `max(pair.minProfitBps, config.effectiveMinProfitBps)`.
+  `pair.minProfitBps` est un plancher immuable ; l'adaptive ne
+  peut pas le franchir à la baisse. Dette D7-bis : la formule
+  est dupliquée à 3 endroits et devra être extraite dans un
+  helper de `bot/pricing.js` (arithmétique pure).
 - **Le retry est borné.** `shouldRetry` ne retente que les erreurs `TRANSIENT`, strictement sous
   `maxAttempts` (défaut 3), avec un backoff exponentiel plafonné à 4 s :
   `bot/resilient.js:1-3`, `19-30`, `84-104`.
