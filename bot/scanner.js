@@ -98,15 +98,22 @@ async function scanTradeSize({
   gasPriceWei,
   ethUsdPrice,
   quoteLeg: injectedQuoteLeg = quoteLeg,
+  blockTag = "latest",
 }) {
   const quoteTimestamp = new Date().toISOString();
   const amountIn = ethers.parseUnits(tradeSizeHuman, pair.borrowedToken.decimals);
 
   const { result: intermediateOut } = await withThrottle(getScannerThrottle(config), () =>
-    injectedQuoteLeg(provider, pair.legOut, pair.borrowedToken.address, amountIn)
+    injectedQuoteLeg(provider, pair.legOut, pair.borrowedToken.address, amountIn, blockTag)
   );
   const { result: finalOut } = await withThrottle(getScannerThrottle(config), () =>
-    injectedQuoteLeg(provider, pair.legBack, pair.intermediateToken.address, intermediateOut)
+    injectedQuoteLeg(
+      provider,
+      pair.legBack,
+      pair.intermediateToken.address,
+      intermediateOut,
+      blockTag
+    )
   );
 
   const premium = (amountIn * config.aaveFlashLoanPremiumBps) / BPS_DENOMINATOR;
@@ -155,16 +162,17 @@ async function isTradeSizeWithinDepth({
   provider,
   config,
   quoteLeg: injectedQuoteLeg = quoteLeg,
+  blockTag = "latest",
 }) {
   const amountIn = ethers.parseUnits(tradeSizeHuman, pair.borrowedToken.decimals);
   const halfAmountIn = amountIn / 2n;
   if (halfAmountIn === 0n) return true;
 
   const { result: fullOut } = await withThrottle(getScannerThrottle(config), () =>
-    injectedQuoteLeg(provider, pair.legOut, pair.borrowedToken.address, amountIn)
+    injectedQuoteLeg(provider, pair.legOut, pair.borrowedToken.address, amountIn, blockTag)
   );
   const { result: halfOut } = await withThrottle(getScannerThrottle(config), () =>
-    injectedQuoteLeg(provider, pair.legOut, pair.borrowedToken.address, halfAmountIn)
+    injectedQuoteLeg(provider, pair.legOut, pair.borrowedToken.address, halfAmountIn, blockTag)
   );
 
   const expectedOut = (2n * halfOut * (BPS_DENOMINATOR - MAX_DEPTH_IMPACT_BPS)) / BPS_DENOMINATOR;
@@ -181,6 +189,7 @@ async function scanPair({
   ethUsdPrice,
   quoteLeg: injectedQuoteLeg = quoteLeg,
 }) {
+  const blockTag = await provider.getBlockNumber();
   const results = [];
   for (const tradeSizeHuman of pair.tradeSizes) {
     try {
@@ -191,6 +200,7 @@ async function scanPair({
           provider,
           config,
           quoteLeg: injectedQuoteLeg,
+          blockTag,
         }))
       ) {
         results.push({ pair, tradeSizeHuman, error: "DEPTH_EXCEEDED" });
@@ -205,13 +215,23 @@ async function scanPair({
           gasPriceWei,
           ethUsdPrice,
           quoteLeg: injectedQuoteLeg,
+          blockTag,
         })
       );
     } catch (err) {
       results.push({ pair, tradeSizeHuman, error: sanitizeError(err) });
     }
   }
-  return results.sort((a, b) => {
+  const now = Date.now();
+  const checkedResults = results.map((result) => {
+    if (!result.quoteTimestamp) return result;
+    const quoteAgeMs = now - new Date(result.quoteTimestamp).getTime();
+    if (quoteAgeMs > config.maxQuoteAgeMs) {
+      return { ...result, error: "QUOTE_STALE", isOpportunity: false };
+    }
+    return result;
+  });
+  return checkedResults.sort((a, b) => {
     if (a.error) return 1;
     if (b.error) return -1;
     return a.grossProfit > b.grossProfit ? -1 : a.grossProfit < b.grossProfit ? 1 : 0;

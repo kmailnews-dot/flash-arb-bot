@@ -2,22 +2,33 @@ const { ethers } = require("ethers");
 const { V2_ROUTER_ABI, V3_QUOTER_ABI } = require("./abis");
 
 /// Quotes a V2-style router (SushiSwap, Camelot V2, ...): amountIn of tokenIn -> tokenOut.
-async function quoteV2(provider, routerAddress, tokenIn, tokenOut, amountIn) {
+async function quoteV2(provider, routerAddress, tokenIn, tokenOut, amountIn, blockTag = "latest") {
   const router = new ethers.Contract(routerAddress, V2_ROUTER_ABI, provider);
-  const amounts = await router.getAmountsOut(amountIn, [tokenIn, tokenOut]);
+  const amounts = await router.getAmountsOut(amountIn, [tokenIn, tokenOut], { blockTag });
   return amounts[amounts.length - 1];
 }
 
 /// Quotes Uniswap V3's QuoterV2 for a single-hop exactInput swap.
-async function quoteV3(provider, quoterAddress, tokenIn, tokenOut, fee, amountIn) {
+async function quoteV3(
+  provider,
+  quoterAddress,
+  tokenIn,
+  tokenOut,
+  fee,
+  amountIn,
+  blockTag = "latest"
+) {
   const quoter = new ethers.Contract(quoterAddress, V3_QUOTER_ABI, provider);
-  const result = await quoter.quoteExactInputSingle.staticCall({
-    tokenIn,
-    tokenOut,
-    amountIn,
-    fee,
-    sqrtPriceLimitX96: 0n,
-  });
+  const result = await quoter.quoteExactInputSingle.staticCall(
+    {
+      tokenIn,
+      tokenOut,
+      amountIn,
+      fee,
+      sqrtPriceLimitX96: 0n,
+    },
+    { blockTag }
+  );
   return result.amountOut;
 }
 
@@ -27,9 +38,9 @@ async function quoteV3(provider, quoterAddress, tokenIn, tokenOut, fee, amountIn
 /// Uniswap V3's SwapRouter does not itself expose a view-quoting function - quoting requires the
 /// separate QuoterV2 contract. So V3 legs must also set `leg.quoter` to that address; V2-style
 /// routers expose getAmountsOut directly, so no separate quoter is needed there.
-async function quoteLeg(provider, leg, tokenIn, amountIn) {
+async function quoteLeg(provider, leg, tokenIn, amountIn, blockTag = "latest") {
   if (leg.kind === "V2") {
-    return quoteV2(provider, leg.router, tokenIn, leg.tokenOut, amountIn);
+    return quoteV2(provider, leg.router, tokenIn, leg.tokenOut, amountIn, blockTag);
   }
   if (leg.kind === "V3") {
     if (!leg.quoter) {
@@ -37,7 +48,7 @@ async function quoteLeg(provider, leg, tokenIn, amountIn) {
         `V3 leg for router ${leg.router} is missing "quoter" - set it to the Uniswap V3 QuoterV2 address.`
       );
     }
-    return quoteV3(provider, leg.quoter, tokenIn, leg.tokenOut, leg.v3Fee, amountIn);
+    return quoteV3(provider, leg.quoter, tokenIn, leg.tokenOut, leg.v3Fee, amountIn, blockTag);
   }
   throw new Error(`Unknown leg kind: ${leg.kind}`);
 }

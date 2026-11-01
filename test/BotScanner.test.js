@@ -1,6 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { scanTradeSize, isTradeSizeWithinDepth } = require("../bot/scanner");
+const { scanTradeSize, scanPair, isTradeSizeWithinDepth } = require("../bot/scanner");
 
 const USDC = "0x1111111111111111111111111111111111111111";
 const WETH = "0x2222222222222222222222222222222222222222";
@@ -28,6 +28,7 @@ const config = {
   minProfitUsd: 5,
   gasLimitEstimate: 700_000n,
   gasPriceBufferPct: 20,
+  maxQuoteAgeMs: 60_000,
 };
 
 function makeQuoteLeg(finalOut) {
@@ -146,5 +147,69 @@ describe("bot/scanner isTradeSizeWithinDepth", function () {
     });
 
     expect(within).to.equal(false);
+  });
+});
+
+describe("bot/scanner scanPair", function () {
+  const BLOCK_TAG = 12345;
+
+  function makeScanPairQuoteLeg(calls) {
+    return async (_provider, leg, _tokenIn, amountIn, blockTag) => {
+      calls.push({ leg, amountIn, blockTag });
+      if (leg === pair.legOut) return amountIn;
+      return AMOUNT_IN + PREMIUM + GROSS_PROFIT_ABOVE_THRESHOLD;
+    };
+  }
+
+  it("pins the same blockTag across all quotes in one scanPair", async function () {
+    const calls = [];
+    const provider = { getBlockNumber: async () => BLOCK_TAG };
+    const results = await scanPair({
+      provider,
+      pair,
+      config,
+      gasPriceWei: GAS_PRICE_WEI,
+      ethUsdPrice: ETH_USD_PRICE,
+      quoteLeg: makeScanPairQuoteLeg(calls),
+    });
+
+    expect(calls).to.have.length(4);
+    expect(calls[0].amountIn).to.equal(AMOUNT_IN);
+    expect(calls[1].amountIn).to.equal(AMOUNT_IN / 2n);
+    expect(calls[2].leg).to.equal(pair.legOut);
+    expect(calls[3].leg).to.equal(pair.legBack);
+    expect(calls.slice(0, 2).map((call) => call.blockTag)).to.deep.equal([BLOCK_TAG, BLOCK_TAG]);
+    expect(calls.slice(2).map((call) => call.blockTag)).to.deep.equal([BLOCK_TAG, BLOCK_TAG]);
+    expect(results).to.have.length(1);
+    expect(results[0].error).to.equal(undefined);
+  });
+
+  it("flags a quote older than maxQuoteAgeMs as QUOTE_STALE", async function () {
+    const RealDate = Date;
+    const staleNow = RealDate.now() - 120_000;
+    global.Date = class extends RealDate {
+      constructor(...args) {
+        super(...(args.length > 0 ? args : [staleNow]));
+      }
+    };
+
+    try {
+      const calls = [];
+      const provider = { getBlockNumber: async () => BLOCK_TAG };
+      const results = await scanPair({
+        provider,
+        pair,
+        config,
+        gasPriceWei: GAS_PRICE_WEI,
+        ethUsdPrice: ETH_USD_PRICE,
+        quoteLeg: makeScanPairQuoteLeg(calls),
+      });
+
+      expect(results).to.have.length(1);
+      expect(results[0].error).to.equal("QUOTE_STALE");
+      expect(results[0].isOpportunity).to.equal(false);
+    } finally {
+      global.Date = RealDate;
+    }
   });
 });

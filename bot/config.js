@@ -282,6 +282,7 @@ function validateScannerConfig({
   revertRateThreshold = 0.6,
   unknownRateWindowSize = 20,
   unknownRateThreshold = 0.3,
+  maxQuoteAgeMs = 60_000,
 }) {
   if (minProfitUsd !== undefined && minProfitUsd !== null) {
     if (typeof minProfitUsd !== "number" || !Number.isFinite(minProfitUsd) || minProfitUsd < 0) {
@@ -365,6 +366,9 @@ function validateScannerConfig({
   ) {
     throw new Error("UNKNOWN_RATE_THRESHOLD must be a finite number > 0 and <= 1.");
   }
+  if (!Number.isInteger(maxQuoteAgeMs) || maxQuoteAgeMs <= 0) {
+    throw new Error("MAX_QUOTE_AGE_MS must be a positive integer.");
+  }
 }
 
 const slippageBps = validateSlippageBps();
@@ -407,6 +411,7 @@ const config = {
   maxWalletBalanceEth: optionalNumber("MAX_WALLET_BALANCE_ETH", 0.1),
   minWalletBalanceEth: optionalNumber("MIN_WALLET_BALANCE_ETH", 0.005),
   maxRpcErrorsPerScan: optionalNumber("MAX_RPC_ERRORS_PER_SCAN", 3),
+  maxQuoteAgeMs: optionalNumber("MAX_QUOTE_AGE_MS", 60_000),
   maxDailyGasEth: optionalNumber("MAX_DAILY_GAS_ETH", 0.01),
   maxConsecutiveFailures: optionalNumber("MAX_CONSECUTIVE_FAILURES", 5),
   circuitBreakerCooldownMinutes: optionalNumber("CIRCUIT_BREAKER_COOLDOWN_MINUTES", 60),
@@ -444,6 +449,7 @@ validateScannerConfig({
   revertRateThreshold: config.revertRateThreshold,
   unknownRateWindowSize: config.unknownRateWindowSize,
   unknownRateThreshold: config.unknownRateThreshold,
+  maxQuoteAgeMs: config.maxQuoteAgeMs,
 });
 
 module.exports = config;
