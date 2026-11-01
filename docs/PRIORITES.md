@@ -90,3 +90,49 @@ authentification préalable.
 - P0-4 : reformulé en double contrôle on-chain (minProfit absolu + minProfitBps), pas simple passage bps.
 - P0-2, P0-5 : sortis de P0 (non applicables, contrôle existant).
 - P0-1, P0-7 : fermés (déjà faits).
+
+---
+
+## Suivi P1-XX (post-audit)
+
+Statuts consolidés après l'audit complet du 1er novembre 2026.
+Les listes numérotées 10–18 ci-dessus restent la référence
+historique de la matrice initiale.
+
+| # | Statut | Commit | Note |
+|---|---|---|---|
+| P1-10 | FERMÉ | e35ae5c | profils majors/longtail par paire |
+| P1-11 | FERMÉ | f40cae8 | bannir V2 30 bps des majors |
+| P1-13 | FERMÉ | a7837f3 | MIN_PROFIT_USD × gaz (GAS_PROFIT_MULTIPLIER = 3) |
+| P1-14 | FERMÉ | 19205a2 | minProfitBps par paire |
+| P1-15 | FERMÉ | 2c3f5ae | plafond de profondeur 0,5 % par quote d'impact |
+| P1-16 | FERMÉ | 7f1af08 | feeBps par jambe + maxTotalFeeBps |
+| P1-17 | REPORTÉ | — | irréalisable avec eth_call seul, sans helper on-chain |
+| P1-12 | À FAIRE | — | balayage logarithmique + régression |
+| P1-18 | À FAIRE | — | multi-hop |
+| P1-10-bis | NON PLANIFIÉ | — | adaptive par profil (tradeSizeFactor global) |
+| P1-16-bis | NON PLANIFIÉ | — | écart médian dynamique |
+
+## Suivi D0–D12 (issus de l'audit)
+
+Défauts structurants identifiés par l'audit des 3 lots
+(lecture seule). Aucun n'est critique au sens « perte de fonds
+imminente en DRY_RUN ». Chacun fera l'objet d'un point dédié.
+
+| # | Statut | Commit | Note |
+|---|---|---|---|
+| D7 | FERMÉ | e35ae5c | max(pair.minProfitBps, config.effectiveMinProfitBps) dans decide/execute/executor |
+| D7-bis | À FAIRE | — | extraire effectiveMinProfitBps(pair, config) dans bot/pricing.js |
+| D10 | À FAIRE | — | fix test/ForkArbitrum.test.js (minAmountOut, minProfitBps) |
+| D11 | À FAIRE | — | MIN_PROFIT_BPS transmis dans live.yml et scan.yml |
+| D12 | À FAIRE | — | EXPECTED_CHAIN_ID=31337 dans seedLocalMocks + README |
+| D1 | À FAIRE | — | journal d'exécution durable (machine à états tx) |
+| D2 | À FAIRE | — | classification ethers v6 complète (CALL_EXCEPTION, NONCE_EXPIRED, REPLACEMENT_UNDERPRICED, TRANSACTION_REPLACED) |
+| D3 | À FAIRE | — | P&L réalisé + circuit breaker étendu (drawdown, RPC, gaz) |
+| D4 | À FAIRE | — | blockTag commun + TTL explicite |
+| D5 | À FAIRE | — | coût L1/calldata dans le calcul de profit |
+| D6 | À FAIRE | — | une seule source de premium Aave (scanner + decide + execute) |
+| D8 | À FAIRE | — | owner() dans FLASH_ARB_EXECUTOR_ABI |
+| D9 | À FAIRE | — | seuils absents = rejet explicite dans decide |
+
+---
