@@ -125,6 +125,19 @@ bot/run.js run() (process persistant)
   peut pas le franchir à la baisse. Dette D7-bis : la formule
   est dupliquée à 3 endroits et devra être extraite dans un
   helper de `bot/pricing.js` (arithmétique pure).
+- **Le blockTag de scan n'est pas propagé à execute (D4-ter).** `scanPair`
+  fige un `blockTag` unique (via `provider.getBlockNumber()`) pour toutes
+  les quotes du cycle, mais `execute()` re-quote au runtime avec le
+  `blockTag` par défaut (`"latest"`). C'est volontaire : on veut l'état
+  frais au moment de l'envoi, pas l'état figé au scan. Conséquence
+  assumée : une opportunité peut disparaître entre `scanPair` et
+  `execute()` ; c'est `decide()` dans `execute()` qui tranche.
+- **`gasPaidWei` et `l1FeeWei` ne doivent jamais être additionnés
+  (D5-bis).** `gasPaidWei` est le coût total (gas L2 × gasPrice +
+  `receipt.l1Fee`), tandis que `l1FeeWei` n'est que la composante L1.
+  Tout rapport P&L qui ferait `gasPaidWei + l1FeeWei` doublerait le
+  coût L1. La réconciliation du budget gaz dans `guards.js` utilise
+  déjà le total, ne pas réinjecter `l1FeeWei` séparément.
 - **Le retry est borné.** `shouldRetry` ne retente que les erreurs `TRANSIENT`, strictement sous
   `maxAttempts` (défaut 3), avec un backoff exponentiel plafonné à 4 s :
   `bot/resilient.js:1-3`, `19-30`, `84-104`.
