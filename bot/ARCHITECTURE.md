@@ -109,6 +109,8 @@ bot/run.js run() (process persistant)
   `[minProfitBps, min(minProfitBps * 2, 10000)]`, et `effectiveMaxTradeSize` dans
   `[0.10, 1.00]`. Un `logs/adaptive.json` corrompu ne peut pas sortir de ces bornes :
   `bot/adaptive.js:4-11`, `20-40`, `84-98`, `154-182`.
+- **Le plafond de profondeur (0,5 %) est vérifié par quote d'impact dans `scanPair`
+  (`bot/scanner.js`). Aucune quote au-delà du plafond n'est émise.**
 - **Le retry est borné.** `shouldRetry` ne retente que les erreurs `TRANSIENT`, strictement sous
   `maxAttempts` (défaut 3), avec un backoff exponentiel plafonné à 4 s :
   `bot/resilient.js:1-3`, `19-30`, `84-104`.

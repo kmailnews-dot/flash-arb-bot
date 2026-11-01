@@ -4,6 +4,7 @@ const { createThrottle, withThrottle } = require("./throttle");
 const { GAS_PROFIT_MULTIPLIER } = require("./pricing");
 
 const BPS_DENOMINATOR = 10000n;
+const MAX_DEPTH_IMPACT_BPS = 50n;
 
 let scannerThrottle = null;
 
@@ -146,13 +147,66 @@ async function scanTradeSize({
   };
 }
 
+/// Returns true when the entry-leg quote of X is not more than MAX_DEPTH_IMPACT_BPS
+/// below twice the quote of X/2, i.e. when X stays within 0.5% of the pool depth.
+async function isTradeSizeWithinDepth({
+  pair,
+  tradeSizeHuman,
+  provider,
+  config,
+  quoteLeg: injectedQuoteLeg = quoteLeg,
+}) {
+  const amountIn = ethers.parseUnits(tradeSizeHuman, pair.borrowedToken.decimals);
+  const halfAmountIn = amountIn / 2n;
+  if (halfAmountIn === 0n) return true;
+
+  const { result: fullOut } = await withThrottle(getScannerThrottle(config), () =>
+    injectedQuoteLeg(provider, pair.legOut, pair.borrowedToken.address, amountIn)
+  );
+  const { result: halfOut } = await withThrottle(getScannerThrottle(config), () =>
+    injectedQuoteLeg(provider, pair.legOut, pair.borrowedToken.address, halfAmountIn)
+  );
+
+  const expectedOut = (2n * halfOut * (BPS_DENOMINATOR - MAX_DEPTH_IMPACT_BPS)) / BPS_DENOMINATOR;
+  return fullOut >= expectedOut;
+}
+
 /// Scans every configured trade size for a pair and returns only the results worth logging,
 /// sorted with the best (highest net-of-fee output) first.
-async function scanPair({ provider, pair, config, gasPriceWei, ethUsdPrice }) {
+async function scanPair({
+  provider,
+  pair,
+  config,
+  gasPriceWei,
+  ethUsdPrice,
+  quoteLeg: injectedQuoteLeg = quoteLeg,
+}) {
   const results = [];
   for (const tradeSizeHuman of pair.tradeSizes) {
     try {
-      results.push(await scanTradeSize({ provider, pair, tradeSizeHuman, config, gasPriceWei, ethUsdPrice }));
+      if (
+        !(await isTradeSizeWithinDepth({
+          pair,
+          tradeSizeHuman,
+          provider,
+          config,
+          quoteLeg: injectedQuoteLeg,
+        }))
+      ) {
+        results.push({ pair, tradeSizeHuman, error: "DEPTH_EXCEEDED" });
+        continue;
+      }
+      results.push(
+        await scanTradeSize({
+          provider,
+          pair,
+          tradeSizeHuman,
+          config,
+          gasPriceWei,
+          ethUsdPrice,
+          quoteLeg: injectedQuoteLeg,
+        })
+      );
     } catch (err) {
       results.push({ pair, tradeSizeHuman, error: sanitizeError(err) });
     }
@@ -170,5 +224,6 @@ module.exports = {
   sanitizeError,
   scanTradeSize,
   scanPair,
+  isTradeSizeWithinDepth,
   getScannerThrottle,
 };

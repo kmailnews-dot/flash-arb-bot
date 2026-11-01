@@ -1,6 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { scanTradeSize } = require("../bot/scanner");
+const { scanTradeSize, isTradeSizeWithinDepth } = require("../bot/scanner");
 
 const USDC = "0x1111111111111111111111111111111111111111";
 const WETH = "0x2222222222222222222222222222222222222222";
@@ -113,5 +113,38 @@ describe("bot/scanner scanTradeSize", function () {
     const above = await scanWith(4_500_000n);
     expect(above.netProfitUsd).to.be.closeTo(3.50, 0.01);
     expect(above.isOpportunity).to.equal(true);
+  });
+});
+
+describe("bot/scanner isTradeSizeWithinDepth", function () {
+  const HALF_OUT = 1_000_000n;
+
+  function makeDepthQuoteLeg(fullOut) {
+    return async (_provider, _leg, _tokenIn, amountIn) =>
+      amountIn === AMOUNT_IN ? fullOut : HALF_OUT;
+  }
+
+  it("keeps a trade size within 0.5% of pool depth", async function () {
+    const within = await isTradeSizeWithinDepth({
+      pair,
+      tradeSizeHuman: "1000",
+      provider: {},
+      config,
+      quoteLeg: makeDepthQuoteLeg(2n * HALF_OUT),
+    });
+
+    expect(within).to.equal(true);
+  });
+
+  it("skips a trade size beyond 0.5% of pool depth", async function () {
+    const within = await isTradeSizeWithinDepth({
+      pair,
+      tradeSizeHuman: "1000",
+      provider: {},
+      config,
+      quoteLeg: makeDepthQuoteLeg(1_500_000n),
+    });
+
+    expect(within).to.equal(false);
   });
 });
