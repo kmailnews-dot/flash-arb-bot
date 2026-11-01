@@ -8,8 +8,16 @@ function withSlippage(amount, slippageBps) {
   return (amount * (BPS_DENOMINATOR - slippageBps)) / BPS_DENOMINATOR;
 }
 
-function gasCostInBorrowedToken({ gasCostWei, pair, config }) {
+function gasCostInBorrowedToken({ gasCostWei, pair, config, l1MultiplierBps }) {
   const borrowedToken = pair.borrowedToken || {};
+  const l1Bps =
+    typeof l1MultiplierBps === "number"
+      ? l1MultiplierBps
+      : Number(config?.l1CostMultiplierBps ?? 0);
+  const effectiveGasWei =
+    l1Bps > 0
+      ? (gasCostWei * (BPS_DENOMINATOR + BigInt(Math.round(l1Bps)))) / BPS_DENOMINATOR
+      : gasCostWei;
 
   if (borrowedToken.isStable === true) {
     const ethUsdPrice = Number(config.ethUsdPrice);
@@ -19,7 +27,7 @@ function gasCostInBorrowedToken({ gasCostWei, pair, config }) {
     const price = BigInt(Math.round(ethUsdPrice * Number(priceScale)));
     if (price <= 0n) return null;
     const denominator = WEI_PER_ETHER * priceScale;
-    const numerator = gasCostWei * price * scale;
+    const numerator = effectiveGasWei * price * scale;
     return (numerator + denominator - 1n) / denominator;
   }
 
@@ -27,7 +35,7 @@ function gasCostInBorrowedToken({ gasCostWei, pair, config }) {
     const ethUsdPrice = Number(config.ethUsdPrice);
     if (!Number.isFinite(ethUsdPrice) || ethUsdPrice <= 0) return null;
     const WETH_PRICE_IN_USD = ethUsdPrice;
-    const inTokenUnits = (Number(gasCostWei) / 1e18 / ethUsdPrice) * WETH_PRICE_IN_USD;
+    const inTokenUnits = (Number(effectiveGasWei) / 1e18 / ethUsdPrice) * WETH_PRICE_IN_USD;
     return BigInt(Math.ceil(inTokenUnits * 10 ** Number(borrowedToken.decimals ?? 18)));
   }
 

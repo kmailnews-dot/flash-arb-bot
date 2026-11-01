@@ -272,6 +272,7 @@ function validateScannerConfig({
   minProfitBps,
   aaveFlashLoanPremiumBps,
   gasPriceBufferPct,
+  l1CostMultiplierBps = 5000,
   maxGasLimit,
   maxWalletBalanceEth,
   maxDailyGasEth,
@@ -302,6 +303,13 @@ function validateScannerConfig({
   }
   if (gasPriceBufferPct > 1000) {
     throw new Error("GAS_PRICE_BUFFER_PCT must be <= 1000.");
+  }
+  if (
+    !Number.isInteger(l1CostMultiplierBps) ||
+    l1CostMultiplierBps < 0 ||
+    l1CostMultiplierBps > 10000
+  ) {
+    throw new Error("L1_COST_MULTIPLIER_BPS must be an integer between 0 and 10000.");
   }
   if (typeof maxGasLimit !== "bigint" || maxGasLimit <= 0n) {
     throw new Error("MAX_GAS_LIMIT must be a positive bigint.");
@@ -404,6 +412,7 @@ const config = {
   gasLimitEstimate: BigInt(optionalNumber("GAS_LIMIT_ESTIMATE", 700000)),
   maxGasLimit: BigInt(optionalNumber("MAX_GAS_LIMIT", 1000000)),
   gasPriceBufferPct: optionalNumber("GAS_PRICE_BUFFER_PCT", 20),
+  l1CostMultiplierBps: optionalNumber("L1_COST_MULTIPLIER_BPS", 5000),
 
   // Live-execution safety guards. They only apply when DRY_RUN=false and a transaction is about
   // to be sent. See README "Live-execution loss guards" and bot/guards.js.
@@ -439,6 +448,7 @@ validateScannerConfig({
   minProfitBps: config.minProfitBps,
   aaveFlashLoanPremiumBps: config.aaveFlashLoanPremiumBps,
   gasPriceBufferPct: config.gasPriceBufferPct,
+  l1CostMultiplierBps: config.l1CostMultiplierBps,
   maxGasLimit: config.maxGasLimit,
   maxWalletBalanceEth: config.maxWalletBalanceEth,
   maxDailyGasEth: config.maxDailyGasEth,

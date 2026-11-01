@@ -1294,6 +1294,81 @@ describe("bot/executor maybeExecute", function () {
     expect(gasSpent.gasSpentWei).to.equal((100000n * 1n).toString());
   });
 
+  it("includes receipt.l1Fee in the actual gas cost", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig({ maxDailyGasEth: 0.01 });
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+      opportunity,
+      config,
+    });
+    const contract = {
+      owner: async () => defaultOwnerAddress,
+      startArbitrage: async () => ({
+        hash: `0x${"cc".repeat(32)}`,
+        wait: async () => ({
+          status: 1,
+          gasUsed: 100000n,
+          gasPrice: 1n,
+          l1Fee: 500n,
+          blockNumber: 1,
+        }),
+      }),
+    };
+    contract.startArbitrage.estimateGas = async () => 300000n;
+    contract.startArbitrage.staticCall = async () => true;
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : opportunity.finalOut;
+
+    const result = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+
+    expect(result.submitted).to.equal(true);
+    const gasSpent = JSON.parse(fs.readFileSync(config.gasSpentPath, "utf8"));
+    expect(gasSpent.gasSpentWei).to.equal("100500");
+  });
+
+  it("treats a missing receipt.l1Fee as zero", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig({ maxDailyGasEth: 0.01 });
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+      opportunity,
+      config,
+    });
+    const contract = {
+      owner: async () => defaultOwnerAddress,
+      startArbitrage: async () => ({
+        hash: `0x${"cd".repeat(32)}`,
+        wait: async () => ({
+          status: 1,
+          gasUsed: 100000n,
+          gasPrice: 1n,
+          blockNumber: 1,
+        }),
+      }),
+    };
+    contract.startArbitrage.estimateGas = async () => 300000n;
+    contract.startArbitrage.staticCall = async () => true;
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : opportunity.finalOut;
+
+    const result = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+
+    expect(result.submitted).to.equal(true);
+    const gasSpent = JSON.parse(fs.readFileSync(config.gasSpentPath, "utf8"));
+    expect(gasSpent.gasSpentWei).to.equal("100000");
+  });
+
   it("rejects on the maxFeePerGas-based floor when the profit clears only the gasPrice cost", async function () {
     const { opportunity, makeConfig } = await deployFixture();
     const config = makeConfig({ ethUsdPrice: 1800 });
@@ -1798,7 +1873,7 @@ describe("bot/executor maybeExecute", function () {
         pairLabel: pair.label,
         realizedProfitWei: profit.toString(),
         premiumWei: premium.toString(),
-        gasPaidWei: "200000",
+        gasPaidWei: "200123",
         l1FeeWei: "123",
         status: "CONFIRMED",
       });

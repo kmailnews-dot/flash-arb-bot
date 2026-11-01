@@ -402,7 +402,9 @@ async function execute({
   } catch (err) {
     const message = errorMessage(err);
     if (err.receipt) {
-      const actualGasCostWei = err.receipt.gasUsed * (err.receipt.gasPrice ?? gasPriceWei);
+      const actualGasCostWei =
+        err.receipt.gasUsed * (err.receipt.gasPrice ?? gasPriceWei) +
+        (err.receipt.l1Fee ?? 0n);
       await addGasSpentSafely(settings, actualGasCostWei - decision.gasCostWei);
       await recordFailureSafely(settings);
       const journalStatus = err.receipt.status === 1 ? "CONFIRMED" : "REVERTED";
@@ -464,7 +466,8 @@ async function execute({
 
   try {
     const receipt = await waitForReceipt(tx);
-    const actualGasCostWei = receipt.gasUsed * (receipt.gasPrice ?? gasPriceWei);
+    const actualGasCostWei =
+      receipt.gasUsed * (receipt.gasPrice ?? gasPriceWei) + (receipt.l1Fee ?? 0n);
     await addGasSpentSafely(settings, actualGasCostWei - decision.gasCostWei);
 
     if (receipt.status !== 1) {
@@ -558,7 +561,9 @@ async function execute({
   } catch (err) {
     const message = err.shortMessage || err.message;
     if (err.receipt) {
-      const actualGasCostWei = err.receipt.gasUsed * (err.receipt.gasPrice ?? gasPriceWei);
+      const actualGasCostWei =
+        err.receipt.gasUsed * (err.receipt.gasPrice ?? gasPriceWei) +
+        (err.receipt.l1Fee ?? 0n);
       await addGasSpentSafely(settings, actualGasCostWei - decision.gasCostWei);
       await recordFailureSafely(settings);
       const journalStatus = err.receipt.status === 1 ? "CONFIRMED" : "REVERTED";
@@ -595,7 +600,9 @@ async function execute({
     if (typeof provider.getTransactionReceipt === "function") {
       lateReceipt = await provider.getTransactionReceipt(tx.hash).catch(() => null);
       if (lateReceipt) {
-        const actualGasCostWei = lateReceipt.gasUsed * (lateReceipt.gasPrice ?? gasPriceWei);
+        const actualGasCostWei =
+          lateReceipt.gasUsed * (lateReceipt.gasPrice ?? gasPriceWei) +
+          (lateReceipt.l1Fee ?? 0n);
         await addGasSpentSafely(settings, actualGasCostWei - decision.gasCostWei);
       }
     }
@@ -611,7 +618,8 @@ async function execute({
           confirmedAt: Date.now(),
           receiptStatus: lateReceipt.status ?? null,
           gasPaidWei: (
-            lateReceipt.gasUsed * (lateReceipt.gasPrice ?? gasPriceWei)
+            lateReceipt.gasUsed * (lateReceipt.gasPrice ?? gasPriceWei) +
+            (lateReceipt.l1Fee ?? 0n)
           ).toString(),
           error: message,
           lastUpdateAt: Date.now(),
@@ -725,7 +733,10 @@ async function reconcilePendingExecutions({ provider, config } = {}) {
         status: receipt.status === 1 ? "CONFIRMED" : "REVERTED",
         confirmedAt: Date.now(),
         receiptStatus: receipt.status,
-        gasPaidWei: (receipt.gasUsed * (receipt.gasPrice ?? 0n)).toString(),
+        gasPaidWei: (
+          receipt.gasUsed * (receipt.gasPrice ?? 0n) +
+          (receipt.l1Fee ?? 0n)
+        ).toString(),
         lastUpdateAt: Date.now(),
       },
       filePath
