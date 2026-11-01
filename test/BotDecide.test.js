@@ -145,6 +145,23 @@ describe("bot/decide decide", function () {
     expect(result.netProfitBps).to.equal(10n);
   });
 
+  it("uses pair.minProfitBps when set", function () {
+    const pairOverride = { ...pair, minProfitBps: 10 };
+    const opportunity = {
+      ...makeOpportunity({ grossProfit: ethers.parseEther("1.5") + GAS_COST_AT_2_WEI }),
+      pair: pairOverride,
+    };
+
+    const result = runDecide({
+      opportunity,
+      config: makeConfig({ minProfitUsd: 0, minProfitBps: 30 }),
+    });
+
+    expect(result.netProfitBps).to.equal(15n);
+    expect(result.shouldExecute).to.equal(true);
+    expect(result.reason).to.equal("OK");
+  });
+
   it("refuse quand maxFeePerGas dépasse le plafond de profit", function () {
     const result = runDecide({
       opportunity: makeOpportunity({ grossProfit: ethers.parseEther("10") }),

@@ -100,6 +100,12 @@ function validatePairs(pairs) {
       seenTradeSizes.add(tradeSize.toString());
     }
 
+    if (pair.minProfitBps !== undefined && pair.minProfitBps !== null) {
+      if (!Number.isInteger(pair.minProfitBps) || pair.minProfitBps < 0 || pair.minProfitBps > 10000) {
+        throw new Error(`${prefix}.minProfitBps must be an integer between 0 and 10000.`);
+      }
+    }
+
     if (pair.legOut.kind !== "V2" && pair.legOut.kind !== "V3") {
       throw new Error(`${prefix}.legOut.kind must be "V2" or "V3".`);
     }

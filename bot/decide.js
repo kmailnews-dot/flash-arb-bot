@@ -179,7 +179,7 @@ function decideInternal({ opportunity, config, feeData, estimatedGas }) {
     });
     if (netProfitFresh < minProfitUsdInToken) {
       const bpsDetail = minProfitBpsConfigured
-        ? `, netBps=${netProfitBps}, thresholdBps=${BigInt(config.minProfitBps)}`
+        ? `, netBps=${netProfitBps}, thresholdBps=${BigInt(pair.minProfitBps ?? config.minProfitBps)}`
         : "";
       return buildDecision({
         shouldExecute: false,
@@ -202,7 +202,7 @@ function decideInternal({ opportunity, config, feeData, estimatedGas }) {
   }
 
   if (minProfitBpsConfigured) {
-    const minProfitBps = BigInt(config.minProfitBps);
+    const minProfitBps = BigInt(pair.minProfitBps ?? config.minProfitBps);
     const meetsMinProfitBps =
       amountIn > 0n && netProfitFresh * BPS_DENOMINATOR >= amountIn * minProfitBps;
     if (!meetsMinProfitBps) {

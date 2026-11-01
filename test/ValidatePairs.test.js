@@ -217,6 +217,31 @@ describe("bot/config validatePairs", function () {
     );
   });
 
+  it("accepts a valid pair.minProfitBps", function () {
+    const pair = makePair();
+    pair.minProfitBps = 10;
+
+    expect(() => validatePairs([pair])).to.not.throw();
+  });
+
+  it("rejects a non-integer pair.minProfitBps", function () {
+    const pair = makePair();
+    pair.minProfitBps = 10.5;
+
+    expect(() => validatePairs([pair])).to.throw(
+      "PAIRS_CONFIG_JSON[0].minProfitBps must be an integer between 0 and 10000."
+    );
+  });
+
+  it("rejects pair.minProfitBps above 10000", function () {
+    const pair = makePair();
+    pair.minProfitBps = 10001;
+
+    expect(() => validatePairs([pair])).to.throw(
+      "PAIRS_CONFIG_JSON[0].minProfitBps must be an integer between 0 and 10000."
+    );
+  });
+
   it("rejects a missing or invalid legOut.kind", function () {
     const pair = makePair();
     delete pair.legOut.kind;

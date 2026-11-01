@@ -321,6 +321,30 @@ describe("bot/executor maybeExecute", function () {
     expect(send.args[3].gasLimit).to.equal((300000n * 11500n) / 10000n);
   });
 
+  it("forwards pair.minProfitBps to staticCall and send", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const { contract, calls } = makeSpyContract();
+    const pairOverride = { ...opportunity.pair, minProfitBps: 10 };
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+      opportunity: { ...opportunity, pair: pairOverride },
+      config,
+    });
+
+    const result = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+    });
+
+    expect(result.submitted).to.equal(true);
+    const staticCall = calls.find((entry) => entry.method === "staticCall");
+    const send = calls.find((entry) => entry.method === "send");
+    expect(staticCall.args[2].minProfitBps).to.equal(10n);
+    expect(send.args[2].minProfitBps).to.equal(10n);
+  });
+
   it("calls estimateGas, then the final staticCall, then sends", async function () {
     const { opportunity, makeConfig } = await deployFixture();
     const config = makeConfig();
