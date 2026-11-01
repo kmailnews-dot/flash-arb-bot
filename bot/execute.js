@@ -422,6 +422,26 @@ async function execute({
       ).catch((journalErr) =>
         console.warn(`  [JOURNAL WARNING] ${journalStatus}: ${journalErr.message}`)
       );
+      const l1FeeWei =
+        typeof err.receipt.l1Fee === "bigint" ? err.receipt.l1Fee.toString() : "0";
+      const eventData =
+        journalStatus === "CONFIRMED"
+          ? extractArbitrageEvent(err.receipt)
+          : { realizedProfitWei: null, premiumWei: null };
+      await appendExecutionPnl(
+        {
+          timestamp: new Date().toISOString(),
+          txHash: err.receipt.transactionHash ?? null,
+          journalId,
+          pairLabel: pair.label ?? null,
+          realizedProfitWei: eventData.realizedProfitWei,
+          premiumWei: eventData.premiumWei,
+          gasPaidWei: actualGasCostWei.toString(),
+          l1FeeWei,
+          status: journalStatus,
+        },
+        config.executionPnlPath || DEFAULT_PNL_LOG_PATH
+      ).catch((pnlErr) => console.warn(`  [PNL WARNING] ${pnlErr.message}`));
       console.error(`  [FAILED] ${message}`);
       return { submitted: false, error: message, estimatedGas, journalId, journalStatus };
     }
@@ -648,6 +668,26 @@ async function execute({
           },
           config.executionPnlPath || DEFAULT_PNL_LOG_PATH
         ).catch((err) => console.warn(`  [PNL WARNING] ${err.message}`));
+      } else {
+        const l1FeeWei =
+          typeof lateReceipt.l1Fee === "bigint" ? lateReceipt.l1Fee.toString() : "0";
+        await appendExecutionPnl(
+          {
+            timestamp: new Date().toISOString(),
+            txHash: tx.hash,
+            journalId,
+            pairLabel: pair.label ?? null,
+            realizedProfitWei: null,
+            premiumWei: null,
+            gasPaidWei: (
+              lateReceipt.gasUsed * (lateReceipt.gasPrice ?? gasPriceWei) +
+              (lateReceipt.l1Fee ?? 0n)
+            ).toString(),
+            l1FeeWei,
+            status: "REVERTED",
+          },
+          config.executionPnlPath || DEFAULT_PNL_LOG_PATH
+        ).catch((pnlErr) => console.warn(`  [PNL WARNING] ${pnlErr.message}`));
       }
       console.error(`  [FAILED] confirmation outcome unknown (tx may be mined): ${message}`);
       return {

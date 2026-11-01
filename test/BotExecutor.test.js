@@ -1925,5 +1925,120 @@ describe("bot/executor maybeExecute", function () {
         status: "CONFIRMED",
       });
     });
+
+    it("writes a CONFIRMED PnL line when send throws with a successful receipt", async function () {
+      const { opportunity, makeConfig } = await deployFixture();
+      const config = makeConfig();
+      const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+        opportunity,
+        config,
+      });
+      const txHash = `0x${"7c".repeat(32)}`;
+      const sendError = Object.assign(new Error("receipt available"), {
+        receipt: { status: 1, gasUsed: 100000n, gasPrice: 1n, blockNumber: 1, l1Fee: 7n, logs: [] },
+      });
+      const { contract } = makeSpyContract({ sendError });
+      const result = await maybeExecute({
+        opportunity: freshOpportunity,
+        provider: ethers.provider,
+        config,
+        contract,
+      });
+      expect(result.submitted).to.equal(false);
+      expect(result.journalStatus).to.equal("CONFIRMED");
+      const lines = fs.readFileSync(config.executionPnlPath, "utf8").trim().split("\n");
+      expect(lines).to.have.lengthOf(1);
+      const pnl = JSON.parse(lines[0]);
+      expect(pnl).to.include({
+        txHash: null,
+        journalId: result.journalId,
+        status: "CONFIRMED",
+        l1FeeWei: "7",
+      });
+      expect(pnl.timestamp).to.be.a("string");
+    });
+
+    it("writes a REVERTED PnL line when send throws with a reverted receipt", async function () {
+      const { opportunity, makeConfig } = await deployFixture();
+      const config = makeConfig();
+      const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+        opportunity,
+        config,
+      });
+      const sendError = Object.assign(new Error("transaction reverted on-chain"), {
+        receipt: { status: 0, gasUsed: 100000n, gasPrice: 1n, blockNumber: 1 },
+      });
+      const { contract } = makeSpyContract({ sendError });
+      const result = await maybeExecute({
+        opportunity: freshOpportunity,
+        provider: ethers.provider,
+        config,
+        contract,
+      });
+      expect(result.submitted).to.equal(false);
+      expect(result.journalStatus).to.equal("REVERTED");
+      const lines = fs.readFileSync(config.executionPnlPath, "utf8").trim().split("\n");
+      expect(lines).to.have.lengthOf(1);
+      const pnl = JSON.parse(lines[0]);
+      expect(pnl).to.include({
+        journalId: result.journalId,
+        status: "REVERTED",
+        realizedProfitWei: null,
+        premiumWei: null,
+      });
+    });
+
+    it("writes a REVERTED PnL line when the late receipt has status 0", async function () {
+      const { opportunity, makeConfig } = await deployFixture();
+      const config = makeConfig();
+      const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+        opportunity,
+        config,
+      });
+      const txHash = `0x${"7d".repeat(32)}`;
+      const contract = {
+        owner: async () => defaultOwnerAddress,
+        startArbitrage: async () => ({
+          hash: txHash,
+          wait: async () => {
+            throw Object.assign(new Error("timed out"), { code: "TIMEOUT" });
+          },
+        }),
+      };
+      contract.startArbitrage.estimateGas = async () => 300000n;
+      contract.startArbitrage.staticCall = async () => true;
+      const provider = {
+        getFeeData: async () => ({ gasPrice: 1n, maxFeePerGas: null }),
+        getNetwork: () => ethers.provider.getNetwork(),
+        getBalance: (address) => ethers.provider.getBalance(address),
+        getTransactionReceipt: async () => ({
+          status: 0,
+          gasUsed: 100000n,
+          gasPrice: 1n,
+          blockNumber: 1,
+        }),
+      };
+      const quoteLeg = async (_provider, leg) =>
+        leg === opportunity.pair.legOut ? opportunity.intermediateOut : opportunity.finalOut;
+      const result = await maybeExecute({
+        opportunity: freshOpportunity,
+        provider,
+        config,
+        contract,
+        quoteLeg,
+      });
+      expect(result.submitted).to.equal(true);
+      expect(result.journalStatus).to.equal("REVERTED");
+      const lines = fs.readFileSync(config.executionPnlPath, "utf8").trim().split("\n");
+      expect(lines).to.have.lengthOf(1);
+      const pnl = JSON.parse(lines[0]);
+      expect(pnl).to.include({
+        txHash,
+        journalId: result.journalId,
+        status: "REVERTED",
+        realizedProfitWei: null,
+        premiumWei: null,
+      });
+    });
   });
 });
