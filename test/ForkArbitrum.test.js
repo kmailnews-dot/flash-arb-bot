@@ -82,16 +82,17 @@ describeFork("Arbitrum fork integration", function () {
         router: SUSHI_V2_ROUTER,
         tokenOut: USDC,
         v3Fee: 0,
-        minAmountOut: 0n,
+        minAmountOut: 1n,
       },
       leg2: {
         kind: DEX_KIND.V3,
         router: leg2Router,
         tokenOut: WETH,
         v3Fee: 500,
-        minAmountOut: 0n,
+        minAmountOut: 1n,
       },
       minProfit: 0n,
+      minProfitBps: 0n,
       deadline: Math.floor(Date.now() / 1000) + 3600,
     };
   }
@@ -134,5 +135,6 @@ describeFork("Arbitrum fork integration", function () {
     expect(failure, "SwapRouter02 call should revert").to.not.equal(undefined);
     expect(errorMessage(failure)).to.match(/revert|call_exception|without a reason|unrecognized/i);
     expect(errorMessage(failure).toLowerCase()).to.not.include("not_profitable");
+    expect(errorMessage(failure).toLowerCase()).to.not.include("zero_min_out");
   });
 });
