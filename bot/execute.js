@@ -277,7 +277,7 @@ async function execute({
       ? await runGuard("contract owner", () =>
           checkContractOwner({ contract, walletAddress: wallet.address })
         )
-      : { ok: true };
+      : { ok: false, error: "OWNER_GUARD_UNAVAILABLE: contract.owner is not a function" };
   if (!ownerCheck.ok) {
     console.log(`  [OWNER GUARD] ${ownerCheck.error} - transaction not sent.`);
     return { submitted: false, guard: "contractOwner", error: ownerCheck.error };

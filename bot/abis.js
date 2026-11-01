@@ -15,6 +15,7 @@ const LEG_TUPLE = "(uint8 kind,address router,address tokenOut,uint24 v3Fee,uint
 const FLASH_ARB_EXECUTOR_ABI = [
   `function startArbitrage(address borrowedToken, uint256 amount, (${LEG_TUPLE} leg1, ${LEG_TUPLE} leg2, uint256 minProfit, uint256 minProfitBps, uint256 deadline) params) external`,
   "event ArbitrageExecuted(address indexed initiator, address indexed borrowedToken, uint256 amountBorrowed, uint256 premium, uint256 profit)",
+  "function owner() view returns (address)",
 ];
 
 module.exports = { ERC20_ABI, V2_ROUTER_ABI, V3_QUOTER_ABI, FLASH_ARB_EXECUTOR_ABI };

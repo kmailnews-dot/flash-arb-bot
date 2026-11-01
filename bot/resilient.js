@@ -4,6 +4,8 @@ const DEFAULT_CAP_MS = 4000;
 
 const PERMANENT_CODES = new Set([
   "NOT_PROFITABLE",
+  "CALL_EXCEPTION",
+  "INVALID_ARGUMENT",
   "CHAIN_ID_MISMATCH",
   "WALLET_BALANCE_ABOVE_MAX",
   "WALLET_BALANCE_BELOW_MIN",
@@ -33,6 +35,12 @@ const TRANSIENT_CODES = new Set([
   "NETWORK_ERROR",
   "RATE_LIMITED",
   "TOO_MANY_REQUESTS",
+  "NONCE_EXPIRED",
+  "REPLACEMENT_UNDERPRICED",
+]);
+
+const UNKNOWN_CODES = new Set([
+  "TRANSACTION_REPLACED",
 ]);
 
 function textOf(value) {
@@ -56,30 +64,51 @@ function matchesAny(text, codes) {
   return false;
 }
 
+function errorChain(root) {
+  const nodes = [];
+  const seen = new Set();
+  function visit(node, depth) {
+    if (!node || typeof node !== "object" || seen.has(node) || depth > 3) return;
+    seen.add(node);
+    nodes.push(node);
+    visit(node.error, depth + 1);
+    visit(node.cause, depth + 1);
+    visit(node.info?.error, depth + 1);
+  }
+  visit(root, 0);
+  return nodes;
+}
+
 function classifyError(error) {
   try {
     if (typeof error === "string") {
       const text = normalizeText(error);
       if (matchesAny(text, PERMANENT_CODES)) return "PERMANENT";
       if (matchesAny(text, TRANSIENT_CODES)) return "TRANSIENT";
+      if (matchesAny(text, UNKNOWN_CODES)) return "UNKNOWN";
       return "UNKNOWN";
     }
 
     if (!error || typeof error !== "object") return "UNKNOWN";
 
-    const code = textOf(error.code);
-    const text = normalizeText(
-      [error.code, error.shortMessage, error.message, error.reason]
-        .map(textOf)
-        .filter(Boolean)
-        .join(" ")
-    );
+    for (const node of errorChain(error)) {
+      const code = textOf(node.code);
+      const text = normalizeText(
+        [node.code, node.shortMessage, node.message, node.reason]
+          .map(textOf)
+          .filter(Boolean)
+          .join(" ")
+      );
 
-    if (PERMANENT_CODES.has(code) || matchesAny(text, PERMANENT_CODES)) {
-      return "PERMANENT";
-    }
-    if (TRANSIENT_CODES.has(code) || matchesAny(text, TRANSIENT_CODES)) {
-      return "TRANSIENT";
+      if (PERMANENT_CODES.has(code) || matchesAny(text, PERMANENT_CODES)) {
+        return "PERMANENT";
+      }
+      if (TRANSIENT_CODES.has(code) || matchesAny(text, TRANSIENT_CODES)) {
+        return "TRANSIENT";
+      }
+      if (UNKNOWN_CODES.has(code) || matchesAny(text, UNKNOWN_CODES)) {
+        return "UNKNOWN";
+      }
     }
     return "UNKNOWN";
   } catch (err) {
@@ -116,4 +145,5 @@ module.exports = {
   classifyError,
   shouldRetry,
   backoffMs,
+  UNKNOWN_CODES,
 };

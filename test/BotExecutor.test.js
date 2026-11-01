@@ -11,9 +11,12 @@ const RATE_1_TO_1 = ethers.parseEther("1");
 const FLASH_LOAN_PREMIUM_BPS = 5n;
 
 describe("bot/executor maybeExecute", function () {
+  let defaultOwnerAddress = null;
+
   async function deployFixture({ legBackRate = ethers.parseEther("1.02"), borrowedDecimals = 18 } = {}) {
     const [deployer] = await ethers.getSigners();
     const botWallet = ethers.Wallet.createRandom();
+    defaultOwnerAddress = botWallet.address;
     await deployer.sendTransaction({ to: botWallet.address, value: ethers.parseEther("10") });
     const guardDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-guards-"));
 
@@ -97,6 +100,7 @@ describe("bot/executor maybeExecute", function () {
     staticCallError = null,
     estimateGasError = null,
     sendError = null,
+    owner = async () => defaultOwnerAddress,
   } = {}) {
     const calls = [];
     const startArbitrage = async (...args) => {
@@ -117,7 +121,7 @@ describe("bot/executor maybeExecute", function () {
       if (staticCallError) throw staticCallError;
       return true;
     };
-    return { contract: { startArbitrage }, calls };
+    return { contract: { startArbitrage, owner }, calls };
   }
 
   function makeMockTx({ wait }) {
@@ -1019,6 +1023,7 @@ describe("bot/executor maybeExecute", function () {
     const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({ opportunity, config });
     const timeoutError = Object.assign(new Error("timed out"), { code: "TIMEOUT" });
     const contract = {
+      owner: async () => defaultOwnerAddress,
       startArbitrage: async () => ({
         hash: `0x${"22".repeat(32)}`,
         wait: async () => {
@@ -1054,6 +1059,7 @@ describe("bot/executor maybeExecute", function () {
     const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({ opportunity, config });
     let waitCalls = 0;
     const contract = {
+      owner: async () => defaultOwnerAddress,
       startArbitrage: async () =>
         makeMockTx({
           wait: async () => {
@@ -1087,6 +1093,7 @@ describe("bot/executor maybeExecute", function () {
     const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({ opportunity, config });
     let waitCalls = 0;
     const contract = {
+      owner: async () => defaultOwnerAddress,
       startArbitrage: async () =>
         makeMockTx({
           wait: async () => {
@@ -1119,6 +1126,7 @@ describe("bot/executor maybeExecute", function () {
     const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({ opportunity, config });
     let waitCalls = 0;
     const contract = {
+      owner: async () => defaultOwnerAddress,
       startArbitrage: async () =>
         makeMockTx({
           wait: async () => {
@@ -1167,6 +1175,45 @@ describe("bot/executor maybeExecute", function () {
     expect(gasSpent.gasSpentWei).to.equal(reservedGasWei.toString());
   });
 
+  it("fails closed when the contract has no owner function", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+      opportunity,
+      config,
+    });
+    const calls = [];
+    const contract = {
+      startArbitrage: async () => {
+        calls.push("send");
+        return {
+          hash: `0x${"aa".repeat(32)}`,
+          wait: async () => ({ status: 1, gasUsed: 300000n, gasPrice: 1n }),
+        };
+      },
+    };
+    contract.startArbitrage.estimateGas = async () => {
+      calls.push("estimateGas");
+      return 300000n;
+    };
+    contract.startArbitrage.staticCall = async () => {
+      calls.push("staticCall");
+      return true;
+    };
+
+    const result = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+    });
+
+    expect(result.submitted).to.equal(false);
+    expect(result.guard).to.equal("contractOwner");
+    expect(result.error).to.include("OWNER_GUARD_UNAVAILABLE");
+    expect(calls).to.deep.equal(["estimateGas"]);
+  });
+
   it("rechecks the circuit breaker after reservation and before send", async function () {
     const { opportunity, makeConfig } = await deployFixture();
     const breakerPath = path.join(
@@ -1177,6 +1224,7 @@ describe("bot/executor maybeExecute", function () {
     const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({ opportunity, config });
     const methods = [];
     const contract = {
+      owner: async () => defaultOwnerAddress,
       startArbitrage: async () => {
         methods.push("send");
         return { hash: `0x${"33".repeat(32)}`, wait: async () => ({ status: 1 }) };
@@ -1221,6 +1269,7 @@ describe("bot/executor maybeExecute", function () {
     };
     let reservedDuringSend;
     const contract = {
+      owner: async () => defaultOwnerAddress,
       startArbitrage: async () => {
         reservedDuringSend = JSON.parse(fs.readFileSync(config.gasSpentPath, "utf8")).gasSpentWei;
         return {
@@ -1303,6 +1352,7 @@ describe("bot/executor maybeExecute", function () {
     });
     let sendCount = 0;
     const contract = {
+      owner: async () => defaultOwnerAddress,
       startArbitrage: async () => {
         calls.push("send");
         sendCount += 1;
@@ -1557,6 +1607,7 @@ describe("bot/executor maybeExecute", function () {
       const txHash = `0x${"77".repeat(32)}`;
       let statusDuringSend;
       const contract = {
+        owner: async () => defaultOwnerAddress,
         startArbitrage: async () => {
           statusDuringSend = Object.values(
             readJournal(config.executionJournalPath).records
@@ -1597,6 +1648,7 @@ describe("bot/executor maybeExecute", function () {
       let statusDuringWait;
       let hashDuringWait;
       const contract = {
+        owner: async () => defaultOwnerAddress,
         startArbitrage: async () => ({
           hash: txHash,
           nonce: 7,
@@ -1661,6 +1713,7 @@ describe("bot/executor maybeExecute", function () {
       });
       const txHash = `0x${"79".repeat(32)}`;
       const contract = {
+        owner: async () => defaultOwnerAddress,
         startArbitrage: async () => ({
           hash: txHash,
           wait: async () => {
@@ -1712,6 +1765,7 @@ describe("bot/executor maybeExecute", function () {
       };
       const txHash = `0x${"7a".repeat(32)}`;
       const contract = {
+        owner: async () => defaultOwnerAddress,
         startArbitrage: async () => ({
           hash: txHash,
           wait: async () => ({
@@ -1760,6 +1814,7 @@ describe("bot/executor maybeExecute", function () {
       });
       const txHash = `0x${"7b".repeat(32)}`;
       const contract = {
+        owner: async () => defaultOwnerAddress,
         startArbitrage: async () => ({
           hash: txHash,
           wait: async () => ({

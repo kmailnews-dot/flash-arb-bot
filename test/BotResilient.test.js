@@ -75,6 +75,32 @@ describe("bot/resilient", function () {
     expect(backoffMs({ attempt: -2, baseMs: 250 })).to.equal(250);
   });
 
+  it("classifies CALL_EXCEPTION as PERMANENT", function () {
+    expect(classifyError({ code: "CALL_EXCEPTION" })).to.equal("PERMANENT");
+  });
+
+  it("classifies NONCE_EXPIRED as TRANSIENT", function () {
+    expect(classifyError({ code: "NONCE_EXPIRED" })).to.equal("TRANSIENT");
+  });
+
+  it("classifies REPLACEMENT_UNDERPRICED as TRANSIENT", function () {
+    expect(classifyError({ code: "REPLACEMENT_UNDERPRICED" })).to.equal("TRANSIENT");
+  });
+
+  it("classifies TRANSACTION_REPLACED as UNKNOWN", function () {
+    expect(classifyError({ code: "TRANSACTION_REPLACED" })).to.equal("UNKNOWN");
+  });
+
+  it("classifies INVALID_ARGUMENT as PERMANENT", function () {
+    expect(classifyError({ code: "INVALID_ARGUMENT" })).to.equal("PERMANENT");
+  });
+
+  it("classifies a nested TIMEOUT code as TRANSIENT", function () {
+    expect(classifyError({ code: "UNKNOWN_ERROR", error: { code: "TIMEOUT" } })).to.equal(
+      "TRANSIENT"
+    );
+  });
+
   it("does not mutate the error object when classifying it", function () {
     const error = {
       code: "ETIMEDOUT",
