@@ -204,7 +204,7 @@ async function main({
   for (const pair of cycleConfig.pairs) {
     try {
       console.log(`\nScanning ${pair.label} ...`);
-      const results = await scanPairImpl({ provider, pair, config: cycleConfig, gasPriceWei, ethUsdPrice });
+      const results = await scanPairImpl({ provider, pair, config: executionConfig, gasPriceWei, ethUsdPrice });
 
       for (const result of results) {
         scanned += 1;

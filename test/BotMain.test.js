@@ -128,6 +128,108 @@ describe("bot/index main", function () {
     expect(warnings.join("\n")).to.include("5 bps");
   });
 
+  it("passes the on-chain Aave premium to scanPair", async function () {
+    const abi = ethers.AbiCoder.defaultAbiCoder();
+    const provider = {
+      async getNetwork() {
+        return { chainId: 42161n };
+      },
+      async getFeeData() {
+        return { gasPrice: 1n, maxFeePerGas: null };
+      },
+      async call() {
+        return abi.encode(["uint128"], [30n]);
+      },
+    };
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-premium-scan-"));
+    const config = {
+      dryRun: true,
+      pairs: [
+        {
+          label: "BOR/MID premium pair",
+          borrowedToken: { address: ethers.Wallet.createRandom().address, decimals: 18, symbol: "BOR" },
+          intermediateToken: { address: ethers.Wallet.createRandom().address, decimals: 18, symbol: "MID" },
+        },
+      ],
+      aaveFlashLoanPremiumBps: 5n,
+      ethUsdRoute: null,
+      maxRpcErrorsPerScan: 0,
+      scanLogPath: path.join(tmpDir, "scans.jsonl"),
+      adaptivePath: path.join(tmpDir, "adaptive.json"),
+      executionJournalPath: path.join(tmpDir, "executions.json"),
+    };
+    const premiums = [];
+
+    await main({
+      provider,
+      config,
+      scanPair: async ({ config: scanConfig }) => {
+        premiums.push(scanConfig.aaveFlashLoanPremiumBps);
+        return [];
+      },
+    });
+
+    expect(premiums).to.deep.equal([30n]);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("passes the same on-chain premium to scanPair and maybeExecute", async function () {
+    const abi = ethers.AbiCoder.defaultAbiCoder();
+    const provider = {
+      async getNetwork() {
+        return { chainId: 42161n };
+      },
+      async getFeeData() {
+        return { gasPrice: 1n, maxFeePerGas: null };
+      },
+      async call() {
+        return abi.encode(["uint128"], [30n]);
+      },
+    };
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-premium-exec-"));
+    const config = {
+      dryRun: true,
+      pairs: [
+        {
+          label: "BOR/MID premium pair",
+          borrowedToken: { address: ethers.Wallet.createRandom().address, decimals: 18, symbol: "BOR" },
+          intermediateToken: { address: ethers.Wallet.createRandom().address, decimals: 18, symbol: "MID" },
+        },
+      ],
+      aaveFlashLoanPremiumBps: 5n,
+      ethUsdRoute: null,
+      maxRpcErrorsPerScan: 0,
+      scanLogPath: path.join(tmpDir, "scans.jsonl"),
+      adaptivePath: path.join(tmpDir, "adaptive.json"),
+      executionJournalPath: path.join(tmpDir, "executions.json"),
+    };
+    const scanPremiums = [];
+    const executePremiums = [];
+    const opportunity = {
+      tradeSizeHuman: "1000",
+      grossProfit: 1n,
+      netProfitUsd: 10,
+      isOpportunity: true,
+    };
+
+    await main({
+      provider,
+      config,
+      scanPair: async ({ config: scanConfig }) => {
+        scanPremiums.push(scanConfig.aaveFlashLoanPremiumBps);
+        return [opportunity];
+      },
+      maybeExecute: async ({ config: execConfig }) => {
+        executePremiums.push(execConfig.aaveFlashLoanPremiumBps);
+        return { submitted: false };
+      },
+    });
+
+    expect(scanPremiums).to.deep.equal([30n]);
+    expect(executePremiums).to.deep.equal([30n]);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
   it("refuses live execution when the ETH/USD quote failed, without scanning or executing", async function () {
     let scans = 0;
     let executions = 0;
