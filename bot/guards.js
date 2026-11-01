@@ -1,6 +1,10 @@
 const fs = require("fs/promises");
 const path = require("path");
 const { ethers } = require("ethers");
+const {
+  listRecentTerminalExecutions,
+  DEFAULT_EXECUTION_JOURNAL_PATH,
+} = require("./persist");
 
 const LOG_DIR = path.resolve(__dirname, "..", "logs");
 const DEFAULT_GAS_SPENT_PATH = path.join(LOG_DIR, "gas_spent.json");
@@ -163,7 +167,58 @@ async function checkCircuitBreaker({ filePath = DEFAULT_CIRCUIT_BREAKER_PATH, no
     await writeState(filePath, { consecutiveFailures: 0, openUntil: null });
     return { ok: true, consecutiveFailures: 0, openUntil: null };
   }
-  return { ok: true, ...state };
+
+  const revertRateWindowSize = arguments[0]?.revertRateWindowSize ?? 20;
+  const revertRateThreshold = arguments[0]?.revertRateThreshold ?? 0.6;
+  const unknownRateWindowSize = arguments[0]?.unknownRateWindowSize ?? 20;
+  const unknownRateThreshold = arguments[0]?.unknownRateThreshold ?? 0.3;
+  const cooldownMinutes = arguments[0]?.cooldownMinutes ?? 60;
+  const executionJournalPath =
+    arguments[0]?.executionJournalPath || DEFAULT_EXECUTION_JOURNAL_PATH;
+
+  const windowRecords = await listRecentTerminalExecutions(
+    Math.max(revertRateWindowSize, unknownRateWindowSize),
+    executionJournalPath
+  ).catch(() => []);
+  const revertRecords = windowRecords.slice(0, revertRateWindowSize);
+  const unknownRecords = windowRecords.slice(0, unknownRateWindowSize);
+  const revertWindowFull = revertRecords.length >= revertRateWindowSize;
+  const unknownWindowFull = unknownRecords.length >= unknownRateWindowSize;
+  const revertRate =
+    revertRecords.length === 0
+      ? 0
+      : revertRecords.filter((r) => r.status === "REVERTED").length / revertRecords.length;
+  const unknownRate =
+    unknownRecords.length === 0
+      ? 0
+      : unknownRecords.filter((r) => r.status === "UNKNOWN" || r.status === "DROPPED").length /
+        unknownRecords.length;
+
+  if (revertWindowFull && revertRate > revertRateThreshold) {
+    const openUntil = now + cooldownMinutes * 60_000;
+    await writeState(filePath, { consecutiveFailures: state.consecutiveFailures, openUntil });
+    return {
+      ok: false,
+      ...state,
+      openUntil,
+      revertRate,
+      unknownRate,
+      error: `CIRCUIT_BREAKER_OPEN: revert rate ${(revertRate * 100).toFixed(0)}% over last ${revertRateWindowSize} (threshold ${(revertRateThreshold * 100).toFixed(0)}%)`,
+    };
+  }
+  if (unknownWindowFull && unknownRate > unknownRateThreshold) {
+    const openUntil = now + cooldownMinutes * 60_000;
+    await writeState(filePath, { consecutiveFailures: state.consecutiveFailures, openUntil });
+    return {
+      ok: false,
+      ...state,
+      openUntil,
+      revertRate,
+      unknownRate,
+      error: `CIRCUIT_BREAKER_OPEN: unknown rate ${(unknownRate * 100).toFixed(0)}% over last ${unknownRateWindowSize} (threshold ${(unknownRateThreshold * 100).toFixed(0)}%)`,
+    };
+  }
+  return { ok: true, ...state, revertRate, unknownRate };
 }
 
 async function recordSuccess({ filePath = DEFAULT_CIRCUIT_BREAKER_PATH } = {}) {

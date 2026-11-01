@@ -284,7 +284,15 @@ async function execute({
   }
 
   const breaker = await runGuard("circuit breaker", () =>
-    checkCircuitBreaker({ filePath: settings.circuitBreakerPath })
+    checkCircuitBreaker({
+      filePath: settings.circuitBreakerPath,
+      executionJournalPath: config.executionJournalPath,
+      revertRateWindowSize: config.revertRateWindowSize,
+      revertRateThreshold: config.revertRateThreshold,
+      unknownRateWindowSize: config.unknownRateWindowSize,
+      unknownRateThreshold: config.unknownRateThreshold,
+      cooldownMinutes: config.circuitBreakerCooldownMinutes,
+    })
   );
   if (!breaker.ok) {
     console.log(`  [CIRCUIT BREAKER] ${breaker.error} - transaction not sent.`);
@@ -359,7 +367,15 @@ async function execute({
   }
 
   const breakerBeforeSend = await runGuard("circuit breaker", () =>
-    checkCircuitBreaker({ filePath: settings.circuitBreakerPath })
+    checkCircuitBreaker({
+      filePath: settings.circuitBreakerPath,
+      executionJournalPath: config.executionJournalPath,
+      revertRateWindowSize: config.revertRateWindowSize,
+      revertRateThreshold: config.revertRateThreshold,
+      unknownRateWindowSize: config.unknownRateWindowSize,
+      unknownRateThreshold: config.unknownRateThreshold,
+      cooldownMinutes: config.circuitBreakerCooldownMinutes,
+    })
   );
   if (!breakerBeforeSend.ok) {
     // Réservation posée juste au-dessus : aucune tx n'a été envoyée, on la libère.

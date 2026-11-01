@@ -14,6 +14,7 @@ const {
   recordFailure,
   recordSuccess,
 } = require("../bot/guards");
+const { writeExecutionJournal } = require("../bot/persist");
 
 describe("bot/guards", function () {
   let guardDir;
@@ -152,6 +153,97 @@ describe("bot/guards", function () {
     await recordSuccess({ filePath: breakerPath });
     const afterSuccess = JSON.parse(fs.readFileSync(breakerPath, "utf8"));
     expect(afterSuccess.consecutiveFailures).to.equal(0);
+  });
+});
+
+describe("bot/guards breaker windows", function () {
+  let guardDir;
+
+  beforeEach(function () {
+    guardDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-guard-windows-"));
+  });
+
+  afterEach(function () {
+    fs.rmSync(guardDir, { recursive: true, force: true });
+  });
+
+  async function seedJournal(filePath, statuses) {
+    const records = {};
+    statuses.forEach((status, index) => {
+      records[`exec-${index}`] = {
+        id: `exec-${index}`,
+        status,
+        lastUpdateAt: 1000 + index,
+      };
+    });
+    await writeExecutionJournal({ version: 1, records }, filePath);
+  }
+
+  it("opens the breaker when the revert rate exceeds the threshold", async function () {
+    const executionJournalPath = path.join(guardDir, "executions.json");
+    const now = Date.parse("2026-10-27T12:00:00.000Z");
+    await seedJournal(executionJournalPath, [
+      ...Array(15).fill("REVERTED"),
+      ...Array(5).fill("CONFIRMED"),
+    ]);
+
+    const result = await checkCircuitBreaker({
+      filePath: path.join(guardDir, "circuit_breaker.json"),
+      executionJournalPath,
+      now,
+    });
+
+    expect(result.ok).to.equal(false);
+    expect(result.error).to.include("revert rate");
+    expect(result.revertRate).to.equal(0.75);
+    expect(result.openUntil).to.equal(now + 60 * 60_000);
+  });
+
+  it("keeps the breaker closed when the revert rate is below the threshold", async function () {
+    const executionJournalPath = path.join(guardDir, "executions.json");
+    await seedJournal(executionJournalPath, [
+      ...Array(5).fill("REVERTED"),
+      ...Array(15).fill("CONFIRMED"),
+    ]);
+
+    const result = await checkCircuitBreaker({
+      filePath: path.join(guardDir, "circuit_breaker.json"),
+      executionJournalPath,
+    });
+
+    expect(result.ok).to.equal(true);
+    expect(result.revertRate).to.equal(0.25);
+  });
+
+  it("opens the breaker when the unknown rate exceeds the threshold", async function () {
+    const executionJournalPath = path.join(guardDir, "executions.json");
+    const now = Date.parse("2026-10-27T12:00:00.000Z");
+    await seedJournal(executionJournalPath, [
+      ...Array(10).fill("UNKNOWN"),
+      ...Array(10).fill("CONFIRMED"),
+    ]);
+
+    const result = await checkCircuitBreaker({
+      filePath: path.join(guardDir, "circuit_breaker.json"),
+      executionJournalPath,
+      now,
+    });
+
+    expect(result.ok).to.equal(false);
+    expect(result.error).to.include("unknown rate");
+    expect(result.unknownRate).to.equal(0.5);
+    expect(result.openUntil).to.equal(now + 60 * 60_000);
+  });
+
+  it("keeps the breaker closed when the execution journal is missing", async function () {
+    const result = await checkCircuitBreaker({
+      filePath: path.join(guardDir, "circuit_breaker.json"),
+      executionJournalPath: path.join(guardDir, "missing.json"),
+    });
+
+    expect(result.ok).to.equal(true);
+    expect(result.revertRate).to.equal(0);
+    expect(result.unknownRate).to.equal(0);
   });
 });
 

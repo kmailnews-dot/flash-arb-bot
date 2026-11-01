@@ -278,6 +278,10 @@ function validateScannerConfig({
   throttleMinIntervalMs,
   rpcTimeoutMs,
   txInFlightMaxMs,
+  revertRateWindowSize = 20,
+  revertRateThreshold = 0.6,
+  unknownRateWindowSize = 20,
+  unknownRateThreshold = 0.3,
 }) {
   if (minProfitUsd !== undefined && minProfitUsd !== null) {
     if (typeof minProfitUsd !== "number" || !Number.isFinite(minProfitUsd) || minProfitUsd < 0) {
@@ -339,6 +343,28 @@ function validateScannerConfig({
       throw new Error("TX_IN_FLIGHT_MAX_MS must be a positive integer.");
     }
   }
+  if (!Number.isInteger(revertRateWindowSize) || revertRateWindowSize <= 0) {
+    throw new Error("REVERT_RATE_WINDOW_SIZE must be a positive integer.");
+  }
+  if (
+    typeof revertRateThreshold !== "number" ||
+    !Number.isFinite(revertRateThreshold) ||
+    revertRateThreshold <= 0 ||
+    revertRateThreshold > 1
+  ) {
+    throw new Error("REVERT_RATE_THRESHOLD must be a finite number > 0 and <= 1.");
+  }
+  if (!Number.isInteger(unknownRateWindowSize) || unknownRateWindowSize <= 0) {
+    throw new Error("UNKNOWN_RATE_WINDOW_SIZE must be a positive integer.");
+  }
+  if (
+    typeof unknownRateThreshold !== "number" ||
+    !Number.isFinite(unknownRateThreshold) ||
+    unknownRateThreshold <= 0 ||
+    unknownRateThreshold > 1
+  ) {
+    throw new Error("UNKNOWN_RATE_THRESHOLD must be a finite number > 0 and <= 1.");
+  }
 }
 
 const slippageBps = validateSlippageBps();
@@ -384,6 +410,10 @@ const config = {
   maxDailyGasEth: optionalNumber("MAX_DAILY_GAS_ETH", 0.01),
   maxConsecutiveFailures: optionalNumber("MAX_CONSECUTIVE_FAILURES", 5),
   circuitBreakerCooldownMinutes: optionalNumber("CIRCUIT_BREAKER_COOLDOWN_MINUTES", 60),
+  revertRateWindowSize: optionalNumber("REVERT_RATE_WINDOW_SIZE", 20),
+  revertRateThreshold: optionalNumber("REVERT_RATE_THRESHOLD", 0.6),
+  unknownRateWindowSize: optionalNumber("UNKNOWN_RATE_WINDOW_SIZE", 20),
+  unknownRateThreshold: optionalNumber("UNKNOWN_RATE_THRESHOLD", 0.3),
   gasSpentPath: optionalString("GAS_SPENT_PATH", path.join(LOG_DIR, "gas_spent.json")),
   circuitBreakerPath: optionalString("CIRCUIT_BREAKER_PATH", path.join(LOG_DIR, "circuit_breaker.json")),
 
@@ -410,6 +440,10 @@ validateScannerConfig({
   throttleMinIntervalMs: config.throttleMinIntervalMs,
   rpcTimeoutMs: config.rpcTimeoutMs,
   txInFlightMaxMs: config.txInFlightMaxMs,
+  revertRateWindowSize: config.revertRateWindowSize,
+  revertRateThreshold: config.revertRateThreshold,
+  unknownRateWindowSize: config.unknownRateWindowSize,
+  unknownRateThreshold: config.unknownRateThreshold,
 });
 
 module.exports = config;

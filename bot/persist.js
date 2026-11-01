@@ -169,6 +169,18 @@ async function listPendingExecutions(filePath = DEFAULT_EXECUTION_JOURNAL_PATH) 
     .sort((a, b) => (a.submittedAt ?? 0) - (b.submittedAt ?? 0));
 }
 
+async function listRecentTerminalExecutions(
+  limit = 20,
+  filePath = DEFAULT_EXECUTION_JOURNAL_PATH
+) {
+  const journal = await readExecutionJournal(filePath);
+  const TERMINAL = new Set(["CONFIRMED", "REVERTED", "DROPPED", "UNKNOWN"]);
+  return Object.values(journal.records)
+    .filter((r) => TERMINAL.has(r.status))
+    .sort((a, b) => (b.lastUpdateAt ?? 0) - (a.lastUpdateAt ?? 0))
+    .slice(0, limit);
+}
+
 module.exports = {
   DEFAULT_SCAN_LOG_PATH,
   DEFAULT_PNL_LOG_PATH,
@@ -184,4 +196,5 @@ module.exports = {
   upsertExecutionRecord,
   deleteExecutionRecord,
   listPendingExecutions,
+  listRecentTerminalExecutions,
 };

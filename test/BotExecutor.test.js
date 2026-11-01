@@ -5,6 +5,7 @@ const os = require("os");
 const path = require("path");
 const { maybeExecute, gasCostInBorrowedToken, buildFeeOverrides } = require("../bot/executor");
 const { FLASH_ARB_EXECUTOR_ABI } = require("../bot/abis");
+const { writeExecutionJournal } = require("../bot/persist");
 
 const RATE_1_TO_1 = ethers.parseEther("1");
 const FLASH_LOAN_PREMIUM_BPS = 5n;
@@ -761,6 +762,33 @@ describe("bot/executor maybeExecute", function () {
     expect(blocked.guard).to.equal("circuitBreaker");
     expect(blocked.error).to.include("CIRCUIT_BREAKER_OPEN");
     expect(await ethers.provider.getTransactionCount(botWallet.address)).to.equal(nonceBefore);
+  });
+
+  it("blocks when the revert rate window exceeds threshold", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const records = {};
+    for (let i = 0; i < 20; i += 1) {
+      records[`exec-${i}`] = {
+        id: `exec-${i}`,
+        status: i < 15 ? "REVERTED" : "CONFIRMED",
+        lastUpdateAt: 1000 + i,
+      };
+    }
+    await writeExecutionJournal({ version: 1, records }, config.executionJournalPath);
+    const { contract, calls } = makeSpyContract();
+
+    const result = await maybeExecute({
+      opportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+    });
+
+    expect(result.submitted).to.equal(false);
+    expect(result.guard).to.equal("circuitBreaker");
+    expect(result.error).to.include("revert rate");
+    expect(calls.map((entry) => entry.method)).to.deep.equal(["estimateGas"]);
   });
 
   it("skips when the fresh net profit is below MIN_PROFIT_USD", async function () {
