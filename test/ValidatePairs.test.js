@@ -9,6 +9,8 @@ const V3_SWAP_ROUTER_02 = "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45";
 
 function makePair() {
   return {
+    profile: "majors",
+    minProfitBps: 10,
     borrowedToken: { address: BORROWED, decimals: 18 },
     intermediateToken: { address: INTERMEDIATE, decimals: 18 },
     legOut: { kind: "V2", router: ROUTER_OUT, tokenOut: INTERMEDIATE },
@@ -160,6 +162,8 @@ describe("bot/config validatePairs", function () {
 
   it("accepts decimals 0 and 18 on both tokens", function () {
     const pairZero = pairWithBorrowed({ decimals: 0 });
+    pairZero.profile = "longtail";
+    pairZero.minProfitBps = 60;
     pairZero.tradeSizes = ["1"];
     expect(() => validatePairs([pairZero])).to.not.throw();
 
@@ -240,6 +244,68 @@ describe("bot/config validatePairs", function () {
     expect(() => validatePairs([pair])).to.throw(
       "PAIRS_CONFIG_JSON[0].minProfitBps must be an integer between 0 and 10000."
     );
+  });
+
+  it("rejects a pair without profile", function () {
+    const pair = makePair();
+    delete pair.profile;
+
+    expect(() => validatePairs([pair])).to.throw(
+      'PAIRS_CONFIG_JSON[0].profile must be "majors" or "longtail".'
+    );
+  });
+
+  it("rejects a majors pair with minProfitBps > 15", function () {
+    const pair = makePair();
+    pair.minProfitBps = 16;
+
+    expect(() => validatePairs([pair])).to.throw(
+      'PAIRS_CONFIG_JSON[0].minProfitBps must be between 10 and 15 for profile "majors".'
+    );
+  });
+
+  it("rejects a majors pair with tradeSize > 0.1", function () {
+    const pair = makePair();
+    pair.tradeSizes = ["0.5"];
+
+    expect(() => validatePairs([pair])).to.throw(
+      'PAIRS_CONFIG_JSON[0].tradeSizes contains 0.5, above the 0.1 cap for profile "majors".'
+    );
+  });
+
+  it("rejects a longtail pair with minProfitBps < 60", function () {
+    const pair = makePair();
+    pair.profile = "longtail";
+    pair.minProfitBps = 59;
+    pair.tradeSizes = ["1"];
+
+    expect(() => validatePairs([pair])).to.throw(
+      'PAIRS_CONFIG_JSON[0].minProfitBps must be between 60 and 100 for profile "longtail".'
+    );
+  });
+
+  it("rejects a longtail pair with tradeSize > 1", function () {
+    const pair = makePair();
+    pair.profile = "longtail";
+    pair.minProfitBps = 60;
+    pair.tradeSizes = ["1.1"];
+
+    expect(() => validatePairs([pair])).to.throw(
+      'PAIRS_CONFIG_JSON[0].tradeSizes contains 1.1, above the 1 cap for profile "longtail".'
+    );
+  });
+
+  it("accepts a valid majors pair", function () {
+    expect(() => validatePairs([makePair()])).to.not.throw();
+  });
+
+  it("accepts a valid longtail pair", function () {
+    const pair = makePair();
+    pair.profile = "longtail";
+    pair.minProfitBps = 60;
+    pair.tradeSizes = ["1"];
+
+    expect(() => validatePairs([pair])).to.not.throw();
   });
 
   it("accepts a valid feeBps override", function () {

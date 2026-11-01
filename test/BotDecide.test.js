@@ -162,6 +162,58 @@ describe("bot/decide decide", function () {
     expect(result.reason).to.equal("OK");
   });
 
+  it("rejects when adaptive raises minProfitBps above pair floor", function () {
+    const pairOverride = { ...pair, minProfitBps: 15 };
+    const opportunity = {
+      ...makeOpportunity({ grossProfit: ethers.parseEther("1.8") + GAS_COST_AT_2_WEI }),
+      pair: pairOverride,
+    };
+
+    const result = runDecide({
+      opportunity,
+      config: makeConfig({ minProfitUsd: 0, minProfitBps: 30, effectiveMinProfitBps: 20 }),
+    });
+
+    expect(result.netProfitBps).to.equal(18n);
+    expect(result.shouldExecute).to.equal(false);
+    expect(result.reason).to.include("fresh net profit below MIN_PROFIT_BPS");
+    expect(result.reason).to.include("thresholdBps=20");
+  });
+
+  it("accepts when adaptive wants to lower below pair floor", function () {
+    const pairOverride = { ...pair, minProfitBps: 15 };
+    const opportunity = {
+      ...makeOpportunity({ grossProfit: ethers.parseEther("1.6") + GAS_COST_AT_2_WEI }),
+      pair: pairOverride,
+    };
+
+    const result = runDecide({
+      opportunity,
+      config: makeConfig({ minProfitUsd: 0, minProfitBps: 30, effectiveMinProfitBps: 5 }),
+    });
+
+    expect(result.netProfitBps).to.equal(16n);
+    expect(result.shouldExecute).to.equal(true);
+    expect(result.reason).to.equal("OK");
+  });
+
+  it("falls back to pair.minProfitBps when adaptive is absent", function () {
+    const pairOverride = { ...pair, minProfitBps: 15 };
+    const opportunity = {
+      ...makeOpportunity({ grossProfit: ethers.parseEther("1.6") + GAS_COST_AT_2_WEI }),
+      pair: pairOverride,
+    };
+
+    const result = runDecide({
+      opportunity,
+      config: makeConfig({ minProfitUsd: 0, minProfitBps: 30 }),
+    });
+
+    expect(result.netProfitBps).to.equal(16n);
+    expect(result.shouldExecute).to.equal(true);
+    expect(result.reason).to.equal("OK");
+  });
+
   it("refuse quand maxFeePerGas dépasse le plafond de profit", function () {
     const result = runDecide({
       opportunity: makeOpportunity({ grossProfit: ethers.parseEther("10") }),

@@ -127,7 +127,9 @@ function decideInternal({ opportunity, config, feeData, estimatedGas }) {
   const netProfitFresh = freshGrossProfit - gasCostInToken;
   const netProfitBps = amountIn > 0n ? (netProfitFresh * BPS_DENOMINATOR) / amountIn : 0n;
   const minProfitUsdConfigured = config.minProfitUsd !== undefined && config.minProfitUsd !== null;
-  const minProfitBpsConfigured = config.minProfitBps !== undefined && config.minProfitBps !== null;
+  const minProfitBpsConfigured =
+    (config.minProfitBps !== undefined && config.minProfitBps !== null) ||
+    (config.effectiveMinProfitBps !== undefined && config.effectiveMinProfitBps !== null);
 
   let tokenUsdPrice = null;
   if (minProfitUsdConfigured) {
@@ -179,7 +181,7 @@ function decideInternal({ opportunity, config, feeData, estimatedGas }) {
     });
     if (netProfitFresh < minProfitUsdInToken) {
       const bpsDetail = minProfitBpsConfigured
-        ? `, netBps=${netProfitBps}, thresholdBps=${BigInt(pair.minProfitBps ?? config.minProfitBps)}`
+        ? `, netBps=${netProfitBps}, thresholdBps=${BigInt(Math.max(pair.minProfitBps ?? config.minProfitBps ?? 0, config.effectiveMinProfitBps ?? pair.minProfitBps ?? config.minProfitBps ?? 0))}`
         : "";
       return buildDecision({
         shouldExecute: false,
@@ -202,7 +204,9 @@ function decideInternal({ opportunity, config, feeData, estimatedGas }) {
   }
 
   if (minProfitBpsConfigured) {
-    const minProfitBps = BigInt(pair.minProfitBps ?? config.minProfitBps);
+    const pairFloorBps = pair.minProfitBps ?? config.minProfitBps ?? 0;
+    const adaptiveBps = config.effectiveMinProfitBps ?? pairFloorBps;
+    const minProfitBps = BigInt(Math.max(pairFloorBps, adaptiveBps));
     const meetsMinProfitBps =
       amountIn > 0n && netProfitFresh * BPS_DENOMINATOR >= amountIn * minProfitBps;
     if (!meetsMinProfitBps) {

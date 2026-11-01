@@ -345,6 +345,40 @@ describe("bot/executor maybeExecute", function () {
     expect(send.args[2].minProfitBps).to.equal(10n);
   });
 
+  it("uses adaptive minProfitBps when it exceeds pair floor", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig({ effectiveMinProfitBps: 20 });
+    const { contract, calls } = makeSpyContract();
+    const pairOverride = { ...opportunity.pair, minProfitBps: 10 };
+    const feeData = await ethers.provider.getFeeData();
+    const decisionGasPriceWei = feeData.maxFeePerGas ?? feeData.gasPrice;
+    const gasLimitWithMargin = (300000n * 11500n) / 10000n;
+    const gasCost = gasCostInBorrowedToken({
+      gasCostWei: gasLimitWithMargin * decisionGasPriceWei,
+      pair: pairOverride,
+      config,
+    });
+    const grossProfitFresh = gasCost + ethers.parseEther("10");
+    const inferredPremium = opportunity.finalOut - opportunity.amountIn - opportunity.grossProfit;
+    const finalOutFresh = opportunity.amountIn + inferredPremium + grossProfitFresh;
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : finalOutFresh;
+
+    const result = await maybeExecute({
+      opportunity: { ...opportunity, pair: pairOverride },
+      provider: ethers.provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+
+    expect(result.submitted).to.equal(true);
+    const staticCall = calls.find((entry) => entry.method === "staticCall");
+    const send = calls.find((entry) => entry.method === "send");
+    expect(staticCall.args[2].minProfitBps).to.equal(20n);
+    expect(send.args[2].minProfitBps).to.equal(20n);
+  });
+
   it("calls estimateGas, then the final staticCall, then sends", async function () {
     const { opportunity, makeConfig } = await deployFixture();
     const config = makeConfig();

@@ -7,6 +7,8 @@ const ROUTER_BACK = "0x4444444444444444444444444444444444444444";
 
 function makePair() {
   return {
+    profile: "majors",
+    minProfitBps: 10,
     borrowedToken: { address: BORROWED, decimals: 18 },
     intermediateToken: { address: INTERMEDIATE, decimals: 18 },
     legOut: { kind: "V2", router: ROUTER_OUT, tokenOut: INTERMEDIATE },

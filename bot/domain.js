@@ -22,6 +22,7 @@
  * Paire de tokens et route de swap aller-retour.
  * @typedef {Object} Pair
  * @property {string} [label]
+ * @property {string} profile
  * @property {Token} borrowedToken
  * @property {Token} intermediateToken
  * @property {Leg} legOut

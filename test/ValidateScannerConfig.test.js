@@ -23,6 +23,8 @@ const previousEnv = {
 process.env.ARBITRUM_RPC_URL = previousEnv.ARBITRUM_RPC_URL || "http://127.0.0.1:8545";
 process.env.PAIRS_CONFIG_JSON = JSON.stringify([
   {
+    profile: "majors",
+    minProfitBps: 10,
     borrowedToken: { address: BORROWED, decimals: 18 },
     intermediateToken: { address: INTERMEDIATE, decimals: 18 },
     legOut: { kind: "V2", router: ROUTER_OUT, tokenOut: INTERMEDIATE },
@@ -156,6 +158,8 @@ describe("bot/config validateScannerConfig", function () {
     process.env.ARBITRUM_RPC_URL = previous.ARBITRUM_RPC_URL || "http://127.0.0.1:8545";
     process.env.PAIRS_CONFIG_JSON = JSON.stringify([
       {
+        profile: "majors",
+        minProfitBps: 10,
         borrowedToken: { address: BORROWED, decimals: 18 },
         intermediateToken: { address: INTERMEDIATE, decimals: 18 },
         legOut: { kind: "V2", router: ROUTER_OUT, tokenOut: INTERMEDIATE },

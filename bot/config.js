@@ -31,6 +31,12 @@ function validateAddress(value, path) {
   }
 }
 
+const VALID_PROFILES = new Set(["majors", "longtail"]);
+const PROFILE_BOUNDS = {
+  majors: { minProfitBps: [10, 15], maxTradeSize: 0.1 },
+  longtail: { minProfitBps: [60, 100], maxTradeSize: 1 },
+};
+
 function validatePairs(pairs) {
   return pairs.map((pair, index) => {
     const prefix = `PAIRS_CONFIG_JSON[${index}]`;
@@ -103,6 +109,23 @@ function validatePairs(pairs) {
     if (pair.minProfitBps !== undefined && pair.minProfitBps !== null) {
       if (!Number.isInteger(pair.minProfitBps) || pair.minProfitBps < 0 || pair.minProfitBps > 10000) {
         throw new Error(`${prefix}.minProfitBps must be an integer between 0 and 10000.`);
+      }
+    }
+
+    if (typeof pair.profile !== "string" || !VALID_PROFILES.has(pair.profile)) {
+      throw new Error(`${prefix}.profile must be "majors" or "longtail".`);
+    }
+    const bounds = PROFILE_BOUNDS[pair.profile];
+    if (pair.minProfitBps === undefined || pair.minProfitBps === null) {
+      throw new Error(`${prefix}.minProfitBps is required for profile "${pair.profile}".`);
+    }
+    if (pair.minProfitBps < bounds.minProfitBps[0] || pair.minProfitBps > bounds.minProfitBps[1]) {
+      throw new Error(`${prefix}.minProfitBps must be between ${bounds.minProfitBps[0]} and ${bounds.minProfitBps[1]} for profile "${pair.profile}".`);
+    }
+    for (const size of pair.tradeSizes) {
+      const num = parseFloat(size);
+      if (num > bounds.maxTradeSize) {
+        throw new Error(`${prefix}.tradeSizes contains ${size}, above the ${bounds.maxTradeSize} cap for profile "${pair.profile}".`);
       }
     }
 
