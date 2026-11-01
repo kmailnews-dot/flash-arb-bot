@@ -279,6 +279,27 @@ describe("bot/config validatePairs", function () {
     );
   });
 
+  it("keeps major pair examples at or below 12 bps (P1-11)", function () {
+    const fs = require("fs");
+    const env = fs.readFileSync(".env.example", "utf8");
+    const matches = [...env.matchAll(/# PAIRS_CONFIG_JSON='(\[.*?\])'/g)];
+    expect(matches).to.not.be.empty;
+    for (const match of matches) {
+      const pairs = JSON.parse(match[1]);
+      for (const pair of pairs) {
+        const premiumBps = 5;
+        const feeA =
+          pair.legOut.feeBps ??
+          (pair.legOut.kind === "V3" ? Math.floor(pair.legOut.v3Fee / 100) : 30);
+        const feeB =
+          pair.legBack.feeBps ??
+          (pair.legBack.kind === "V3" ? Math.floor(pair.legBack.v3Fee / 100) : 30);
+        const totalFeeBps = premiumBps + feeA + feeB;
+        expect(totalFeeBps, `${pair.label} totalFeeBps`).to.be.at.most(12);
+      }
+    }
+  });
+
   it("rejects a missing or invalid legOut.kind", function () {
     const pair = makePair();
     delete pair.legOut.kind;
