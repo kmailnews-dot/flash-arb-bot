@@ -71,8 +71,9 @@ async function main() {
   console.log("\nLocal mocks deployed. Paste the following into your .env (or export them) to run the bot:\n");
   console.log(`ARBITRUM_RPC_URL=http://127.0.0.1:8545`);
   console.log(`CONTRACT_ADDRESS=${await executor.getAddress()}`);
-  console.log(`PRIVATE_KEY=${process.env.LOCAL_HARDHAT_PRIVATE_KEY || "<paste a private key printed by `npx hardhat node`>"}`);
+  console.log('PRIVATE_KEY=<paste a private key printed by `npx hardhat node`>');
   console.log(`AAVE_FLASH_LOAN_PREMIUM_BPS=5`);
+  console.log(`EXPECTED_CHAIN_ID=31337`);
   console.log(`ETH_USD_ROUTE_JSON='${JSON.stringify(ethUsdRoute)}'`);
   console.log(`PAIRS_CONFIG_JSON='${JSON.stringify(pairsConfig)}'`);
   console.log("\nNote: the mock USDC token above is 18 decimals (MockERC20 doesn't mimic real USDC's 6), so the");

@@ -41,6 +41,7 @@ jobs:
           DRY_RUN: "true"
           AAVE_FLASH_LOAN_PREMIUM_BPS: ${{ secrets.AAVE_FLASH_LOAN_PREMIUM_BPS || '5' }}
           MIN_PROFIT_USD: ${{ secrets.MIN_PROFIT_USD || '5' }}
+          MIN_PROFIT_BPS: ${{ secrets.MIN_PROFIT_BPS || '30' }}
           MIN_PROFIT_BUFFER_BPS: ${{ secrets.MIN_PROFIT_BUFFER_BPS || '5000' }}
           SLIPPAGE_BPS: ${{ secrets.SLIPPAGE_BPS || '50' }}
           GAS_LIMIT_ESTIMATE: ${{ secrets.GAS_LIMIT_ESTIMATE || '700000' }}

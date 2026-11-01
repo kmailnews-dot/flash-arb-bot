@@ -330,7 +330,8 @@ This is also what the test suite (`npm test`) exercises at the unit level — se
 
 **Known local-deployment limitation:** `npx hardhat run scripts/deploy.js --network hardhat` fails
 because chainId `31337` has no Aave V3 addresses in `bot/networks.js`. This is a known limitation,
-not a bug; use `scripts/seedLocalMocks.js` above for a local mock deployment.
+not a bug; use `scripts/seedLocalMocks.js` above for a local mock deployment. The seed script prints
+`EXPECTED_CHAIN_ID=31337` explicitly so the chainId guard accepts the local Hardhat chain.
 
 ## Fork integration test (optional)
 
