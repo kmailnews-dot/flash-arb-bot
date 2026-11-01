@@ -106,6 +106,22 @@ function validatePairs(pairs) {
       }
     }
 
+    if (pair.legOut.feeBps !== undefined && pair.legOut.feeBps !== null) {
+      if (!Number.isInteger(pair.legOut.feeBps) || pair.legOut.feeBps < 0) {
+        throw new Error(`${prefix}.legOut.feeBps must be a non-negative integer.`);
+      }
+    }
+    if (pair.legBack.feeBps !== undefined && pair.legBack.feeBps !== null) {
+      if (!Number.isInteger(pair.legBack.feeBps) || pair.legBack.feeBps < 0) {
+        throw new Error(`${prefix}.legBack.feeBps must be a non-negative integer.`);
+      }
+    }
+    if (pair.maxTotalFeeBps !== undefined && pair.maxTotalFeeBps !== null) {
+      if (!Number.isInteger(pair.maxTotalFeeBps) || pair.maxTotalFeeBps < 0) {
+        throw new Error(`${prefix}.maxTotalFeeBps must be a non-negative integer.`);
+      }
+    }
+
     if (pair.legOut.kind !== "V2" && pair.legOut.kind !== "V3") {
       throw new Error(`${prefix}.legOut.kind must be "V2" or "V3".`);
     }
@@ -160,6 +176,23 @@ function validatePairs(pairs) {
     }
     if (legBackTokenOut !== borrowed) {
       throw new Error(`${prefix}.legBack.tokenOut must equal borrowedToken.address (${borrowed}).`);
+    }
+
+    // AAVE_FLASH_LOAN_PREMIUM_BPS default, see bot/config.js:311.
+    const premiumBps = 5;
+    const feeA =
+      pair.legOut.feeBps ?? (pair.legOut.kind === "V3" ? Math.floor(pair.legOut.v3Fee / 100) : 30);
+    const feeB =
+      pair.legBack.feeBps ?? (pair.legBack.kind === "V3" ? Math.floor(pair.legBack.v3Fee / 100) : 30);
+    const totalFeeBps = premiumBps + feeA + feeB;
+    if (
+      pair.maxTotalFeeBps !== undefined &&
+      pair.maxTotalFeeBps !== null &&
+      totalFeeBps > pair.maxTotalFeeBps
+    ) {
+      throw new Error(
+        `${prefix}.totalFeeBps (${totalFeeBps}) exceeds maxTotalFeeBps (${pair.maxTotalFeeBps}).`
+      );
     }
 
     return pair;

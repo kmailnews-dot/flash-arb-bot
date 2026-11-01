@@ -242,6 +242,43 @@ describe("bot/config validatePairs", function () {
     );
   });
 
+  it("accepts a valid feeBps override", function () {
+    const pair = makePair();
+    pair.legOut.feeBps = 10;
+    pair.legBack.feeBps = 5;
+
+    expect(() => validatePairs([pair])).to.not.throw();
+  });
+
+  it("rejects a negative feeBps", function () {
+    const pair = makePair();
+    pair.legOut.feeBps = -1;
+
+    expect(() => validatePairs([pair])).to.throw(
+      "PAIRS_CONFIG_JSON[0].legOut.feeBps must be a non-negative integer."
+    );
+  });
+
+  it("accepts a valid maxTotalFeeBps", function () {
+    const pair = makePair();
+    pair.legOut.feeBps = 2;
+    pair.legBack.feeBps = 3;
+    pair.maxTotalFeeBps = 12;
+
+    expect(() => validatePairs([pair])).to.not.throw();
+  });
+
+  it("rejects totalFeeBps above maxTotalFeeBps", function () {
+    const pair = makePair();
+    pair.legOut.feeBps = 15;
+    pair.legBack.feeBps = 20;
+    pair.maxTotalFeeBps = 5;
+
+    expect(() => validatePairs([pair])).to.throw(
+      "PAIRS_CONFIG_JSON[0].totalFeeBps (40) exceeds maxTotalFeeBps (5)."
+    );
+  });
+
   it("rejects a missing or invalid legOut.kind", function () {
     const pair = makePair();
     delete pair.legOut.kind;
