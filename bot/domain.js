@@ -135,6 +135,20 @@
  */
 
 /**
+ * Entrée P&L réalisée (logs/pnl.jsonl, D3-PnL).
+ * @typedef {Object} ExecutionPnl
+ * @property {string} timestamp
+ * @property {string|null} txHash
+ * @property {string|null} journalId
+ * @property {string|null} pairLabel
+ * @property {string|null} realizedProfitWei
+ * @property {string|null} premiumWei
+ * @property {string|null} gasPaidWei
+ * @property {string|null} l1FeeWei
+ * @property {"CONFIRMED"|"REVERTED"|null} status
+ */
+
+/**
  * Résultat d'un scan de paire : une opportunité ou une erreur de quote.
  * @typedef {Opportunity | { pair: Pair, tradeSizeHuman: string, error: { code: string|number|null, shortMessage: string|null } }} ScanResult
  */

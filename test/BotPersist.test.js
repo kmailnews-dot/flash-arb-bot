@@ -4,6 +4,7 @@ const os = require("os");
 const path = require("path");
 const {
   appendScanResult,
+  appendExecutionPnl,
   logEvent,
   DEFAULT_EXECUTION_JOURNAL_PATH,
   EXECUTION_JOURNAL_VERSION,
@@ -428,5 +429,69 @@ describe("bot/persist execution journal", function () {
     expect(pending.map((record) => record.id)).to.deep.equal(["e", "c", "d", "a"]);
 
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("bot/persist appendExecutionPnl", function () {
+  it("appends one JSONL line with all P&L fields", async function () {
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-pnl-"));
+    const logPath = path.join(logDir, "nested", "pnl.jsonl");
+    const timestamp = new Date("2026-11-01T12:00:00.000Z");
+    const entry = {
+      timestamp,
+      txHash: "0xabc",
+      journalId: "journal-1",
+      pairLabel: "BOR/MID test pair",
+      realizedProfitWei: "1000000000000000",
+      premiumWei: "50000000000000",
+      gasPaidWei: "200000",
+      l1FeeWei: "123",
+      status: "CONFIRMED",
+    };
+
+    const payload = await appendExecutionPnl(entry, logPath);
+
+    expect(payload).to.deep.equal({
+      timestamp: "2026-11-01T12:00:00.000Z",
+      txHash: "0xabc",
+      journalId: "journal-1",
+      pairLabel: "BOR/MID test pair",
+      realizedProfitWei: "1000000000000000",
+      premiumWei: "50000000000000",
+      gasPaidWei: "200000",
+      l1FeeWei: "123",
+      status: "CONFIRMED",
+    });
+    const line = JSON.parse(fs.readFileSync(logPath, "utf8").trim());
+    expect(line).to.deep.equal(payload);
+
+    fs.rmSync(logDir, { recursive: true, force: true });
+  });
+
+  it("preserves null when the realized profit is absent", async function () {
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-pnl-null-"));
+    const logPath = path.join(logDir, "pnl.jsonl");
+
+    const payload = await appendExecutionPnl(
+      {
+        timestamp: new Date("2026-11-01T12:05:00.000Z"),
+        txHash: "0xdef",
+        journalId: "journal-2",
+        pairLabel: null,
+        gasPaidWei: "42",
+        l1FeeWei: null,
+        status: "REVERTED",
+      },
+      logPath
+    );
+
+    expect(payload.realizedProfitWei).to.equal(null);
+    expect(payload.premiumWei).to.equal(null);
+    expect(payload.pairLabel).to.equal(null);
+    expect(payload.l1FeeWei).to.equal(null);
+    const line = JSON.parse(fs.readFileSync(logPath, "utf8").trim());
+    expect(line).to.deep.equal(payload);
+
+    fs.rmSync(logDir, { recursive: true, force: true });
   });
 });

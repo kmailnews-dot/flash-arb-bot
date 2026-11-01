@@ -4,6 +4,7 @@ const { redactUrls } = require("./sanitizeError");
 
 const LOG_DIR = path.resolve(__dirname, "..", "logs");
 const DEFAULT_SCAN_LOG_PATH = path.join(LOG_DIR, "scans.jsonl");
+const DEFAULT_PNL_LOG_PATH = path.join(LOG_DIR, "pnl.jsonl");
 const DEFAULT_LOG_FORMAT = "text";
 
 function logFormat() {
@@ -82,6 +83,26 @@ async function appendScanResult(logPath = DEFAULT_SCAN_LOG_PATH, result, { chain
   return entry;
 }
 
+async function appendExecutionPnl(entry, logPath = DEFAULT_PNL_LOG_PATH) {
+  const payload = {
+    timestamp:
+      entry.timestamp instanceof Date
+        ? entry.timestamp.toISOString()
+        : String(entry.timestamp ?? new Date().toISOString()),
+    txHash: toNullableString(entry.txHash),
+    journalId: toNullableString(entry.journalId),
+    pairLabel: toNullableString(entry.pairLabel),
+    realizedProfitWei: toNullableString(entry.realizedProfitWei),
+    premiumWei: toNullableString(entry.premiumWei),
+    gasPaidWei: toNullableString(entry.gasPaidWei),
+    l1FeeWei: toNullableString(entry.l1FeeWei),
+    status: toNullableString(entry.status),
+  };
+  await fs.mkdir(path.dirname(logPath), { recursive: true });
+  await fs.appendFile(logPath, `${JSON.stringify(payload)}\n`, "utf8");
+  return payload;
+}
+
 const crypto = require("crypto");
 const DEFAULT_EXECUTION_JOURNAL_PATH = path.join(LOG_DIR, "executions.json");
 const EXECUTION_JOURNAL_VERSION = 1;
@@ -150,9 +171,11 @@ async function listPendingExecutions(filePath = DEFAULT_EXECUTION_JOURNAL_PATH) 
 
 module.exports = {
   DEFAULT_SCAN_LOG_PATH,
+  DEFAULT_PNL_LOG_PATH,
   DEFAULT_EXECUTION_JOURNAL_PATH,
   EXECUTION_JOURNAL_VERSION,
   appendScanResult,
+  appendExecutionPnl,
   logFormat,
   formatLogLine,
   logEvent,

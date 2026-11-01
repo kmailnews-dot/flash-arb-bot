@@ -4,6 +4,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { maybeExecute, gasCostInBorrowedToken, buildFeeOverrides } = require("../bot/executor");
+const { FLASH_ARB_EXECUTOR_ABI } = require("../bot/abis");
 
 const RATE_1_TO_1 = ethers.parseEther("1");
 const FLASH_LOAN_PREMIUM_BPS = 5n;
@@ -82,6 +83,7 @@ describe("bot/executor maybeExecute", function () {
         gasSpentPath: path.join(guardDir, "gas_spent.json"),
         circuitBreakerPath: path.join(guardDir, "circuit_breaker.json"),
         executionJournalPath: path.join(guardDir, "executions.json"),
+        executionPnlPath: path.join(guardDir, "pnl.jsonl"),
         ...overrides,
       };
     }
@@ -1653,6 +1655,116 @@ describe("bot/executor maybeExecute", function () {
       expect(readJournal(config.executionJournalPath).records[result.journalId]).to.include({
         status: "UNKNOWN",
         txHash,
+      });
+    });
+  });
+
+  describe("bot/executor pnl", function () {
+    it("writes realized P&L from ArbitrageExecuted on confirmation", async function () {
+      const { botWallet, pair, opportunity, makeConfig } = await deployFixture();
+      const config = makeConfig();
+      const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+        opportunity,
+        config,
+      });
+      const iface = new ethers.Interface(FLASH_ARB_EXECUTOR_ABI);
+      const profit = ethers.parseEther("0.5");
+      const premium = ethers.parseEther("0.01");
+      const encoded = iface.encodeEventLog(iface.getEvent("ArbitrageExecuted"), [
+        botWallet.address,
+        pair.borrowedToken.address,
+        opportunity.amountIn,
+        premium,
+        profit,
+      ]);
+      const eventLog = {
+        address: config.contractAddress,
+        topics: encoded.topics,
+        data: encoded.data,
+      };
+      const txHash = `0x${"7a".repeat(32)}`;
+      const contract = {
+        startArbitrage: async () => ({
+          hash: txHash,
+          wait: async () => ({
+            status: 1,
+            gasUsed: 100000n,
+            gasPrice: 2n,
+            blockNumber: 1,
+            l1Fee: 123n,
+            logs: [eventLog],
+          }),
+        }),
+      };
+      contract.startArbitrage.estimateGas = async () => 300000n;
+      contract.startArbitrage.staticCall = async () => true;
+
+      const result = await maybeExecute({
+        opportunity: freshOpportunity,
+        provider: ethers.provider,
+        config,
+        contract,
+      });
+
+      expect(result.submitted).to.equal(true);
+      const lines = fs.readFileSync(config.executionPnlPath, "utf8").trim().split("\n");
+      expect(lines).to.have.lengthOf(1);
+      const pnl = JSON.parse(lines[0]);
+      expect(pnl).to.include({
+        txHash,
+        journalId: result.journalId,
+        pairLabel: pair.label,
+        realizedProfitWei: profit.toString(),
+        premiumWei: premium.toString(),
+        gasPaidWei: "200000",
+        l1FeeWei: "123",
+        status: "CONFIRMED",
+      });
+      expect(pnl.timestamp).to.be.a("string");
+    });
+
+    it("writes null realized profit when the receipt has no ArbitrageExecuted", async function () {
+      const { pair, opportunity, makeConfig } = await deployFixture();
+      const config = makeConfig();
+      const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+        opportunity,
+        config,
+      });
+      const txHash = `0x${"7b".repeat(32)}`;
+      const contract = {
+        startArbitrage: async () => ({
+          hash: txHash,
+          wait: async () => ({
+            status: 1,
+            gasUsed: 100000n,
+            gasPrice: 1n,
+            blockNumber: 1,
+            logs: [],
+          }),
+        }),
+      };
+      contract.startArbitrage.estimateGas = async () => 300000n;
+      contract.startArbitrage.staticCall = async () => true;
+
+      const result = await maybeExecute({
+        opportunity: freshOpportunity,
+        provider: ethers.provider,
+        config,
+        contract,
+      });
+
+      expect(result.submitted).to.equal(true);
+      expect(result.error).to.equal(undefined);
+      const pnl = JSON.parse(fs.readFileSync(config.executionPnlPath, "utf8").trim());
+      expect(pnl).to.include({
+        txHash,
+        journalId: result.journalId,
+        pairLabel: pair.label,
+        realizedProfitWei: null,
+        premiumWei: null,
+        gasPaidWei: "100000",
+        l1FeeWei: "0",
+        status: "CONFIRMED",
       });
     });
   });

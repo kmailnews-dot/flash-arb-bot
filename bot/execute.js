@@ -21,9 +21,12 @@ const {
 } = require("./resilient");
 const { createThrottle, withThrottle } = require("./throttle");
 const { withTimeout } = require("./timeout");
+const { FLASH_ARB_EXECUTOR_ABI } = require("./abis");
 const { randomUUID } = require("crypto");
 const {
   DEFAULT_EXECUTION_JOURNAL_PATH,
+  DEFAULT_PNL_LOG_PATH,
+  appendExecutionPnl,
   upsertExecutionRecord,
   deleteExecutionRecord,
   listPendingExecutions,
@@ -181,6 +184,27 @@ function isNotProfitableError(err) {
     current = current.error || current.cause || current.info?.error;
   }
   return false;
+}
+
+function extractArbitrageEvent(receipt) {
+  if (!receipt || !Array.isArray(receipt.logs)) {
+    return { realizedProfitWei: null, premiumWei: null };
+  }
+  const iface = new ethers.Interface(FLASH_ARB_EXECUTOR_ABI);
+  for (const log of receipt.logs) {
+    try {
+      const parsed = iface.parseLog(log);
+      if (parsed?.name === "ArbitrageExecuted") {
+        return {
+          realizedProfitWei: parsed.args.profit?.toString() ?? null,
+          premiumWei: parsed.args.premium?.toString() ?? null,
+        };
+      }
+    } catch {
+      // log non reconnu, ignorer
+    }
+  }
+  return { realizedProfitWei: null, premiumWei: null };
 }
 
 async function execute({
@@ -446,6 +470,22 @@ async function execute({
       ).catch((journalErr) =>
         console.warn(`  [JOURNAL WARNING] REVERTED: ${journalErr.message}`)
       );
+      const l1FeeWei =
+        typeof receipt.l1Fee === "bigint" ? receipt.l1Fee.toString() : "0";
+      await appendExecutionPnl(
+        {
+          timestamp: new Date().toISOString(),
+          txHash: tx.hash,
+          journalId,
+          pairLabel: pair.label ?? null,
+          realizedProfitWei: null,
+          premiumWei: null,
+          gasPaidWei: actualGasCostWei.toString(),
+          l1FeeWei,
+          status: "REVERTED",
+        },
+        config.executionPnlPath || DEFAULT_PNL_LOG_PATH
+      ).catch((err) => console.warn(`  [PNL WARNING] ${err.message}`));
       console.error(`  [FAILED] ${message}`);
       return {
         submitted: true,
@@ -473,6 +513,23 @@ async function execute({
     ).catch((journalErr) =>
       console.warn(`  [JOURNAL WARNING] CONFIRMED: ${journalErr.message}`)
     );
+    const eventData = extractArbitrageEvent(receipt);
+    const l1FeeWei =
+      typeof receipt.l1Fee === "bigint" ? receipt.l1Fee.toString() : "0";
+    await appendExecutionPnl(
+      {
+        timestamp: new Date().toISOString(),
+        txHash: tx.hash,
+        journalId,
+        pairLabel: pair.label ?? null,
+        realizedProfitWei: eventData.realizedProfitWei,
+        premiumWei: eventData.premiumWei,
+        gasPaidWei: actualGasCostWei.toString(),
+        l1FeeWei,
+        status: "CONFIRMED",
+      },
+      config.executionPnlPath || DEFAULT_PNL_LOG_PATH
+    ).catch((err) => console.warn(`  [PNL WARNING] ${err.message}`));
     console.log(`  [CONFIRMED] block ${receipt.blockNumber}, status success`);
     return {
       submitted: true,
@@ -547,6 +604,27 @@ async function execute({
       ).catch((journalErr) =>
         console.warn(`  [JOURNAL WARNING] ${journalStatus}: ${journalErr.message}`)
       );
+      if (lateReceipt.status === 1) {
+        const eventData = extractArbitrageEvent(lateReceipt);
+        const l1FeeWei =
+          typeof lateReceipt.l1Fee === "bigint" ? lateReceipt.l1Fee.toString() : "0";
+        await appendExecutionPnl(
+          {
+            timestamp: new Date().toISOString(),
+            txHash: tx.hash,
+            journalId,
+            pairLabel: pair.label ?? null,
+            realizedProfitWei: eventData.realizedProfitWei,
+            premiumWei: eventData.premiumWei,
+            gasPaidWei: (
+              lateReceipt.gasUsed * (lateReceipt.gasPrice ?? gasPriceWei)
+            ).toString(),
+            l1FeeWei,
+            status: "CONFIRMED",
+          },
+          config.executionPnlPath || DEFAULT_PNL_LOG_PATH
+        ).catch((err) => console.warn(`  [PNL WARNING] ${err.message}`));
+      }
       console.error(`  [FAILED] confirmation outcome unknown (tx may be mined): ${message}`);
       return {
         submitted: true,
