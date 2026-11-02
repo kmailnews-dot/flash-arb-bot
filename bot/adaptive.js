@@ -5,6 +5,9 @@ const ADAPTIVE_MIN_BPS = 0;
 const ADAPTIVE_MAX_BPS = 10000;
 const ADAPTIVE_MIN_SIZE_FACTOR = 0.10;
 const ADAPTIVE_MAX_SIZE_FACTOR = 1.00;
+const VALID_PROFILES = new Set(["majors", "longtail"]);
+const DEFAULT_PROFILE = "majors";
+const PROFILE_CAPS = { majors: 0.1, longtail: 1 };
 const ADAPTIVE_WINDOW = 20;
 const ADAPTIVE_STEP_BPS = 5;
 const ADAPTIVE_STEP_SIZE = 0.10;
@@ -44,11 +47,18 @@ function factorToSizeString(factor) {
   return normalizeFactor(factor).toFixed(2);
 }
 
+function normalizeProfile(profile) {
+  return VALID_PROFILES.has(profile) ? profile : null;
+}
+
 function defaultState(config) {
   const bounds = bpsBounds(config);
   return {
     effectiveMinProfitBps: normalizeBps(config?.minProfitBps, bounds, bounds.min),
-    effectiveMaxTradeSize: factorToSizeString(ADAPTIVE_MAX_SIZE_FACTOR),
+    effectiveMaxTradeSize: {
+      majors: factorToSizeString(ADAPTIVE_MAX_SIZE_FACTOR),
+      longtail: factorToSizeString(ADAPTIVE_MAX_SIZE_FACTOR),
+    },
     history: [],
   };
 }
@@ -61,9 +71,14 @@ function normalizeHistory(history) {
         entry &&
         typeof entry === "object" &&
         ADAPTIVE_OUTCOMES.has(entry.outcome) &&
+        (entry.profile === undefined || VALID_PROFILES.has(entry.profile)) &&
         Number.isFinite(entry.at)
     )
-    .map((entry) => ({ outcome: entry.outcome, at: entry.at }))
+    .map((entry) => ({
+      outcome: entry.outcome,
+      profile: VALID_PROFILES.has(entry.profile) ? entry.profile : DEFAULT_PROFILE,
+      at: entry.at,
+    }))
     .slice(-ADAPTIVE_WINDOW);
 }
 
@@ -87,13 +102,25 @@ function normalizeState(parsed, config) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return fallback;
 
   const bounds = bpsBounds(config);
+  const rawMax = parsed.effectiveMaxTradeSize;
+  let perProfile;
+  if (rawMax && typeof rawMax === "object" && !Array.isArray(rawMax)) {
+    perProfile = {
+      majors: factorToSizeString(rawMax.majors ?? ADAPTIVE_MAX_SIZE_FACTOR),
+      longtail: factorToSizeString(rawMax.longtail ?? ADAPTIVE_MAX_SIZE_FACTOR),
+    };
+  } else {
+    const legacy = factorToSizeString(rawMax ?? ADAPTIVE_MAX_SIZE_FACTOR);
+    perProfile = { majors: legacy, longtail: legacy };
+  }
+
   return {
     effectiveMinProfitBps: normalizeBps(
       parsed.effectiveMinProfitBps,
       bounds,
       fallback.effectiveMinProfitBps
     ),
-    effectiveMaxTradeSize: factorToSizeString(parsed.effectiveMaxTradeSize),
+    effectiveMaxTradeSize: perProfile,
     history: normalizeHistory(parsed.history),
   };
 }
@@ -113,23 +140,40 @@ async function loadAdaptive({ filePath = DEFAULT_ADAPTIVE_PATH, config } = {}) {
 function adjustState(state, config) {
   const bounds = bpsBounds(config);
   const currentBps = normalizeBps(state.effectiveMinProfitBps, bounds, bounds.min);
-  const currentFactor = normalizeFactor(state.effectiveMaxTradeSize);
-  const tail = state.history.slice(-STREAK_LENGTH);
+  const currentFactors = {
+    majors: normalizeFactor(state.effectiveMaxTradeSize?.majors),
+    longtail: normalizeFactor(state.effectiveMaxTradeSize?.longtail),
+  };
 
-  let nextBps = currentBps;
-  let nextFactor = currentFactor;
+  const nextBps = (() => {
+    const tail = state.history.slice(-STREAK_LENGTH);
+    if (tail.length !== STREAK_LENGTH) return currentBps;
+    if (tail.every((e) => e.outcome === "FAILURE")) {
+      return Math.min(currentBps + ADAPTIVE_STEP_BPS, bounds.max);
+    }
+    if (tail.every((e) => e.outcome === "SUCCESS")) {
+      return Math.max(currentBps - ADAPTIVE_STEP_BPS, bounds.min);
+    }
+    return currentBps;
+  })();
 
-  if (tail.length === STREAK_LENGTH && tail.every((entry) => entry.outcome === "FAILURE")) {
-    nextBps = Math.min(currentBps + ADAPTIVE_STEP_BPS, bounds.max);
-    nextFactor = Math.max(currentFactor - ADAPTIVE_STEP_SIZE, ADAPTIVE_MIN_SIZE_FACTOR);
-  } else if (tail.length === STREAK_LENGTH && tail.every((entry) => entry.outcome === "SUCCESS")) {
-    nextBps = Math.max(currentBps - ADAPTIVE_STEP_BPS, bounds.min);
-    nextFactor = Math.min(currentFactor + ADAPTIVE_STEP_SIZE, ADAPTIVE_MAX_SIZE_FACTOR);
+  const nextFactors = {};
+  for (const profile of VALID_PROFILES) {
+    const tailForProfile = state.history
+      .filter((e) => e.profile === profile)
+      .slice(-STREAK_LENGTH);
+    let factor = currentFactors[profile];
+    if (tailForProfile.length === STREAK_LENGTH && tailForProfile.every((e) => e.outcome === "FAILURE")) {
+      factor = Math.max(factor - ADAPTIVE_STEP_SIZE, ADAPTIVE_MIN_SIZE_FACTOR);
+    } else if (tailForProfile.length === STREAK_LENGTH && tailForProfile.every((e) => e.outcome === "SUCCESS")) {
+      factor = Math.min(factor + ADAPTIVE_STEP_SIZE, ADAPTIVE_MAX_SIZE_FACTOR);
+    }
+    nextFactors[profile] = factorToSizeString(factor);
   }
 
   return {
     effectiveMinProfitBps: normalizeBps(nextBps, bounds, bounds.min),
-    effectiveMaxTradeSize: factorToSizeString(nextFactor),
+    effectiveMaxTradeSize: nextFactors,
     history: state.history,
   };
 }
@@ -137,15 +181,20 @@ function adjustState(state, config) {
 async function recordOutcome({
   filePath = DEFAULT_ADAPTIVE_PATH,
   outcome,
+  profile,
   config,
   now = Date.now(),
 } = {}) {
   if (!ADAPTIVE_OUTCOMES.has(outcome)) {
     throw new TypeError(`Invalid adaptive outcome: ${outcome}`);
   }
+  const normalizedProfile = normalizeProfile(profile);
+  if (!normalizedProfile) {
+    throw new TypeError(`Invalid adaptive profile: ${profile}. Must be "majors" or "longtail".`);
+  }
 
   const state = await loadAdaptive({ filePath, config });
-  const history = [...state.history, { outcome, at: now }].slice(-ADAPTIVE_WINDOW);
+  const history = [...state.history, { outcome, profile: normalizedProfile, at: now }].slice(-ADAPTIVE_WINDOW);
   const nextState = adjustState({ ...state, history }, config);
 
   await writeState(filePath, nextState);
@@ -160,16 +209,47 @@ function applyAdaptive({ config, state } = {}) {
     bounds,
     normalizeBps(config?.minProfitBps, bounds, bounds.min)
   );
-  const tradeSizeFactor = normalizeFactor(source.effectiveMaxTradeSize);
-  const effectiveMaxTradeSize = factorToSizeString(tradeSizeFactor);
+  const rawMax = source.effectiveMaxTradeSize;
+  const factors = {};
+  if (rawMax && typeof rawMax === "object" && !Array.isArray(rawMax)) {
+    factors.majors = normalizeFactor(rawMax.majors);
+    factors.longtail = normalizeFactor(rawMax.longtail);
+  } else {
+    const legacy = normalizeFactor(rawMax);
+    factors.majors = legacy;
+    factors.longtail = legacy;
+  }
 
   const pairs = Array.isArray(config?.pairs)
-    ? config.pairs.map((pair) => ({
-        ...pair,
-        tradeSizes: Array.isArray(pair.tradeSizes)
-          ? pair.tradeSizes.map((size) => (parseFloat(size) * tradeSizeFactor).toFixed(4))
-          : pair.tradeSizes,
-      }))
+    ? config.pairs.map((pair) => {
+        const profile = VALID_PROFILES.has(pair.profile) ? pair.profile : DEFAULT_PROFILE;
+        const factor = factors[profile];
+        const maxTradeSize = PROFILE_CAPS[profile];
+        const scaled = (value) => {
+          const n = parseFloat(value);
+          if (!Number.isFinite(n)) return value;
+          return (Math.min(n * factor, maxTradeSize)).toFixed(4);
+        };
+        if (Array.isArray(pair.tradeSizes)) {
+          return {
+            ...pair,
+            profile,
+            tradeSizes: pair.tradeSizes.map(scaled),
+          };
+        }
+        if (pair.logSweep && typeof pair.logSweep === "object") {
+          return {
+            ...pair,
+            profile,
+            logSweep: {
+              ...pair.logSweep,
+              min: scaled(pair.logSweep.min),
+              max: scaled(pair.logSweep.max),
+            },
+          };
+        }
+        return { ...pair, profile };
+      })
     : config?.pairs;
 
   return {
@@ -177,8 +257,11 @@ function applyAdaptive({ config, state } = {}) {
     minProfitBps: effectiveMinProfitBps,
     pairs,
     effectiveMinProfitBps,
-    effectiveMaxTradeSize,
-    tradeSizeFactor,
+    effectiveMaxTradeSize: {
+      majors: factorToSizeString(factors.majors),
+      longtail: factorToSizeString(factors.longtail),
+    },
+    tradeSizeFactor: factors,
   };
 }
 
@@ -190,6 +273,8 @@ module.exports = {
   ADAPTIVE_WINDOW,
   ADAPTIVE_STEP_BPS,
   ADAPTIVE_STEP_SIZE,
+  VALID_PROFILES,
+  DEFAULT_PROFILE,
   DEFAULT_ADAPTIVE_PATH,
   loadAdaptive,
   recordOutcome,

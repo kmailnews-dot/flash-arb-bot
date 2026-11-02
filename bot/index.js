@@ -115,13 +115,13 @@ async function main({
     cycleConfig = applyAdaptive({ config, state: adaptiveState });
     const adaptiveMessage =
       `[ADAPTIVE] state=loaded bps=${adaptiveState.effectiveMinProfitBps} ` +
-      `factor=${adaptiveState.effectiveMaxTradeSize}`;
+      `factorMajor=${adaptiveState.effectiveMaxTradeSize.majors} factorLongtail=${adaptiveState.effectiveMaxTradeSize.longtail}`;
     if (logFormat() === "json") {
       logEvent({
         event: "adaptive_state",
         level: "info",
         effectiveMinProfitBps: adaptiveState.effectiveMinProfitBps,
-        effectiveMaxTradeSize: adaptiveState.effectiveMaxTradeSize,
+        effectiveMaxTradeSize: { majors: adaptiveState.effectiveMaxTradeSize.majors, longtail: adaptiveState.effectiveMaxTradeSize.longtail },
         message: adaptiveMessage,
       });
     } else {
@@ -282,7 +282,7 @@ async function main({
               adaptiveOutcome = "UNKNOWN";
             }
             try {
-              await recordOutcome({ filePath: adaptivePath, outcome: adaptiveOutcome, config });
+              await recordOutcome({ filePath: adaptivePath, outcome: adaptiveOutcome, profile: pair.profile, config });
             } catch (err) {
               console.warn(
                 `WARNING: could not record adaptive outcome to ${adaptivePath}: ${err.message}`

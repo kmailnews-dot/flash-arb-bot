@@ -56,7 +56,7 @@ describe("bot/adaptive", function () {
 
     expect(state).to.deep.equal({
       effectiveMinProfitBps: 30,
-      effectiveMaxTradeSize: "1.00",
+      effectiveMaxTradeSize: { majors: "1.00", longtail: "1.00" },
       history: [],
     });
   });
@@ -86,21 +86,21 @@ describe("bot/adaptive", function () {
     const config = makeConfig();
     writeRawState(filePath, {
       effectiveMinProfitBps: 30,
-      effectiveMaxTradeSize: "1.50",
+      effectiveMaxTradeSize: { majors: "1.50", longtail: "1.50" },
       history: [],
     });
 
     const tooHigh = await loadAdaptive({ filePath, config });
-    expect(tooHigh.effectiveMaxTradeSize).to.equal("1.00");
+    expect(tooHigh.effectiveMaxTradeSize).to.deep.equal({ majors: "1.00", longtail: "1.00" });
 
     writeRawState(filePath, {
       effectiveMinProfitBps: 30,
-      effectiveMaxTradeSize: "0.01",
+      effectiveMaxTradeSize: { majors: "0.01", longtail: "0.01" },
       history: [],
     });
 
     const tooLow = await loadAdaptive({ filePath, config });
-    expect(tooLow.effectiveMaxTradeSize).to.equal("0.10");
+    expect(tooLow.effectiveMaxTradeSize).to.deep.equal({ majors: "0.10", longtail: "0.10" });
   });
 
   it("raises effectiveMinProfitBps by 5 after 3 FAILURE and caps it", async function () {
@@ -108,7 +108,7 @@ describe("bot/adaptive", function () {
     let state;
 
     for (let i = 0; i < 3; i += 1) {
-      state = await recordOutcome({ filePath, outcome: "FAILURE", config, now: 1000 + i });
+      state = await recordOutcome({ filePath, outcome: "FAILURE", profile: "majors", config, now: 1000 + i });
     }
     expect(state.effectiveMinProfitBps).to.equal(35);
 
@@ -119,7 +119,7 @@ describe("bot/adaptive", function () {
     });
 
     for (let i = 0; i < 3; i += 1) {
-      state = await recordOutcome({ filePath, outcome: "FAILURE", config, now: 2000 + i });
+      state = await recordOutcome({ filePath, outcome: "FAILURE", profile: "majors", config, now: 2000 + i });
     }
     expect(state.effectiveMinProfitBps).to.equal(60);
   });
@@ -129,17 +129,17 @@ describe("bot/adaptive", function () {
     let state;
 
     for (let i = 0; i < 3; i += 1) {
-      state = await recordOutcome({ filePath, outcome: "FAILURE", config, now: 1000 + i });
+      state = await recordOutcome({ filePath, outcome: "FAILURE", profile: "majors", config, now: 1000 + i });
     }
     expect(state.effectiveMinProfitBps).to.equal(35);
 
     for (let i = 0; i < 3; i += 1) {
-      state = await recordOutcome({ filePath, outcome: "SUCCESS", config, now: 2000 + i });
+      state = await recordOutcome({ filePath, outcome: "SUCCESS", profile: "majors", config, now: 2000 + i });
     }
     expect(state.effectiveMinProfitBps).to.equal(30);
 
     for (let i = 0; i < 3; i += 1) {
-      state = await recordOutcome({ filePath, outcome: "SUCCESS", config, now: 3000 + i });
+      state = await recordOutcome({ filePath, outcome: "SUCCESS", profile: "majors", config, now: 3000 + i });
     }
     expect(state.effectiveMinProfitBps).to.equal(30);
   });
@@ -149,17 +149,17 @@ describe("bot/adaptive", function () {
     let state;
 
     for (let i = 0; i < 3; i += 1) {
-      state = await recordOutcome({ filePath, outcome: "FAILURE", config, now: 1000 + i });
+      state = await recordOutcome({ filePath, outcome: "FAILURE", profile: "majors", config, now: 1000 + i });
     }
-    expect(state.effectiveMaxTradeSize).to.equal("0.90");
+    expect(state.effectiveMaxTradeSize).to.deep.equal({ majors: "0.90", longtail: "1.00" });
 
     for (let i = 0; i < 9; i += 1) {
-      state = await recordOutcome({ filePath, outcome: "FAILURE", config, now: 2000 + i });
+      state = await recordOutcome({ filePath, outcome: "FAILURE", profile: "majors", config, now: 2000 + i });
     }
-    expect(state.effectiveMaxTradeSize).to.equal("0.10");
+    expect(state.effectiveMaxTradeSize).to.deep.equal({ majors: "0.10", longtail: "1.00" });
 
-    state = await recordOutcome({ filePath, outcome: "FAILURE", config, now: 3000 });
-    expect(state.effectiveMaxTradeSize).to.equal("0.10");
+    state = await recordOutcome({ filePath, outcome: "FAILURE", profile: "majors", config, now: 3000 });
+    expect(state.effectiveMaxTradeSize).to.deep.equal({ majors: "0.10", longtail: "1.00" });
   });
 
   it("raises effectiveMaxTradeSize by 0.10 after 3 SUCCESS, capped at 1.00", async function () {
@@ -172,17 +172,17 @@ describe("bot/adaptive", function () {
 
     let state;
     for (let i = 0; i < 3; i += 1) {
-      state = await recordOutcome({ filePath, outcome: "SUCCESS", config, now: 1000 + i });
+      state = await recordOutcome({ filePath, outcome: "SUCCESS", profile: "majors", config, now: 1000 + i });
     }
-    expect(state.effectiveMaxTradeSize).to.equal("0.90");
+    expect(state.effectiveMaxTradeSize).to.deep.equal({ majors: "0.90", longtail: "0.80" });
 
     for (let i = 0; i < 2; i += 1) {
-      state = await recordOutcome({ filePath, outcome: "SUCCESS", config, now: 2000 + i });
+      state = await recordOutcome({ filePath, outcome: "SUCCESS", profile: "majors", config, now: 2000 + i });
     }
-    expect(state.effectiveMaxTradeSize).to.equal("1.00");
+    expect(state.effectiveMaxTradeSize).to.deep.equal({ majors: "1.00", longtail: "0.80" });
 
-    state = await recordOutcome({ filePath, outcome: "SUCCESS", config, now: 3000 });
-    expect(state.effectiveMaxTradeSize).to.equal("1.00");
+    state = await recordOutcome({ filePath, outcome: "SUCCESS", profile: "majors", config, now: 3000 });
+    expect(state.effectiveMaxTradeSize).to.deep.equal({ majors: "1.00", longtail: "0.80" });
   });
 
   it("truncates history to the last ADAPTIVE_WINDOW entries", async function () {
@@ -194,6 +194,7 @@ describe("bot/adaptive", function () {
       state = await recordOutcome({
         filePath,
         outcome: "UNKNOWN",
+        profile: "majors",
         config,
         now: start + i,
       });
@@ -202,14 +203,15 @@ describe("bot/adaptive", function () {
     expect(state.history).to.have.lengthOf(ADAPTIVE_WINDOW);
     expect(state.history[0].at).to.equal(start + 5);
     expect(state.history[ADAPTIVE_WINDOW - 1].at).to.equal(start + ADAPTIVE_WINDOW + 4);
+    expect(state.history.every((entry) => entry.profile === "majors")).to.equal(true);
   });
 
   it("applyAdaptive returns a distinct copy and never mutates config or state", function () {
     const config = makeConfig();
     const state = {
       effectiveMinProfitBps: 35,
-      effectiveMaxTradeSize: "0.50",
-      history: [{ outcome: "FAILURE", at: 1000 }],
+      effectiveMaxTradeSize: { majors: "0.50", longtail: "0.50" },
+      history: [{ outcome: "FAILURE", profile: "majors", at: 1000 }],
     };
     const configBefore = JSON.stringify(config);
     const stateBefore = JSON.stringify(state);
@@ -229,7 +231,7 @@ describe("bot/adaptive", function () {
     const config = makeConfig();
     const state = {
       effectiveMinProfitBps: 99999,
-      effectiveMaxTradeSize: "0.50",
+      effectiveMaxTradeSize: { majors: "0.50", longtail: "0.50" },
       history: [],
     };
 
@@ -237,9 +239,9 @@ describe("bot/adaptive", function () {
 
     expect(applied.minProfitBps).to.equal(60);
     expect(applied.effectiveMinProfitBps).to.equal(60);
-    expect(applied.effectiveMaxTradeSize).to.equal("0.50");
-    expect(applied.tradeSizeFactor).to.equal(0.5);
-    expect(applied.pairs[0].tradeSizes).to.deep.equal(["500.0000", "1000.0000"]);
+    expect(applied.effectiveMaxTradeSize).to.deep.equal({ majors: "0.50", longtail: "0.50" });
+    expect(applied.tradeSizeFactor).to.deep.equal({ majors: 0.5, longtail: 0.5 });
+    expect(applied.pairs[0].tradeSizes).to.deep.equal(["0.1000", "0.1000"]);
     expect(config.minProfitBps).to.equal(30);
     expect(config.pairs[0].tradeSizes).to.deep.equal(["1000", "2000"]);
 
@@ -248,5 +250,85 @@ describe("bot/adaptive", function () {
       state: { ...state, effectiveMinProfitBps: 1 },
     });
     expect(floored.minProfitBps).to.equal(30);
+  });
+
+  it("applies per-profile factor to tradeSizes without hitting the cap", function () {
+    const config = makeConfig({
+      pairs: [
+        { label: "MAJORS", profile: "majors", tradeSizes: ["0.08", "0.09"] },
+        { label: "LONGTAIL", profile: "longtail", tradeSizes: ["0.80", "0.90"] },
+      ],
+    });
+    const state = {
+      effectiveMinProfitBps: 30,
+      effectiveMaxTradeSize: { majors: "0.50", longtail: "0.20" },
+      history: [],
+    };
+
+    const applied = applyAdaptive({ config, state });
+
+    expect(applied.pairs[0].tradeSizes).to.deep.equal(["0.0400", "0.0450"]);
+    expect(applied.pairs[1].tradeSizes).to.deep.equal(["0.1600", "0.1800"]);
+  });
+
+  it("clamps scaled tradeSizes to the profile cap", function () {
+    const config = makeConfig({
+      pairs: [
+        { label: "MAJORS", profile: "majors", tradeSizes: ["0.08", "0.09"] },
+        { label: "LONGTAIL", profile: "longtail", tradeSizes: ["0.80", "0.90"] },
+      ],
+    });
+    const state = {
+      effectiveMinProfitBps: 30,
+      effectiveMaxTradeSize: { majors: "1.00", longtail: "1.00" },
+      history: [],
+    };
+
+    const applied = applyAdaptive({ config, state });
+    expect(applied.pairs[0].tradeSizes).to.deep.equal(["0.0800", "0.0900"]);
+    expect(applied.pairs[1].tradeSizes).to.deep.equal(["0.8000", "0.9000"]);
+
+    const bigState = {
+      effectiveMinProfitBps: 30,
+      effectiveMaxTradeSize: { majors: "1.00", longtail: "1.00" },
+      history: [],
+    };
+    const bigConfig = makeConfig({
+      pairs: [
+        { label: "MAJORS", profile: "majors", tradeSizes: ["1", "2"] },
+      ],
+    });
+    const clamped = applyAdaptive({ config: bigConfig, state: bigState });
+    expect(clamped.pairs[0].tradeSizes).to.deep.equal(["0.1000", "0.1000"]);
+  });
+
+  it("applies per-profile factor to logSweep without hitting the cap", function () {
+    const config = makeConfig({
+      pairs: [
+        { label: "MAJORS", profile: "majors", logSweep: { min: "0.04", max: "0.08", steps: 5 } },
+      ],
+    });
+    const state = {
+      effectiveMinProfitBps: 30,
+      effectiveMaxTradeSize: { majors: "0.50", longtail: "1.00" },
+      history: [],
+    };
+
+    const applied = applyAdaptive({ config, state });
+
+    expect(applied.pairs[0].logSweep.min).to.equal("0.0200");
+    expect(applied.pairs[0].logSweep.max).to.equal("0.0400");
+    expect(applied.pairs[0].logSweep.steps).to.equal(5);
+  });
+
+  it("recordOutcome adjusts factor only for the matching profile", async function () {
+    const config = makeConfig();
+    let state;
+
+    for (let i = 0; i < 3; i += 1) {
+      state = await recordOutcome({ filePath, outcome: "FAILURE", profile: "majors", config, now: 1000 + i });
+    }
+
+    expect(state.effectiveMaxTradeSize).to.deep.equal({ majors: "0.90", longtail: "1.00" });
   });
 });
