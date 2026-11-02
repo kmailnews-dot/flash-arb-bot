@@ -321,3 +321,21 @@ assumés, pas à des bugs.
   ferait `gasPaidWei + l1FeeWei` doublerait le coût L1. La
   réconciliation du budget gaz dans `guards.js` utilise déjà le
   total, ne pas réinjecter `l1FeeWei` séparément.
+- **P1-12 — balayage logarithmique et interpolation locale
+  (ADR 0003).** `scanPair` accepte soit `pair.tradeSizes`
+  (legacy), soit `pair.logSweep = { min, max, steps }`
+  (nouveau). Les deux sont mutuellement exclusifs. Avec
+  `logSweep`, `scanPair` génère une grille logarithmique via
+  `logSweepSizes` (`bot/pricing.js`), quote chaque taille,
+  trie par `grossProfit` décroissant, puis appelle
+  `interpolateMaximum` sur les tailles croissantes. Si un
+  maximum local est trouvé, `sorted[0]` est remplacé par un
+  résultat marqué `interpolated: true` avec
+  `tradeSizeHuman = interp.size`. Les champs `grossProfit`,
+  `netProfitUsd`, etc. restent ceux du meilleur point brut
+  (l'interpolation ne re-quote pas ; `decide()` dans
+  `execute()` re-quote à `"latest"`). Réf. :
+  `docs/adr/0003-log-sweep-regression.md`,
+  `bot/pricing.js` (`logSweepSizes`, `interpolateMaximum`),
+  `bot/scanner.js` (`scanPair`), `bot/config.js`
+  (`validatePairs`).

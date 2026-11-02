@@ -108,7 +108,7 @@ historique de la matrice initiale.
 | P1-15 | FERMÉ | 2c3f5ae | plafond de profondeur 0,5 % par quote d'impact |
 | P1-16 | FERMÉ | 7f1af08 | feeBps par jambe + maxTotalFeeBps |
 | P1-17 | REPORTÉ | — | irréalisable avec eth_call seul, sans helper on-chain |
-| P1-12 | À FAIRE | — | balayage logarithmique + régression |
+| P1-12 | FERMÉ | 24d9ff0 | balayage logarithmique + interpolation locale (ADR 0003) |
 | P1-18 | À FAIRE | — | multi-hop |
 | P1-10-bis | NON PLANIFIÉ | — | adaptive par profil (tradeSizeFactor global) |
 | P1-16-bis | NON PLANIFIÉ | — | écart médian dynamique |
