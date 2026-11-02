@@ -128,7 +128,7 @@ imminente en DRY_RUN ». Chacun fera l'objet d'un point dédié.
 | # | Statut | Commit | Note |
 |---|---|---|---|
 | D7 | FERMÉ | e35ae5c | max(pair.minProfitBps, config.effectiveMinProfitBps) dans decide/execute/executor |
-| D7-bis | À FAIRE | — | extraire effectiveMinProfitBps(pair, config) dans bot/pricing.js |
+| D7-bis | FERMÉ | 1f74225 | effectiveMinProfitBps({pair, config}) extrait dans bot/pricing.js |
 | D10 | À FAIRE | — | fix test/ForkArbitrum.test.js (minAmountOut, minProfitBps) |
 | D11 | À FAIRE | — | MIN_PROFIT_BPS transmis dans live.yml et scan.yml |
 | D12 | À FAIRE | — | EXPECTED_CHAIN_ID=31337 dans seedLocalMocks + README |
