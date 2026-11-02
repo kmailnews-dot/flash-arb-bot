@@ -585,6 +585,86 @@ describe("bot/index reconcilePendingExecutions", function () {
 
     fs.rmSync(journalDir, { recursive: true, force: true });
   });
+
+  it("marks an UNKNOWN record with a consumed nonce as DROPPED with a distinct reason", async function () {
+    const journalDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-reconcile-nonce-"));
+    const executionJournalPath = path.join(journalDir, "executions.json");
+    await writeExecutionJournal(
+      {
+        version: 1,
+        records: {
+          "record-3": {
+            id: "record-3",
+            status: "UNKNOWN",
+            txHash: null,
+            nonce: 5,
+            submittedAt: Date.now(),
+          },
+        },
+      },
+      executionJournalPath
+    );
+    const provider = {
+      getTransactionCount: async () => 7, // pending > record.nonce, tx consumed
+      getTransactionReceipt: async () => {
+        throw new Error("getTransactionReceipt must not be called without a tx hash");
+      },
+    };
+
+    const outcome = await reconcilePendingExecutions({
+      provider,
+      config: { executionJournalPath },
+      walletAddress: "0xabc",
+    });
+
+    expect(outcome).to.deep.equal({ reconciled: 1, skipped: 0 });
+    const journal = await readExecutionJournal(executionJournalPath);
+    expect(journal.records["record-3"]).to.include({
+      status: "DROPPED",
+      error: "recovered: nonce consumed but no tx hash",
+    });
+    fs.rmSync(journalDir, { recursive: true, force: true });
+  });
+
+  it("marks an UNKNOWN record with a pending nonce below its nonce as DROPPED (default)", async function () {
+    const journalDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-reconcile-nonce-default-"));
+    const executionJournalPath = path.join(journalDir, "executions.json");
+    await writeExecutionJournal(
+      {
+        version: 1,
+        records: {
+          "record-4": {
+            id: "record-4",
+            status: "UNKNOWN",
+            txHash: null,
+            nonce: 5,
+            submittedAt: Date.now(),
+          },
+        },
+      },
+      executionJournalPath
+    );
+    const provider = {
+      getTransactionCount: async () => 5, // pending <= record.nonce, tx not consumed
+      getTransactionReceipt: async () => {
+        throw new Error("getTransactionReceipt must not be called without a tx hash");
+      },
+    };
+
+    const outcome = await reconcilePendingExecutions({
+      provider,
+      config: { executionJournalPath },
+      walletAddress: "0xabc",
+    });
+
+    expect(outcome).to.deep.equal({ reconciled: 1, skipped: 0 });
+    const journal = await readExecutionJournal(executionJournalPath);
+    expect(journal.records["record-4"]).to.include({
+      status: "DROPPED",
+      error: "recovered: crashed before submit",
+    });
+    fs.rmSync(journalDir, { recursive: true, force: true });
+  });
 });
 
 describe("bot/index readAaveFlashLoanPremium", function () {

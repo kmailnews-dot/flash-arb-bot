@@ -763,19 +763,36 @@ async function execute({
   }
 }
 
-async function reconcilePendingExecutions({ provider, config } = {}) {
+async function reconcilePendingExecutions({ provider, config, walletAddress = null } = {}) {
   const filePath = config?.executionJournalPath || DEFAULT_EXECUTION_JOURNAL_PATH;
   const pendings = await listPendingExecutions(filePath);
   if (pendings.length === 0) return { reconciled: 0, skipped: 0 };
+
+  let pendingNonce = null;
+  if (walletAddress && typeof provider.getTransactionCount === "function") {
+    try {
+      pendingNonce = await provider.getTransactionCount(walletAddress, "pending");
+    } catch (err) {
+      console.warn(`[RECONCILE] could not read pending nonce: ${err.message}`);
+    }
+  }
+
   let reconciled = 0;
   let skipped = 0;
   for (const record of pendings) {
     if (!record.txHash) {
+      const nonceConsumed =
+        record.status === "UNKNOWN" &&
+        typeof record.nonce === "number" &&
+        pendingNonce !== null &&
+        pendingNonce > record.nonce;
       await upsertExecutionRecord(
         {
           ...record,
           status: "DROPPED",
-          error: "recovered: crashed before submit",
+          error: nonceConsumed
+            ? "recovered: nonce consumed but no tx hash"
+            : "recovered: crashed before submit",
           lastUpdateAt: Date.now(),
         },
         filePath

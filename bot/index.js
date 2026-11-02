@@ -140,7 +140,13 @@ async function main({
   const provider = injectedProvider || new ethers.JsonRpcProvider(config.rpcUrl);
   const scanLogPath = config.scanLogPath || DEFAULT_SCAN_LOG_PATH;
 
-  await reconcilePendingExecutions({ provider, config }).catch((err) => {
+  const reconciliationWallet =
+    config.privateKey ? new ethers.Wallet(config.privateKey).address : null;
+  await reconcilePendingExecutions({
+    provider,
+    config,
+    walletAddress: reconciliationWallet,
+  }).catch((err) => {
     console.warn(`[RECONCILE] startup reconciliation failed: ${err.message}`);
   });
 
