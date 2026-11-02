@@ -176,7 +176,9 @@ describe("bot/config validatePairs", function () {
     const pair = makePair();
     delete pair.tradeSizes;
 
-    expect(() => validatePairs([pair])).to.throw("PAIRS_CONFIG_JSON[0].tradeSizes is required.");
+    expect(() => validatePairs([pair])).to.throw(
+      "PAIRS_CONFIG_JSON[0].tradeSizes or PAIRS_CONFIG_JSON[0].logSweep is required."
+    );
   });
 
   it("rejects a non-array tradeSizes", function () {

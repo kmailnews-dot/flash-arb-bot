@@ -62,6 +62,81 @@ function buildFeeOverrides(feeData) {
   return {};
 }
 
+function logSweepSizes({ min, max, steps }) {
+  if (!Number.isInteger(steps) || steps < 3) {
+    throw new Error("logSweepSizes: steps must be an integer >= 3");
+  }
+  const minNum = Number(min);
+  const maxNum = Number(max);
+  if (!Number.isFinite(minNum) || !Number.isFinite(maxNum) || minNum <= 0 || maxNum <= minNum) {
+    throw new Error("logSweepSizes: invalid min/max");
+  }
+  const logMin = Math.log10(minNum);
+  const logMax = Math.log10(maxNum);
+  const result = [];
+  for (let i = 0; i < steps; i += 1) {
+    const t = steps === 1 ? 0 : i / (steps - 1);
+    const value = 10 ** (logMin + t * (logMax - logMin));
+    result.push(value.toFixed(6));
+  }
+  return result;
+}
+
+function interpolateMaximum({ sizes, profits, maxTradeSize = null }) {
+  if (!Array.isArray(sizes) || !Array.isArray(profits)) {
+    throw new Error("interpolateMaximum: sizes and profits must be arrays");
+  }
+  if (sizes.length !== profits.length || sizes.length === 0) {
+    throw new Error("interpolateMaximum: sizes and profits must have the same non-zero length");
+  }
+  let bestIndex = -1;
+  let bestProfit = null;
+  for (let i = 0; i < profits.length; i += 1) {
+    const p = profits[i];
+    if (p === null || p === undefined || typeof p === "bigint" || Number(p) < 0) continue;
+    if (bestProfit === null || Number(p) > bestProfit) {
+      bestProfit = Number(p);
+      bestIndex = i;
+    }
+  }
+  if (bestIndex < 0) {
+    return { size: sizes[0], interpolated: false };
+  }
+  if (bestIndex === 0 || bestIndex === profits.length - 1) {
+    return { size: sizes[bestIndex], interpolated: false };
+  }
+  const prevProfit = profits[bestIndex - 1];
+  const nextProfit = profits[bestIndex + 1];
+  if (
+    prevProfit === null || prevProfit === undefined || typeof prevProfit === "bigint" || Number(prevProfit) < 0 ||
+    nextProfit === null || nextProfit === undefined || typeof nextProfit === "bigint" || Number(nextProfit) < 0
+  ) {
+    return { size: sizes[bestIndex], interpolated: false };
+  }
+  const x0 = Math.log10(Number(sizes[bestIndex - 1]));
+  const x1 = Math.log10(Number(sizes[bestIndex]));
+  const x2 = Math.log10(Number(sizes[bestIndex + 1]));
+  const y0 = Number(prevProfit);
+  const y1 = bestProfit;
+  const y2 = Number(nextProfit);
+  const denom = y0 - 2 * y1 + y2;
+  if (denom >= 0) {
+    return { size: sizes[bestIndex], interpolated: false };
+  }
+  const h = x2 - x1;
+  const xStar = x1 + (h / 2) * ((y0 - y2) / denom);
+  let sizeStar = 10 ** xStar;
+  const lower = Math.min(Number(sizes[bestIndex - 1]), Number(sizes[bestIndex + 1]));
+  const upper = Math.max(Number(sizes[bestIndex - 1]), Number(sizes[bestIndex + 1]));
+  if (sizeStar < lower) sizeStar = lower;
+  if (sizeStar > upper) sizeStar = upper;
+  if (maxTradeSize !== null && maxTradeSize !== undefined) {
+    const cap = Number(maxTradeSize);
+    if (Number.isFinite(cap) && sizeStar > cap) sizeStar = cap;
+  }
+  return { size: sizeStar.toFixed(6), interpolated: true };
+}
+
 module.exports = {
   BPS_DENOMINATOR,
   GAS_COST_MARGIN_BPS,
@@ -70,5 +145,7 @@ module.exports = {
   WEI_PER_ETHER,
   buildFeeOverrides,
   gasCostInBorrowedToken,
+  interpolateMaximum,
+  logSweepSizes,
   withSlippage,
 };

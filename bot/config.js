@@ -74,36 +74,73 @@ function validatePairs(pairs) {
       throw new Error(`${prefix}.borrowedToken must not set both isStable and isWeth to true.`);
     }
 
-    if (pair.tradeSizes === undefined) {
-      throw new Error(`${prefix}.tradeSizes is required.`);
-    }
-    if (!Array.isArray(pair.tradeSizes)) {
-      throw new Error(`${prefix}.tradeSizes must be an array.`);
-    }
-    if (pair.tradeSizes.length === 0) {
-      throw new Error(`${prefix}.tradeSizes must not be empty.`);
-    }
+    const hasTradeSizes = pair.tradeSizes !== undefined && pair.tradeSizes !== null;
+    const hasLogSweep = pair.logSweep !== undefined && pair.logSweep !== null;
+    const bounds = PROFILE_BOUNDS[pair.profile];
     const decimals = pair.borrowedToken.decimals;
-    const seenTradeSizes = new Set();
-    for (let i = 0; i < pair.tradeSizes.length; i += 1) {
-      if (typeof pair.tradeSizes[i] !== "string") {
-        throw new Error(`${prefix}.tradeSizes[${i}] must be a string.`);
+    if (hasTradeSizes && hasLogSweep) {
+      throw new Error(`${prefix}.tradeSizes and ${prefix}.logSweep are mutually exclusive.`);
+    }
+    if (!hasTradeSizes && !hasLogSweep) {
+      throw new Error(`${prefix}.tradeSizes or ${prefix}.logSweep is required.`);
+    }
+    if (hasLogSweep) {
+      if (typeof pair.logSweep !== "object" || Array.isArray(pair.logSweep)) {
+        throw new Error(`${prefix}.logSweep must be an object with { min, max, steps }.`);
       }
-      let tradeSize;
+      const { min, max, steps } = pair.logSweep;
+      if (typeof min !== "string" || typeof max !== "string") {
+        throw new Error(`${prefix}.logSweep.min and ${prefix}.logSweep.max must be strings.`);
+      }
+      if (!Number.isInteger(steps) || steps < 3 || steps > 20) {
+        throw new Error(`${prefix}.logSweep.steps must be an integer between 3 and 20.`);
+      }
+      let minBigInt;
+      let maxBigInt;
       try {
-        tradeSize = ethers.parseUnits(pair.tradeSizes[i], decimals);
-      } catch (err) {
-        throw new Error(
-          `${prefix}.tradeSizes[${i}] must be parseable with borrowedToken.decimals (${decimals}).`
-        );
+        minBigInt = ethers.parseUnits(min, decimals);
+        maxBigInt = ethers.parseUnits(max, decimals);
+      } catch {
+        throw new Error(`${prefix}.logSweep.min and ${prefix}.logSweep.max must be parseable with borrowedToken.decimals (${decimals}).`);
       }
-      if (tradeSize <= 0n) {
-        throw new Error(`${prefix}.tradeSizes[${i}] must be greater than 0.`);
+      if (minBigInt <= 0n || maxBigInt <= 0n) {
+        throw new Error(`${prefix}.logSweep.min and ${prefix}.logSweep.max must be greater than 0.`);
       }
-      if (seenTradeSizes.has(tradeSize.toString())) {
-        throw new Error(`${prefix}.tradeSizes[${i}] duplicates an earlier trade size (${tradeSize}).`);
+      if (maxBigInt <= minBigInt) {
+        throw new Error(`${prefix}.logSweep.max must be greater than ${prefix}.logSweep.min.`);
       }
-      seenTradeSizes.add(tradeSize.toString());
+      if (maxBigInt > ethers.parseUnits(String(bounds.maxTradeSize), decimals)) {
+        throw new Error(`${prefix}.logSweep.max must be <= ${bounds.maxTradeSize} for profile "${pair.profile}".`);
+      }
+    }
+    if (hasTradeSizes) {
+      if (!Array.isArray(pair.tradeSizes)) {
+        throw new Error(`${prefix}.tradeSizes must be an array.`);
+      }
+      if (pair.tradeSizes.length === 0) {
+        throw new Error(`${prefix}.tradeSizes must not be empty.`);
+      }
+      const seenTradeSizes = new Set();
+      for (let i = 0; i < pair.tradeSizes.length; i += 1) {
+        if (typeof pair.tradeSizes[i] !== "string") {
+          throw new Error(`${prefix}.tradeSizes[${i}] must be a string.`);
+        }
+        let tradeSize;
+        try {
+          tradeSize = ethers.parseUnits(pair.tradeSizes[i], decimals);
+        } catch (err) {
+          throw new Error(
+            `${prefix}.tradeSizes[${i}] must be parseable with borrowedToken.decimals (${decimals}).`
+          );
+        }
+        if (tradeSize <= 0n) {
+          throw new Error(`${prefix}.tradeSizes[${i}] must be greater than 0.`);
+        }
+        if (seenTradeSizes.has(tradeSize.toString())) {
+          throw new Error(`${prefix}.tradeSizes[${i}] duplicates an earlier trade size (${tradeSize}).`);
+        }
+        seenTradeSizes.add(tradeSize.toString());
+      }
     }
 
     if (pair.minProfitBps !== undefined && pair.minProfitBps !== null) {
@@ -115,17 +152,18 @@ function validatePairs(pairs) {
     if (typeof pair.profile !== "string" || !VALID_PROFILES.has(pair.profile)) {
       throw new Error(`${prefix}.profile must be "majors" or "longtail".`);
     }
-    const bounds = PROFILE_BOUNDS[pair.profile];
     if (pair.minProfitBps === undefined || pair.minProfitBps === null) {
       throw new Error(`${prefix}.minProfitBps is required for profile "${pair.profile}".`);
     }
     if (pair.minProfitBps < bounds.minProfitBps[0] || pair.minProfitBps > bounds.minProfitBps[1]) {
       throw new Error(`${prefix}.minProfitBps must be between ${bounds.minProfitBps[0]} and ${bounds.minProfitBps[1]} for profile "${pair.profile}".`);
     }
-    for (const size of pair.tradeSizes) {
-      const num = parseFloat(size);
-      if (num > bounds.maxTradeSize) {
-        throw new Error(`${prefix}.tradeSizes contains ${size}, above the ${bounds.maxTradeSize} cap for profile "${pair.profile}".`);
+    if (hasTradeSizes) {
+      for (const size of pair.tradeSizes) {
+        const num = parseFloat(size);
+        if (num > bounds.maxTradeSize) {
+          throw new Error(`${prefix}.tradeSizes contains ${size}, above the ${bounds.maxTradeSize} cap for profile "${pair.profile}".`);
+        }
       }
     }
 
