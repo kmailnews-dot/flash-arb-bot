@@ -16,7 +16,11 @@ const {
   readRpcErrors,
   recordRpcCycle,
   checkRpcErrorRate,
+  readGasHistory,
+  recordGasSample,
+  checkGasAnomaly,
   DEFAULT_RPC_ERRORS_PATH,
+  DEFAULT_GAS_HISTORY_PATH,
 } = require("../bot/guards");
 const { writeExecutionJournal } = require("../bot/persist");
 
@@ -410,5 +414,86 @@ describe("bot/guards rpcErrors", function () {
     });
     expect(result.ok).to.equal(false);
     expect(result.error).to.include("RPC error rate");
+  });
+});
+
+describe("bot/guards gasHistory", function () {
+  let guardDir;
+
+  beforeEach(function () {
+    guardDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-gas-history-"));
+  });
+
+  afterEach(function () {
+    fs.rmSync(guardDir, { recursive: true, force: true });
+  });
+
+  it("records a gas sample and truncates to windowSize", async function () {
+    const filePath = path.join(guardDir, "gas_history.json");
+    for (let i = 1; i <= 5; i += 1) {
+      await recordGasSample({
+        filePath,
+        gasPriceWei: BigInt(i) * 1_000_000_000n,
+        at: 1000 + i,
+        windowSize: 3,
+      });
+    }
+    const state = await readGasHistory({ filePath });
+    expect(state.version).to.equal(1);
+    expect(state.samples).to.have.length(3);
+    expect(state.samples.map((s) => s.gasPriceWei)).to.deep.equal([
+      "3000000000",
+      "4000000000",
+      "5000000000",
+    ]);
+  });
+
+  it("returns ok when there are fewer than minSamples", async function () {
+    const filePath = path.join(guardDir, "gas_history.json");
+    await recordGasSample({ filePath, gasPriceWei: 1_000_000_000n, at: 1000 });
+    await recordGasSample({ filePath, gasPriceWei: 1_100_000_000n, at: 2000 });
+    const result = await checkGasAnomaly({ filePath, minSamples: 5, now: 3000 });
+    expect(result.ok).to.equal(true);
+    expect(result.reason).to.equal("insufficient samples");
+    expect(result.samples).to.equal(2);
+  });
+
+  it("returns ok when the last sample is below multiplier x median", async function () {
+    const filePath = path.join(guardDir, "gas_history.json");
+    for (let i = 1; i <= 5; i += 1) {
+      await recordGasSample({
+        filePath,
+        gasPriceWei: 1_000_000_000n,
+        at: 1000 + i,
+      });
+    }
+    const result = await checkGasAnomaly({ filePath, multiplier: 3, minSamples: 5, now: 3000 });
+    expect(result.ok).to.equal(true);
+    expect(result.median).to.equal("1000000000");
+    expect(result.last).to.equal("1000000000");
+  });
+
+  it("opens when the last sample exceeds multiplier x median", async function () {
+    const filePath = path.join(guardDir, "gas_history.json");
+    for (let i = 1; i <= 4; i += 1) {
+      await recordGasSample({
+        filePath,
+        gasPriceWei: 1_000_000_000n,
+        at: 1000 + i,
+      });
+    }
+    await recordGasSample({ filePath, gasPriceWei: 5_000_000_000n, at: 2000 });
+    const result = await checkGasAnomaly({ filePath, multiplier: 3, minSamples: 5, now: 3000 });
+    expect(result.ok).to.equal(false);
+    expect(result.median).to.equal("1000000000");
+    expect(result.last).to.equal("5000000000");
+  });
+
+  it("returns ok on missing file (fail-open)", async function () {
+    const filePath = path.join(guardDir, "missing.json");
+    const result = await checkGasAnomaly({ filePath, minSamples: 5 });
+    expect(result.ok).to.equal(true);
+    expect(result.reason).to.equal("insufficient samples");
+    expect(result.samples).to.equal(0);
   });
 });

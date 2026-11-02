@@ -325,6 +325,9 @@ function validateScannerConfig({
   maxQuoteAgeMs = 60_000,
   rpcErrorRateWindowSize = 10,
   rpcErrorRateThreshold = 0.5,
+  gasAnomalyWindowSize = 20,
+  gasAnomalyMultiplier = 3,
+  gasAnomalyMinSamples = 5,
 }) {
   if (minProfitUsd !== undefined && minProfitUsd !== null) {
     if (typeof minProfitUsd !== "number" || !Number.isFinite(minProfitUsd) || minProfitUsd < 0) {
@@ -439,6 +442,20 @@ function validateScannerConfig({
   ) {
     throw new Error("RPC_ERROR_RATE_THRESHOLD must be a finite number > 0 and <= 1.");
   }
+  if (!Number.isInteger(gasAnomalyWindowSize) || gasAnomalyWindowSize < 3 || gasAnomalyWindowSize > 100) {
+    throw new Error("GAS_ANOMALY_WINDOW_SIZE must be an integer between 3 and 100.");
+  }
+  if (
+    typeof gasAnomalyMultiplier !== "number" ||
+    !Number.isFinite(gasAnomalyMultiplier) ||
+    gasAnomalyMultiplier < 1.5 ||
+    gasAnomalyMultiplier > 10
+  ) {
+    throw new Error("GAS_ANOMALY_MULTIPLIER must be a finite number in [1.5, 10].");
+  }
+  if (!Number.isInteger(gasAnomalyMinSamples) || gasAnomalyMinSamples < 3 || gasAnomalyMinSamples > gasAnomalyWindowSize) {
+    throw new Error("GAS_ANOMALY_MIN_SAMPLES must be an integer between 3 and GAS_ANOMALY_WINDOW_SIZE.");
+  }
 }
 
 const slippageBps = validateSlippageBps();
@@ -486,6 +503,10 @@ const config = {
   rpcErrorRateWindowSize: optionalNumber("RPC_ERROR_RATE_WINDOW_SIZE", 10),
   rpcErrorRateThreshold: optionalNumber("RPC_ERROR_RATE_THRESHOLD", 0.5),
   rpcErrorsPath: optionalString("RPC_ERRORS_PATH", path.join(LOG_DIR, "rpc_errors.json")),
+  gasAnomalyWindowSize: optionalNumber("GAS_ANOMALY_WINDOW_SIZE", 20),
+  gasAnomalyMultiplier: optionalNumber("GAS_ANOMALY_MULTIPLIER", 3),
+  gasAnomalyMinSamples: optionalNumber("GAS_ANOMALY_MIN_SAMPLES", 5),
+  gasHistoryPath: optionalString("GAS_HISTORY_PATH", path.join(LOG_DIR, "gas_history.json")),
   maxDailyGasEth: optionalNumber("MAX_DAILY_GAS_ETH", 0.01),
   gasDrawdownMultiplier: optionalNumber("GAS_DRAWDOWN_MULTIPLIER", 1.2),
   maxConsecutiveFailures: optionalNumber("MAX_CONSECUTIVE_FAILURES", 5),
@@ -529,6 +550,9 @@ validateScannerConfig({
   maxQuoteAgeMs: config.maxQuoteAgeMs,
   rpcErrorRateWindowSize: config.rpcErrorRateWindowSize,
   rpcErrorRateThreshold: config.rpcErrorRateThreshold,
+  gasAnomalyWindowSize: config.gasAnomalyWindowSize,
+  gasAnomalyMultiplier: config.gasAnomalyMultiplier,
+  gasAnomalyMinSamples: config.gasAnomalyMinSamples,
 });
 
 module.exports = config;

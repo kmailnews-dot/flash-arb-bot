@@ -10,6 +10,7 @@ const LOG_DIR = path.resolve(__dirname, "..", "logs");
 const DEFAULT_GAS_SPENT_PATH = path.join(LOG_DIR, "gas_spent.json");
 const DEFAULT_CIRCUIT_BREAKER_PATH = path.join(LOG_DIR, "circuit_breaker.json");
 const DEFAULT_RPC_ERRORS_PATH = path.join(LOG_DIR, "rpc_errors.json");
+const DEFAULT_GAS_HISTORY_PATH = path.join(LOG_DIR, "gas_history.json");
 
 function utcDay(now = Date.now()) {
   return new Date(now).toISOString().slice(0, 10);
@@ -397,10 +398,94 @@ async function checkRpcErrorRate({
   return { ok: true, rate, samples: recent.length };
 }
 
+async function readGasHistory({ filePath = DEFAULT_GAS_HISTORY_PATH } = {}) {
+  const state = await readState(filePath, null);
+  if (!state || typeof state !== "object" || Array.isArray(state)) {
+    return { version: 1, samples: [] };
+  }
+  if (state.version !== 1 || !Array.isArray(state.samples)) {
+    return { version: 1, samples: [] };
+  }
+  return { version: 1, samples: state.samples };
+}
+
+async function writeGasHistory({ filePath = DEFAULT_GAS_HISTORY_PATH, state } = {}) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const tmpPath = `${filePath}.${process.pid}.tmp`;
+  const fh = await fs.open(tmpPath, "w");
+  try {
+    await fh.writeFile(`${JSON.stringify(state, null, 2)}\n`, "utf8");
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+  await fs.rename(tmpPath, filePath);
+}
+
+async function recordGasSample({
+  filePath = DEFAULT_GAS_HISTORY_PATH,
+  gasPriceWei,
+  at = Date.now(),
+  windowSize = 20,
+} = {}) {
+  if (typeof gasPriceWei !== "bigint" || gasPriceWei <= 0n) {
+    throw new Error("recordGasSample: gasPriceWei must be a positive bigint");
+  }
+  if (!Number.isInteger(windowSize) || windowSize < 1) {
+    throw new Error("recordGasSample: windowSize must be a positive integer");
+  }
+  const state = await readGasHistory({ filePath });
+  const samples = [
+    ...state.samples,
+    { gasPriceWei: gasPriceWei.toString(), at },
+  ].slice(-windowSize);
+  await writeGasHistory({ filePath, state: { version: 1, samples } });
+  return { version: 1, samples };
+}
+
+async function checkGasAnomaly({
+  filePath = DEFAULT_GAS_HISTORY_PATH,
+  windowSize = 20,
+  multiplier = 3,
+  minSamples = 5,
+  now = Date.now(),
+} = {}) {
+  const state = await readGasHistory({ filePath });
+  const recent = state.samples
+    .filter((s) => typeof s.at === "number" && s.at <= now)
+    .slice(-windowSize);
+  if (recent.length < minSamples) {
+    return { ok: true, reason: "insufficient samples", samples: recent.length };
+  }
+  const values = recent
+    .map((s) => BigInt(s.gasPriceWei))
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const mid = Math.floor(values.length / 2);
+  const median = values.length % 2 === 0 ? (values[mid - 1] + values[mid]) / 2n : values[mid];
+  const last = values[values.length - 1];
+  if (last > median * BigInt(multiplier)) {
+    return {
+      ok: false,
+      median: median.toString(),
+      last: last.toString(),
+      ratio: Number(last) / Number(median),
+      samples: recent.length,
+    };
+  }
+  return {
+    ok: true,
+    median: median.toString(),
+    last: last.toString(),
+    ratio: Number(last) / Number(median),
+    samples: recent.length,
+  };
+}
+
 module.exports = {
   DEFAULT_GAS_SPENT_PATH,
   DEFAULT_CIRCUIT_BREAKER_PATH,
   DEFAULT_RPC_ERRORS_PATH,
+  DEFAULT_GAS_HISTORY_PATH,
   utcDay,
   checkChainId,
   checkContractOwner,
@@ -417,4 +502,8 @@ module.exports = {
   writeRpcErrors,
   recordRpcCycle,
   checkRpcErrorRate,
+  readGasHistory,
+  writeGasHistory,
+  recordGasSample,
+  checkGasAnomaly,
 };
