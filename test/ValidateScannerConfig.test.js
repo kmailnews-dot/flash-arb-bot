@@ -182,4 +182,42 @@ describe("bot/config validateScannerConfig", function () {
       else delete require.cache[configPath];
     }
   });
+
+  it("accepts a valid maxQuoteAgeMs", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, maxQuoteAgeMs: 60_000 })).to.not.throw();
+  });
+
+  it("rejects a zero maxQuoteAgeMs", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, maxQuoteAgeMs: 0 })).to.throw(
+      "MAX_QUOTE_AGE_MS must be a positive integer."
+    );
+  });
+
+  it("rejects a negative maxQuoteAgeMs", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, maxQuoteAgeMs: -1 })).to.throw(
+      "MAX_QUOTE_AGE_MS must be a positive integer."
+    );
+  });
+
+  it("rejects a NaN maxQuoteAgeMs", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, maxQuoteAgeMs: NaN })).to.throw(
+      "MAX_QUOTE_AGE_MS must be a positive integer."
+    );
+  });
+
+  it("accepts a valid l1CostMultiplierBps", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, l1CostMultiplierBps: 5000 })).to.not.throw();
+  });
+
+  it("rejects a negative l1CostMultiplierBps", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, l1CostMultiplierBps: -1 })).to.throw(
+      "L1_COST_MULTIPLIER_BPS must be an integer between 0 and 10000."
+    );
+  });
+
+  it("rejects an l1CostMultiplierBps above 10000", function () {
+    expect(() => validateScannerConfig({ ...VALID_CONFIG, l1CostMultiplierBps: 10001 })).to.throw(
+      "L1_COST_MULTIPLIER_BPS must be an integer between 0 and 10000."
+    );
+  });
 });
