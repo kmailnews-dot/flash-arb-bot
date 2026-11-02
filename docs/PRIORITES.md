@@ -139,7 +139,7 @@ imminente en DRY_RUN ». Chacun fera l'objet d'un point dédié.
 | D5 | À FAIRE | — | coût L1/calldata dans le calcul de profit |
 | D6 | À FAIRE | — | une seule source de premium Aave (scanner + decide + execute) |
 | D8 | À FAIRE | — | owner() dans FLASH_ARB_EXECUTOR_ABI |
-| D9 | À FAIRE | — | seuils absents = rejet explicite dans decide |
+| D9 | FERMÉ | — | non-défaut : bot/config.js garantit MIN_PROFIT_USD=0.50 et MIN_PROFIT_BPS=30 par défaut. Le cas « aucun seuil » n'est atteignable qu'en test et n'a pas été ajouté pour ne pas casser 51 fixtures de bot/executor. |
 
 ---
 
