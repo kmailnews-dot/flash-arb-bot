@@ -132,13 +132,13 @@ imminente en DRY_RUN ». Chacun fera l'objet d'un point dédié.
 | D10 | FERMÉ | — | non-défaut : test/ForkArbitrum.test.js buildParams() fournit déjà minAmountOut (1n) et minProfitBps (0n), aligné sur bot/abis.js:16 et FlashArbExecutor.sol:37,43,44. Les 2 pending sont un opt-in (RUN_FORK_TESTS=true) par design, pas un bug. |
 | D11 | FERMÉ | — | non-défaut : MIN_PROFIT_BPS est déjà transmis dans live.yml:113 et scan.yml:44 (défaut 30), documenté dans .env.example:50 et README.md:357. Note : MIN_PROFIT_USD défaut workflow=5 vs .env.example=0.50, incohérence hors périmètre D11 à traiter séparément. |
 | D12 | FERMÉ | — | non-défaut : scripts/seedLocalMocks.js:76 imprime EXPECTED_CHAIN_ID=31337, README.md:332-334 documente la limitation chainId 31337 et la solution seed. |
-| D1 | À FAIRE | — | journal d'exécution durable (machine à états tx) |
-| D2 | À FAIRE | — | classification ethers v6 complète (CALL_EXCEPTION, NONCE_EXPIRED, REPLACEMENT_UNDERPRICED, TRANSACTION_REPLACED) |
-| D3 | À FAIRE | — | P&L réalisé + circuit breaker étendu (drawdown, RPC, gaz) |
-| D4 | À FAIRE | — | blockTag commun + TTL explicite |
-| D5 | À FAIRE | — | coût L1/calldata dans le calcul de profit |
-| D6 | À FAIRE | — | une seule source de premium Aave (scanner + decide + execute) |
-| D8 | À FAIRE | — | owner() dans FLASH_ARB_EXECUTOR_ABI |
+| D1 | FERMÉ | cd4397c | journal d'exécution durable + D1-ter fallback getTransactionCount. Voir commits 1f74225, c86673f, df21ec5. |
+| D2 | FERMÉ | b3b12e7 | classification ethers v6 complète (CALL_EXCEPTION, NONCE_EXPIRED, REPLACEMENT_UNDERPRICED, TRANSACTION_REPLACED) |
+| D3 | FERMÉ | c86673f | P&L réalisé + breaker étendu (drawdown e6c0ecf, RPC df21ec5, gaz c86673f, PnL abb6fac) |
+| D4 | FERMÉ | 906ce09 | blockTag commun + TTL explicite |
+| D5 | FERMÉ | 2fadb9c | coût L1/calldata dans le calcul de profit |
+| D6 | FERMÉ | 18d2927 | une seule source de premium Aave (readAaveFlashLoanPremium, D6-bis fermé 18d2927) |
+| D8 | FERMÉ | b3b12e7 | owner() dans FLASH_ARB_EXECUTOR_ABI |
 | D9 | FERMÉ | — | non-défaut : bot/config.js garantit MIN_PROFIT_USD=0.50 et MIN_PROFIT_BPS=30 par défaut. Le cas « aucun seuil » n'est atteignable qu'en test et n'a pas été ajouté pour ne pas casser 51 fixtures de bot/executor. |
 
 ---
