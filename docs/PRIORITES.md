@@ -136,7 +136,6 @@ imminente en DRY_RUN ». Chacun fera l'objet d'un point dédié.
 | D9 | À FAIRE | — | seuils absents = rejet explicite dans decide |
 
 ---
----
 
 ## Suivi des dettes post-audit (D1–D6)
 
@@ -161,7 +160,6 @@ l'objet d'un point dédié ou d'une acceptation écrite.
 | D6a-bis | À FAIRE | — | tests validation maxQuoteAgeMs et L1_COST_MULTIPLIER_BPS |
 | D6-bis | À FAIRE | — | test unitaire direct de readAaveFlashLoanPremium (3 chemins) |
 
----
 ---
 
 ## F-05-C — red team et clôture (commit 0e5960a)
