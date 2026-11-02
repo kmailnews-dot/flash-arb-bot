@@ -155,7 +155,7 @@ l'objet d'un point dédié ou d'une acceptation écrite.
 | D3-breaker-bis | À FAIRE | — | détection gaz anormal (drawdown, RPC, gaz) |
 | D3-breaker-ter | DOCUMENTÉ | — | garde revertWindowFull/unknownWindowFull (fenêtre partielle). Voir bot/ARCHITECTURE.md. |
 | D3-breaker-quater | DOCUMENTÉ | — | rate non réévalué après expiration du cooldown. Voir bot/ARCHITECTURE.md. |
-| D3-breaker-quinquies | À FAIRE | — | distinguer ENOENT de STATE_FILE_CORRUPT dans le breaker |
+| D3-breaker-quinquies | FERMÉ | 477ced5 | distinguer ENOENT de STATE_FILE_CORRUPT dans le breaker (déjà implémenté dans readState) |
 | D3-breaker-sexies | À FAIRE | — | tests validation config breaker (4 options) |
 | D4-bis | À FAIRE | — | QUOTE_STALE et DEPTH_EXCEEDED ne doivent pas incrémenter rpcErrors (bot/index.js) |
 | D4-ter | DOCUMENTÉ | — | blockTag non propagé à execute.js (re-quote runtime reste "latest"). Voir bot/ARCHITECTURE.md. |
