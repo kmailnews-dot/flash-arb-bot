@@ -211,16 +211,21 @@ async function main({
         await persistResultSafely(scanLogPath, result, chainId);
 
         if (result.error) {
-          rpcErrors += 1;
           const errorInfo = describeError(result.error);
+          const isQualityFilter = typeof result.error === "string";
+          if (!isQualityFilter) {
+            rpcErrors += 1;
+          }
           logEvent({
             event: "scan_result",
-            level: "error",
+            level: isQualityFilter ? "info" : "error",
             pair: pair.label,
             tradeSize: result.tradeSizeHuman,
             borrowedToken: pair.borrowedToken.symbol,
             error: errorInfo,
-            message: `  ${result.tradeSizeHuman} ${pair.borrowedToken.symbol}: ERROR - ${errorInfo.shortMessage}`,
+            message: `  ${result.tradeSizeHuman} ${pair.borrowedToken.symbol}: ${
+              isQualityFilter ? "FILTERED" : "ERROR"
+            } - ${errorInfo.shortMessage}`,
           });
           continue;
         }

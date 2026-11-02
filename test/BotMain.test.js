@@ -471,6 +471,39 @@ describe("bot/index main", function () {
     expect(summary.exitCode).to.equal(0);
     fs.rmSync(scanDir, { recursive: true, force: true });
   });
+
+  it("does not count QUOTE_STALE or DEPTH_EXCEEDED as RPC errors", async function () {
+    const scanDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-quality-filters-"));
+    const pair = {
+      label: "BOR/MID quality pair",
+      borrowedToken: { address: ethers.Wallet.createRandom().address, decimals: 18, symbol: "BOR" },
+      intermediateToken: { address: ethers.Wallet.createRandom().address, decimals: 18, symbol: "MID" },
+    };
+    const config = {
+      dryRun: true,
+      scanLogPath: path.join(scanDir, "scans.jsonl"),
+      pairs: [pair],
+      aaveFlashLoanPremiumBps: 5n,
+      ethUsdRoute: null,
+      maxRpcErrorsPerScan: 1,
+    };
+
+    const summary = await main({
+      provider: ethers.provider,
+      config,
+      scanPair: async () => [
+        { tradeSizeHuman: "1000", error: "QUOTE_STALE" },
+        { tradeSizeHuman: "1000", error: "QUOTE_STALE" },
+        { tradeSizeHuman: "1000", error: "DEPTH_EXCEEDED" },
+        { tradeSizeHuman: "1000", error: "QUOTE_STALE" },
+        { tradeSizeHuman: "1000", error: "DEPTH_EXCEEDED" },
+      ],
+    });
+
+    expect(summary.scanned).to.equal(5);
+    expect(summary.exitCode).to.equal(0);
+    fs.rmSync(scanDir, { recursive: true, force: true });
+  });
 });
 
 describe("bot/index reconcilePendingExecutions", function () {
