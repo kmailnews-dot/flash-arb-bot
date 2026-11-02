@@ -165,7 +165,7 @@ l'objet d'un point dédié ou d'une acceptation écrite.
 | D6-bis | FERMÉ | 18d2927 | test unitaire direct de readAaveFlashLoanPremium (3 chemins) |
 | D1-ter | À FAIRE | — | fallback getTransactionCount dans reconcilePendingExecutions pour les records UNKNOWN sans txHash |
 | D3-breaker-bis-c | FERMÉ | df21ec5 | RPC error rate breaker (persistance logs/rpc_errors.json, fenêtre 10, seuil 0.5, ADR 0004) |
-| D3-breaker-bis-b | À FAIRE | — | détection d'un gaz anormal (médiane gasPrice sur N cycles, ADR requis) |
+| D3-breaker-bis-b | FERMÉ | c86673f | gas anomaly breaker (persistance logs/gas_history.json, médiane glissante, multiplicateur 3, ADR 0005) |
 
 ---
 

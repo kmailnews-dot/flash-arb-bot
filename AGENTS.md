@@ -42,9 +42,9 @@ Ces règles s'appliquent à toutes les sessions sur ce projet. Lis-les avant tou
 ## 8. CONTEXTE DU PROJET (mis à jour manuellement)
 - **Stack** : Solidity ^0.8.20, Node.js 20, Hardhat, ethers v6, Aave V3, Uniswap V3 (SwapRouter original uniquement, jamais SwapRouter02), SushiSwap V2.
 - **Réseau** : Arbitrum One (42161), Arbitrum Sepolia (421614).
-- **Dernier commit** : df21ec5 (D3-breaker-bis-c).
-- **Prochaine étape** : dettes restantes (D3-breaker-bis-b, D5-ter) — voir docs/PRIORITES.md.
-- **Tests** : 321 passing, 2 pending (tests fork), 0 failing.
+- **Dernier commit** : c86673f (D3-breaker-bis-b).
+- **Prochaine étape** : dette restante (D5-ter, bloquée par l'absence de trades réels) et P1-18 (multi-hop, dégel contrat) — voir docs/PRIORITES.md.
+- **Tests** : 328 passing, 2 pending (tests fork), 0 failing.
 
 ## 9. ARCHITECTURE
 - Carte du bot : bot/ARCHITECTURE.md (flux, modules, invariants, pièges).

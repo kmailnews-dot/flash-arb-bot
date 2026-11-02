@@ -355,3 +355,20 @@ assumés, pas à des bugs.
   `docs/adr/0004-rpc-error-rate-breaker.md`,
   `bot/guards.js` (`recordRpcCycle`, `checkRpcErrorRate`),
   `bot/index.js` (`main`), `bot/config.js`.
+- **D3-breaker-bis-b — gas anomaly breaker (ADR 0005).**
+  `recordGasSample` (`bot/guards.js`) persiste un échantillon
+  `{ gasPriceWei, at }` dans `logs/gas_history.json` après
+  chaque scan (`bot/index.js`). `checkGasAnomaly`
+  (`bot/guards.js`) calcule la médiane des `gasPriceWei` sur
+  les `gasAnomalyWindowSize` échantillons les plus récents
+  (défaut 20), et ouvre le breaker si le dernier échantillon
+  dépasse `gasAnomalyMultiplier × médiane` (défaut 3).
+  `checkCircuitBreaker` appelle `checkGasAnomaly` comme 6e
+  condition, après le RPC error rate. Fail-open sur fichier
+  absent, échantillons insuffisants (< `gasAnomalyMinSamples`,
+  défaut 5) ou schéma invalide ; fail-closed sur JSON corrompu.
+  Config : `GAS_ANOMALY_WINDOW_SIZE`, `GAS_ANOMALY_MULTIPLIER`,
+  `GAS_ANOMALY_MIN_SAMPLES`, `GAS_HISTORY_PATH`. Réf. :
+  `docs/adr/0005-gas-anomaly-breaker.md`,
+  `bot/guards.js` (`recordGasSample`, `checkGasAnomaly`),
+  `bot/index.js` (`main`), `bot/config.js`.
