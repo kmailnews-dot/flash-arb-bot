@@ -1,7 +1,7 @@
 const { ethers } = require("ethers");
 const { quoteLeg, quoteV2, quoteV3 } = require("./prices");
 const { createThrottle, withThrottle } = require("./throttle");
-const { GAS_PROFIT_MULTIPLIER } = require("./pricing");
+const { GAS_PROFIT_MULTIPLIER, logSweepSizes, interpolateMaximum } = require("./pricing");
 
 const BPS_DENOMINATOR = 10000n;
 const MAX_DEPTH_IMPACT_BPS = 50n;
@@ -190,8 +190,15 @@ async function scanPair({
   quoteLeg: injectedQuoteLeg = quoteLeg,
 }) {
   const blockTag = await provider.getBlockNumber();
+  const tradeSizes = pair.logSweep
+    ? logSweepSizes({
+        min: pair.logSweep.min,
+        max: pair.logSweep.max,
+        steps: pair.logSweep.steps,
+      })
+    : pair.tradeSizes;
   const results = [];
-  for (const tradeSizeHuman of pair.tradeSizes) {
+  for (const tradeSizeHuman of tradeSizes) {
     try {
       if (
         !(await isTradeSizeWithinDepth({
@@ -231,11 +238,33 @@ async function scanPair({
     }
     return result;
   });
-  return checkedResults.sort((a, b) => {
+  const sorted = checkedResults.sort((a, b) => {
     if (a.error) return 1;
     if (b.error) return -1;
     return a.grossProfit > b.grossProfit ? -1 : a.grossProfit < b.grossProfit ? 1 : 0;
   });
+
+  if (pair.logSweep && sorted.length >= 3 && sorted.every((r) => !r.error)) {
+    const ascending = [...sorted].reverse();
+    const sizes = ascending.map((r) => r.tradeSizeHuman);
+    const profits = ascending.map((r) =>
+      r.netProfitUsd !== null ? r.netProfitUsd : Number(r.grossProfit)
+    );
+    const interp = interpolateMaximum({
+      sizes,
+      profits,
+      maxTradeSize: pair.logSweep.max,
+    });
+    if (interp.interpolated) {
+      sorted[0] = {
+        ...sorted[0],
+        tradeSizeHuman: interp.size,
+        interpolated: true,
+      };
+    }
+  }
+
+  return sorted;
 }
 
 module.exports = {

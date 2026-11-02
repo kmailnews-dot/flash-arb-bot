@@ -212,4 +212,45 @@ describe("bot/scanner scanPair", function () {
       global.Date = RealDate;
     }
   });
+
+  it("generates a log sweep grid when logSweep is configured", async function () {
+    const calls = [];
+    const provider = { getBlockNumber: async () => BLOCK_TAG };
+    const logSweepPair = {
+      ...pair,
+      tradeSizes: undefined,
+      logSweep: { min: "100", max: "10000", steps: 5 },
+    };
+    const results = await scanPair({
+      provider,
+      pair: logSweepPair,
+      config,
+      gasPriceWei: GAS_PRICE_WEI,
+      ethUsdPrice: ETH_USD_PRICE,
+      quoteLeg: makeScanPairQuoteLeg(calls),
+    });
+    expect(results).to.have.length(5);
+    expect(results.map((r) => r.tradeSizeHuman)).to.include.members([
+      "100.000000",
+      "316.227766",
+      "1000.000000",
+      "3162.277660",
+      "10000.000000",
+    ]);
+  });
+
+  it("does not mark results as interpolated when using legacy tradeSizes", async function () {
+    const calls = [];
+    const provider = { getBlockNumber: async () => BLOCK_TAG };
+    const results = await scanPair({
+      provider,
+      pair,
+      config,
+      gasPriceWei: GAS_PRICE_WEI,
+      ethUsdPrice: ETH_USD_PRICE,
+      quoteLeg: makeScanPairQuoteLeg(calls),
+    });
+    expect(results).to.have.length(1);
+    expect(results[0].interpolated).to.be.undefined;
+  });
 });
