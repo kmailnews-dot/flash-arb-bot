@@ -339,3 +339,19 @@ assumés, pas à des bugs.
   `bot/pricing.js` (`logSweepSizes`, `interpolateMaximum`),
   `bot/scanner.js` (`scanPair`), `bot/config.js`
   (`validatePairs`).
+- **D3-breaker-bis-c — RPC error rate breaker (ADR 0004).**
+  `recordRpcCycle` (`bot/guards.js`) persiste un cycle
+  `{ errors, total, at }` dans `logs/rpc_errors.json` après
+  chaque scan (`bot/index.js`). `checkRpcErrorRate`
+  (`bot/guards.js`) calcule `sum(errors)/sum(total)` sur les
+  `rpcErrorRateWindowSize` cycles les plus récents (défaut 10)
+  et ouvre le breaker si le taux dépasse
+  `rpcErrorRateThreshold` (défaut 0.5). `checkCircuitBreaker`
+  appelle `checkRpcErrorRate` comme 5e condition, après le
+  gas-drawdown. Fail-open sur fichier absent ou schéma
+  invalide ; fail-closed sur JSON corrompu (via
+  `STATE_FILE_CORRUPT`). Config : `RPC_ERROR_RATE_WINDOW_SIZE`,
+  `RPC_ERROR_RATE_THRESHOLD`, `RPC_ERRORS_PATH`. Réf. :
+  `docs/adr/0004-rpc-error-rate-breaker.md`,
+  `bot/guards.js` (`recordRpcCycle`, `checkRpcErrorRate`),
+  `bot/index.js` (`main`), `bot/config.js`.
