@@ -158,6 +158,9 @@ async function checkCircuitBreaker({
     maxDailyGasEth = 0.01,
     gasSpentPath = DEFAULT_GAS_SPENT_PATH,
     gasDrawdownMultiplier = 1.2,
+    rpcErrorsPath = DEFAULT_RPC_ERRORS_PATH,
+    rpcErrorRateWindowSize = 10,
+    rpcErrorRateThreshold = 0.5,
   } = {}) {
   const state = await readCircuitBreaker({ filePath });
   if (state.openUntil !== null && now < state.openUntil) {
@@ -265,6 +268,30 @@ async function checkCircuitBreaker({
       }
     } catch (err) {
       console.warn(`[GUARD WARNING] gas drawdown check failed: ${err.message}`);
+    }
+  }
+  if (rpcErrorsPath && rpcErrorRateWindowSize && rpcErrorRateThreshold) {
+    try {
+      const rpcCheck = await checkRpcErrorRate({
+        filePath: rpcErrorsPath,
+        windowSize: rpcErrorRateWindowSize,
+        threshold: rpcErrorRateThreshold,
+        now,
+      });
+      if (!rpcCheck.ok) {
+        const openUntil = now + cooldownMinutes * 60_000;
+        await writeState(filePath, { consecutiveFailures: state.consecutiveFailures, openUntil });
+        return {
+          ok: false,
+          ...state,
+          openUntil,
+          rpcErrorRate: rpcCheck.rate,
+          rpcErrorSamples: rpcCheck.samples,
+          error: rpcCheck.error,
+        };
+      }
+    } catch (err) {
+      console.warn(`[GUARD WARNING] rpc error rate check failed: ${err.message}`);
     }
   }
   return { ok: true, ...state, revertRate, unknownRate };

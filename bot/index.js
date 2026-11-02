@@ -4,7 +4,7 @@ const { maybeExecute } = require("./executor");
 const { reconcilePendingExecutions } = require("./execute");
 const { DEFAULT_SCAN_LOG_PATH, appendScanResult, logEvent, logFormat } = require("./persist");
 const { NETWORKS } = require("./networks");
-const { checkWalletBalanceLow } = require("./guards");
+const { checkWalletBalanceLow, recordRpcCycle, DEFAULT_RPC_ERRORS_PATH } = require("./guards");
 const {
   DEFAULT_ADAPTIVE_PATH,
   applyAdaptive,
@@ -306,6 +306,17 @@ async function main({
     `\nDone: ${scanned} quotes checked, ${opportunities} opportunit${opportunities === 1 ? "y" : "ies"} found, ` +
       `${executed} transaction attempt(s).`
   );
+
+  try {
+    await recordRpcCycle({
+      filePath: config.rpcErrorsPath || DEFAULT_RPC_ERRORS_PATH,
+      errors: rpcErrors,
+      total: scanned,
+      windowSize: config.rpcErrorRateWindowSize ?? 10,
+    });
+  } catch (err) {
+    console.warn(`[RPC ERRORS] could not persist RPC cycle: ${err.message}`);
+  }
 
   return { ethUsdPrice, aaveFlashLoanPremiumBps, scanned, opportunities, executed, exitCode };
 }

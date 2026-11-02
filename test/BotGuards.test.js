@@ -395,4 +395,20 @@ describe("bot/guards rpcErrors", function () {
     expect(result.rate).to.equal(0);
     expect(result.samples).to.equal(0);
   });
+
+  it("opens checkCircuitBreaker when the RPC error rate exceeds threshold", async function () {
+    const filePath = path.join(guardDir, "circuit_breaker.json");
+    const rpcErrorsPath = path.join(guardDir, "rpc_errors.json");
+    await recordRpcCycle({ filePath: rpcErrorsPath, errors: 9, total: 10, at: 1000 });
+    await recordRpcCycle({ filePath: rpcErrorsPath, errors: 9, total: 10, at: 2000 });
+    const result = await checkCircuitBreaker({
+      filePath,
+      rpcErrorsPath,
+      rpcErrorRateWindowSize: 10,
+      rpcErrorRateThreshold: 0.5,
+      now: 3000,
+    });
+    expect(result.ok).to.equal(false);
+    expect(result.error).to.include("RPC error rate");
+  });
 });

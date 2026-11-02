@@ -2,6 +2,7 @@ const { ethers } = require("ethers");
 const {
   DEFAULT_GAS_SPENT_PATH,
   DEFAULT_CIRCUIT_BREAKER_PATH,
+  DEFAULT_RPC_ERRORS_PATH,
   checkChainId,
   checkContractOwner,
   checkWalletBalance,
@@ -83,6 +84,9 @@ function guardSettings(config) {
     circuitBreakerCooldownMinutes: config.circuitBreakerCooldownMinutes ?? 60,
     gasSpentPath: config.gasSpentPath || DEFAULT_GAS_SPENT_PATH,
     gasDrawdownMultiplier: config.gasDrawdownMultiplier ?? 1.2,
+    rpcErrorsPath: config.rpcErrorsPath || DEFAULT_RPC_ERRORS_PATH,
+    rpcErrorRateWindowSize: config.rpcErrorRateWindowSize ?? 10,
+    rpcErrorRateThreshold: config.rpcErrorRateThreshold ?? 0.5,
     circuitBreakerPath: config.circuitBreakerPath || DEFAULT_CIRCUIT_BREAKER_PATH,
   };
 }
@@ -312,6 +316,9 @@ async function execute({
       maxDailyGasEth: settings.maxDailyGasEth,
       gasSpentPath: settings.gasSpentPath,
       gasDrawdownMultiplier: settings.gasDrawdownMultiplier,
+      rpcErrorsPath: settings.rpcErrorsPath,
+      rpcErrorRateWindowSize: settings.rpcErrorRateWindowSize,
+      rpcErrorRateThreshold: settings.rpcErrorRateThreshold,
     })
   );
   if (!breaker.ok) {
@@ -398,6 +405,9 @@ async function execute({
       maxDailyGasEth: settings.maxDailyGasEth,
       gasSpentPath: settings.gasSpentPath,
       gasDrawdownMultiplier: settings.gasDrawdownMultiplier,
+      rpcErrorsPath: settings.rpcErrorsPath,
+      rpcErrorRateWindowSize: settings.rpcErrorRateWindowSize,
+      rpcErrorRateThreshold: settings.rpcErrorRateThreshold,
     })
   );
   if (!breakerBeforeSend.ok) {

@@ -504,6 +504,42 @@ describe("bot/index main", function () {
     expect(summary.exitCode).to.equal(0);
     fs.rmSync(scanDir, { recursive: true, force: true });
   });
+
+  it("records an RPC cycle after each scan", async function () {
+    const scanDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-rpc-cycle-"));
+    const rpcErrorsPath = path.join(scanDir, "rpc_errors.json");
+    const pair = {
+      label: "BOR/MID rpc-cycle pair",
+      borrowedToken: { address: ethers.Wallet.createRandom().address, decimals: 18, symbol: "BOR" },
+      intermediateToken: { address: ethers.Wallet.createRandom().address, decimals: 18, symbol: "MID" },
+    };
+    const config = {
+      dryRun: true,
+      scanLogPath: path.join(scanDir, "scans.jsonl"),
+      rpcErrorsPath,
+      rpcErrorRateWindowSize: 10,
+      rpcErrorRateThreshold: 0.5,
+      pairs: [pair],
+      aaveFlashLoanPremiumBps: 5n,
+      ethUsdRoute: null,
+      maxRpcErrorsPerScan: 0,
+    };
+    const summary = await main({
+      provider: ethers.provider,
+      config,
+      scanPair: async () => [
+        { tradeSizeHuman: "1000", grossProfit: 1n, netProfitUsd: null, isOpportunity: false },
+        { tradeSizeHuman: "1000", error: new Error("RPC down") },
+      ],
+    });
+    expect(summary.scanned).to.equal(2);
+    const state = JSON.parse(fs.readFileSync(rpcErrorsPath, "utf8"));
+    expect(state.version).to.equal(1);
+    expect(state.cycles).to.have.length(1);
+    expect(state.cycles[0].errors).to.equal(1);
+    expect(state.cycles[0].total).to.equal(2);
+    fs.rmSync(scanDir, { recursive: true, force: true });
+  });
 });
 
 describe("bot/index reconcilePendingExecutions", function () {
