@@ -162,6 +162,10 @@ async function checkCircuitBreaker({
     rpcErrorsPath = DEFAULT_RPC_ERRORS_PATH,
     rpcErrorRateWindowSize = 10,
     rpcErrorRateThreshold = 0.5,
+    gasHistoryPath = DEFAULT_GAS_HISTORY_PATH,
+    gasAnomalyWindowSize = 20,
+    gasAnomalyMultiplier = 3,
+    gasAnomalyMinSamples = 5,
   } = {}) {
   const state = await readCircuitBreaker({ filePath });
   if (state.openUntil !== null && now < state.openUntil) {
@@ -293,6 +297,32 @@ async function checkCircuitBreaker({
       }
     } catch (err) {
       console.warn(`[GUARD WARNING] rpc error rate check failed: ${err.message}`);
+    }
+  }
+  if (gasHistoryPath && gasAnomalyWindowSize && gasAnomalyMultiplier) {
+    try {
+      const gasCheck = await checkGasAnomaly({
+        filePath: gasHistoryPath,
+        windowSize: gasAnomalyWindowSize,
+        multiplier: gasAnomalyMultiplier,
+        minSamples: gasAnomalyMinSamples ?? 5,
+        now,
+      });
+      if (!gasCheck.ok) {
+        const openUntil = now + cooldownMinutes * 60_000;
+        await writeState(filePath, { consecutiveFailures: state.consecutiveFailures, openUntil });
+        return {
+          ok: false,
+          ...state,
+          openUntil,
+          gasMedian: gasCheck.median,
+          gasLast: gasCheck.last,
+          gasRatio: gasCheck.ratio,
+          error: `CIRCUIT_BREAKER_OPEN: gas price anomaly ${gasCheck.last} wei > ${gasCheck.median} wei x ${gasAnomalyMultiplier} (median x multiplier)`,
+        };
+      }
+    } catch (err) {
+      console.warn(`[GUARD WARNING] gas anomaly check failed: ${err.message}`);
     }
   }
   return { ok: true, ...state, revertRate, unknownRate };

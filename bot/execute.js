@@ -3,6 +3,7 @@ const {
   DEFAULT_GAS_SPENT_PATH,
   DEFAULT_CIRCUIT_BREAKER_PATH,
   DEFAULT_RPC_ERRORS_PATH,
+  DEFAULT_GAS_HISTORY_PATH,
   checkChainId,
   checkContractOwner,
   checkWalletBalance,
@@ -87,6 +88,10 @@ function guardSettings(config) {
     rpcErrorsPath: config.rpcErrorsPath || DEFAULT_RPC_ERRORS_PATH,
     rpcErrorRateWindowSize: config.rpcErrorRateWindowSize ?? 10,
     rpcErrorRateThreshold: config.rpcErrorRateThreshold ?? 0.5,
+    gasHistoryPath: config.gasHistoryPath || DEFAULT_GAS_HISTORY_PATH,
+    gasAnomalyWindowSize: config.gasAnomalyWindowSize ?? 20,
+    gasAnomalyMultiplier: config.gasAnomalyMultiplier ?? 3,
+    gasAnomalyMinSamples: config.gasAnomalyMinSamples ?? 5,
     circuitBreakerPath: config.circuitBreakerPath || DEFAULT_CIRCUIT_BREAKER_PATH,
   };
 }
@@ -319,6 +324,10 @@ async function execute({
       rpcErrorsPath: settings.rpcErrorsPath,
       rpcErrorRateWindowSize: settings.rpcErrorRateWindowSize,
       rpcErrorRateThreshold: settings.rpcErrorRateThreshold,
+      gasHistoryPath: settings.gasHistoryPath,
+      gasAnomalyWindowSize: settings.gasAnomalyWindowSize,
+      gasAnomalyMultiplier: settings.gasAnomalyMultiplier,
+      gasAnomalyMinSamples: settings.gasAnomalyMinSamples,
     })
   );
   if (!breaker.ok) {
@@ -408,6 +417,10 @@ async function execute({
       rpcErrorsPath: settings.rpcErrorsPath,
       rpcErrorRateWindowSize: settings.rpcErrorRateWindowSize,
       rpcErrorRateThreshold: settings.rpcErrorRateThreshold,
+      gasHistoryPath: settings.gasHistoryPath,
+      gasAnomalyWindowSize: settings.gasAnomalyWindowSize,
+      gasAnomalyMultiplier: settings.gasAnomalyMultiplier,
+      gasAnomalyMinSamples: settings.gasAnomalyMinSamples,
     })
   );
   if (!breakerBeforeSend.ok) {

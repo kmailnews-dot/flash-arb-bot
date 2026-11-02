@@ -496,4 +496,40 @@ describe("bot/guards gasHistory", function () {
     expect(result.reason).to.equal("insufficient samples");
     expect(result.samples).to.equal(0);
   });
+
+  it("opens checkCircuitBreaker when the gas price exceeds multiplier x median", async function () {
+    const filePath = path.join(guardDir, "circuit_breaker.json");
+    const gasHistoryPath = path.join(guardDir, "gas_history.json");
+    for (let i = 1; i <= 4; i += 1) {
+      await recordGasSample({ filePath: gasHistoryPath, gasPriceWei: 1_000_000_000n, at: 1000 + i });
+    }
+    await recordGasSample({ filePath: gasHistoryPath, gasPriceWei: 10_000_000_000n, at: 2000 });
+    const result = await checkCircuitBreaker({
+      filePath,
+      gasHistoryPath,
+      gasAnomalyWindowSize: 20,
+      gasAnomalyMultiplier: 3,
+      gasAnomalyMinSamples: 5,
+      now: 3000,
+    });
+    expect(result.ok).to.equal(false);
+    expect(result.error).to.include("gas price anomaly");
+  });
+
+  it("keeps checkCircuitBreaker closed when the gas price is below multiplier x median", async function () {
+    const filePath = path.join(guardDir, "circuit_breaker.json");
+    const gasHistoryPath = path.join(guardDir, "gas_history.json");
+    for (let i = 1; i <= 5; i += 1) {
+      await recordGasSample({ filePath: gasHistoryPath, gasPriceWei: 1_000_000_000n, at: 1000 + i });
+    }
+    const result = await checkCircuitBreaker({
+      filePath,
+      gasHistoryPath,
+      gasAnomalyWindowSize: 20,
+      gasAnomalyMultiplier: 3,
+      gasAnomalyMinSamples: 5,
+      now: 3000,
+    });
+    expect(result.ok).to.equal(true);
+  });
 });

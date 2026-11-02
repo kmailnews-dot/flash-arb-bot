@@ -4,7 +4,7 @@ const { maybeExecute } = require("./executor");
 const { reconcilePendingExecutions } = require("./execute");
 const { DEFAULT_SCAN_LOG_PATH, appendScanResult, logEvent, logFormat } = require("./persist");
 const { NETWORKS } = require("./networks");
-const { checkWalletBalanceLow, recordRpcCycle, DEFAULT_RPC_ERRORS_PATH } = require("./guards");
+const { checkWalletBalanceLow, recordRpcCycle, DEFAULT_RPC_ERRORS_PATH, recordGasSample, DEFAULT_GAS_HISTORY_PATH } = require("./guards");
 const {
   DEFAULT_ADAPTIVE_PATH,
   applyAdaptive,
@@ -316,6 +316,19 @@ async function main({
     });
   } catch (err) {
     console.warn(`[RPC ERRORS] could not persist RPC cycle: ${err.message}`);
+  }
+
+  try {
+    const latestGasPriceWei = feeData.gasPrice ?? feeData.maxFeePerGas;
+    if (latestGasPriceWei && latestGasPriceWei > 0n) {
+      await recordGasSample({
+        filePath: config.gasHistoryPath || DEFAULT_GAS_HISTORY_PATH,
+        gasPriceWei: latestGasPriceWei,
+        windowSize: config.gasAnomalyWindowSize ?? 20,
+      });
+    }
+  } catch (err) {
+    console.warn(`[GAS ANOMALY] could not persist gas sample: ${err.message}`);
   }
 
   return { ethUsdPrice, aaveFlashLoanPremiumBps, scanned, opportunities, executed, exitCode };
