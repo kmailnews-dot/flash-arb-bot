@@ -21,6 +21,7 @@ const {
 } = require("./resilient");
 const { createThrottle, withThrottle } = require("./throttle");
 const { withTimeout } = require("./timeout");
+const { createNonceManager } = require("./nonce");
 const { FLASH_ARB_EXECUTOR_ABI } = require("./abis");
 const { randomUUID } = require("crypto");
 const {
@@ -83,6 +84,21 @@ function guardSettings(config) {
     gasSpentPath: config.gasSpentPath || DEFAULT_GAS_SPENT_PATH,
     circuitBreakerPath: config.circuitBreakerPath || DEFAULT_CIRCUIT_BREAKER_PATH,
   };
+}
+
+const nonceManagers = new WeakMap();
+async function getNonceManager({ provider, address }) {
+  let byAddress = nonceManagers.get(provider);
+  if (!byAddress) {
+    byAddress = new Map();
+    nonceManagers.set(provider, byAddress);
+  }
+  let manager = byAddress.get(address);
+  if (!manager) {
+    manager = await createNonceManager({ provider, address });
+    byAddress.set(address, manager);
+  }
+  return manager;
 }
 
 /// Runs a guard and turns an unexpected read/write failure into a fail-closed result: if we cannot
@@ -395,9 +411,15 @@ async function execute({
 
   let tx;
   try {
+    let nonceOverride;
+    if (config.dryRun === false && typeof provider.getTransactionCount === "function") {
+      const manager = await getNonceManager({ provider, address: wallet.address });
+      nonceOverride = { nonce: await manager.next({ forceRefresh: false }) };
+    }
     tx = await contract.startArbitrage(pair.borrowedToken.address, amountIn, finalParams, {
       gasLimit: gasLimitWithMargin,
       ...feeOverrides,
+      ...nonceOverride,
     });
   } catch (err) {
     const message = errorMessage(err);

@@ -1742,6 +1742,97 @@ describe("bot/executor maybeExecute", function () {
     expect(breaker.consecutiveFailures).to.equal(1);
   });
 
+  it("passes an explicit nonce to startArbitrage when dryRun is false", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+      opportunity,
+      config,
+    });
+    const provider = {
+      getTransactionCount: async () => 42,
+      getFeeData: async () => ({ gasPrice: 1n, maxFeePerGas: null }),
+      getNetwork: () => ethers.provider.getNetwork(),
+      getBalance: (address) => ethers.provider.getBalance(address),
+    };
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : opportunity.finalOut;
+    const calls = [];
+    const contract = {
+      owner: async () => defaultOwnerAddress,
+      startArbitrage: async (...args) => {
+        calls.push({ method: "send", args });
+        return {
+          hash: `0x${"99".repeat(32)}`,
+          wait: async () => ({ status: 1, gasUsed: 300000n, gasPrice: 1n, blockNumber: 1 }),
+        };
+      },
+    };
+    contract.startArbitrage.estimateGas = async (...args) => {
+      calls.push({ method: "estimateGas", args });
+      return 300000n;
+    };
+    contract.startArbitrage.staticCall = async (...args) => {
+      calls.push({ method: "staticCall", args });
+      return true;
+    };
+    const result = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+    expect(result.submitted).to.equal(true);
+    const send = calls.find((entry) => entry.method === "send");
+    expect(send.args[3].nonce).to.equal(42);
+  });
+
+  it("does not pass a nonce when the provider lacks getTransactionCount", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+      opportunity,
+      config,
+    });
+    const provider = {
+      getFeeData: async () => ({ gasPrice: 1n, maxFeePerGas: null }),
+      getNetwork: () => ethers.provider.getNetwork(),
+      getBalance: (address) => ethers.provider.getBalance(address),
+    };
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : opportunity.finalOut;
+    const calls = [];
+    const contract = {
+      owner: async () => defaultOwnerAddress,
+      startArbitrage: async (...args) => {
+        calls.push({ method: "send", args });
+        return {
+          hash: `0x${"9a".repeat(32)}`,
+          wait: async () => ({ status: 1, gasUsed: 300000n, gasPrice: 1n, blockNumber: 1 }),
+        };
+      },
+    };
+    contract.startArbitrage.estimateGas = async (...args) => {
+      calls.push({ method: "estimateGas", args });
+      return 300000n;
+    };
+    contract.startArbitrage.staticCall = async (...args) => {
+      calls.push({ method: "staticCall", args });
+      return true;
+    };
+    const result = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+    expect(result.submitted).to.equal(true);
+    const send = calls.find((entry) => entry.method === "send");
+    expect(send.args[3]).to.not.have.property("nonce");
+  });
+
   describe("bot/executor execution journal", function () {
     function readJournal(filePath) {
       return JSON.parse(fs.readFileSync(filePath, "utf8"));
