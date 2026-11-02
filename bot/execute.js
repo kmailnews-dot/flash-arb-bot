@@ -486,10 +486,13 @@ async function execute({
         `  [TRANSIENT] broadcast outcome ambiguous (${errorClass}) - breaker not incremented.`
       );
     }
+    const recoveredTxHash =
+      err?.transaction?.hash ?? err?.transactionHash ?? null;
     await upsertExecutionRecord(
       {
         ...journalBase,
         status: "UNKNOWN",
+        txHash: recoveredTxHash,
         error: message,
         lastUpdateAt: Date.now(),
       },

@@ -1175,6 +1175,62 @@ describe("bot/executor maybeExecute", function () {
     expect(gasSpent.gasSpentWei).to.equal(reservedGasWei.toString());
   });
 
+  it("records the tx hash from err.transaction when the send throws ambiguously", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+      opportunity,
+      config,
+    });
+    const recoveredHash = `0x${"bb".repeat(32)}`;
+    const sendError = Object.assign(new Error("timed out"), {
+      transaction: { hash: recoveredHash },
+    });
+    const { contract } = makeSpyContract({ sendError });
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : opportunity.finalOut;
+    const result = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+    expect(result.submitted).to.equal(true);
+    expect(result.journalStatus).to.equal("UNKNOWN");
+    const journal = JSON.parse(fs.readFileSync(config.executionJournalPath, "utf8"));
+    expect(journal.records[result.journalId]).to.include({
+      status: "UNKNOWN",
+      txHash: recoveredHash,
+    });
+  });
+
+  it("records a null tx hash when err.transaction is absent", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+      opportunity,
+      config,
+    });
+    const { contract } = makeSpyContract({ sendError: new Error("broadcast failed") });
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : opportunity.finalOut;
+    const result = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider: ethers.provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+    expect(result.submitted).to.equal(true);
+    expect(result.journalStatus).to.equal("UNKNOWN");
+    const journal = JSON.parse(fs.readFileSync(config.executionJournalPath, "utf8"));
+    expect(journal.records[result.journalId]).to.include({
+      status: "UNKNOWN",
+      txHash: null,
+    });
+  });
+
   it("fails closed when the contract has no owner function", async function () {
     const { opportunity, makeConfig } = await deployFixture();
     const config = makeConfig();
