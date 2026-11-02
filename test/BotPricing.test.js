@@ -1,5 +1,10 @@
 const { expect } = require("chai");
-const { gasCostInBorrowedToken, interpolateMaximum, logSweepSizes } = require("../bot/pricing");
+const {
+  effectiveMinProfitBps,
+  gasCostInBorrowedToken,
+  interpolateMaximum,
+  logSweepSizes,
+} = require("../bot/pricing");
 
 describe("bot/pricing gasCostInBorrowedToken L1 cost", function () {
   const gasCostWei = 10_000_000_000n;
@@ -99,5 +104,35 @@ describe("bot/pricing interpolateMaximum", function () {
     const profits = [10, 1, 10];
     const result = interpolateMaximum({ sizes, profits });
     expect(result.interpolated).to.equal(false);
+  });
+});
+
+describe("effectiveMinProfitBps", function () {
+  it("uses pair.minProfitBps as the floor when adaptive is absent", function () {
+    const pair = { minProfitBps: 30 };
+    const config = { minProfitBps: 20 };
+    expect(effectiveMinProfitBps({ pair, config })).to.equal(30n);
+  });
+
+  it("uses config.minProfitBps when pair has no floor", function () {
+    const pair = {};
+    const config = { minProfitBps: 20 };
+    expect(effectiveMinProfitBps({ pair, config })).to.equal(20n);
+  });
+
+  it("uses adaptive when it exceeds the floor", function () {
+    const pair = { minProfitBps: 30 };
+    const config = { minProfitBps: 20, effectiveMinProfitBps: 60 };
+    expect(effectiveMinProfitBps({ pair, config })).to.equal(60n);
+  });
+
+  it("never returns less than the floor when adaptive is lower", function () {
+    const pair = { minProfitBps: 30 };
+    const config = { effectiveMinProfitBps: 10 };
+    expect(effectiveMinProfitBps({ pair, config })).to.equal(30n);
+  });
+
+  it("returns 0n when neither floor nor adaptive is set", function () {
+    expect(effectiveMinProfitBps({ pair: {}, config: {} })).to.equal(0n);
   });
 });

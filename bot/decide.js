@@ -1,6 +1,7 @@
 const { usdToTokenUnits } = require("./minProfitUsd");
 const {
   buildFeeOverrides,
+  effectiveMinProfitBps,
   gasCostInBorrowedToken,
   BPS_DENOMINATOR,
   GAS_COST_MARGIN_BPS,
@@ -181,7 +182,7 @@ function decideInternal({ opportunity, config, feeData, estimatedGas }) {
     });
     if (netProfitFresh < minProfitUsdInToken) {
       const bpsDetail = minProfitBpsConfigured
-        ? `, netBps=${netProfitBps}, thresholdBps=${BigInt(Math.max(pair.minProfitBps ?? config.minProfitBps ?? 0, config.effectiveMinProfitBps ?? pair.minProfitBps ?? config.minProfitBps ?? 0))}`
+        ? `, netBps=${netProfitBps}, thresholdBps=${effectiveMinProfitBps({ pair, config })}`
         : "";
       return buildDecision({
         shouldExecute: false,
@@ -204,9 +205,7 @@ function decideInternal({ opportunity, config, feeData, estimatedGas }) {
   }
 
   if (minProfitBpsConfigured) {
-    const pairFloorBps = pair.minProfitBps ?? config.minProfitBps ?? 0;
-    const adaptiveBps = config.effectiveMinProfitBps ?? pairFloorBps;
-    const minProfitBps = BigInt(Math.max(pairFloorBps, adaptiveBps));
+    const minProfitBps = effectiveMinProfitBps({ pair, config });
     const meetsMinProfitBps =
       amountIn > 0n && netProfitFresh * BPS_DENOMINATOR >= amountIn * minProfitBps;
     if (!meetsMinProfitBps) {

@@ -5,6 +5,7 @@ const {
   BPS_DENOMINATOR,
   GAS_COST_MARGIN_BPS,
   GAS_LIMIT_MARGIN_BPS,
+  effectiveMinProfitBps,
   gasCostInBorrowedToken,
   buildFeeOverrides,
 } = require("./pricing");
@@ -102,7 +103,7 @@ async function maybeExecute({
       // so a price move between quoting and mining reverts the whole (borrowed-capital) trade
       // instead of executing at a worse-than-expected profit.
       minProfit: (effectiveGrossProfit * config.minProfitBufferBps) / BPS_DENOMINATOR,
-      minProfitBps: BigInt(Math.max(pair.minProfitBps ?? config.minProfitBps ?? 0, config.effectiveMinProfitBps ?? pair.minProfitBps ?? config.minProfitBps ?? 0)),
+      minProfitBps: effectiveMinProfitBps({ pair, config }),
       deadline: Math.floor(Date.now() / 1000) + 300,
     };
 

@@ -137,6 +137,12 @@ function interpolateMaximum({ sizes, profits, maxTradeSize = null }) {
   return { size: sizeStar.toFixed(6), interpolated: true };
 }
 
+function effectiveMinProfitBps({ pair, config }) {
+  const pairFloorBps = pair?.minProfitBps ?? config?.minProfitBps ?? 0;
+  const adaptiveBps = config?.effectiveMinProfitBps ?? pairFloorBps;
+  return BigInt(Math.max(pairFloorBps, adaptiveBps));
+}
+
 module.exports = {
   BPS_DENOMINATOR,
   GAS_COST_MARGIN_BPS,
@@ -144,6 +150,7 @@ module.exports = {
   GAS_PROFIT_MULTIPLIER,
   WEI_PER_ETHER,
   buildFeeOverrides,
+  effectiveMinProfitBps,
   gasCostInBorrowedToken,
   interpolateMaximum,
   logSweepSizes,
