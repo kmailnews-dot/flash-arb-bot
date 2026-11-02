@@ -115,6 +115,11 @@ historique de la matrice initiale.
 
 ## Suivi D0–D12 (issus de l'audit)
 
+Note de cohérence. Ce tableau est antérieur à la remédiation des dettes. Pour
+les statuts à jour, voir les sections « Suivi des dettes post-audit (D1–D6) » et
+« Suivi P1-XX (post-audit) » ci-dessous. Ne pas se fier aux statuts D1, D2, D3, D4,
+D5, D6, D8, D9 de ce tableau pour conclure qu'une dette est ouverte.
+
 Défauts structurants identifiés par l'audit des 3 lots
 (lecture seule). Aucun n'est critique au sens « perte de fonds
 imminente en DRY_RUN ». Chacun fera l'objet d'un point dédié.
