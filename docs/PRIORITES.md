@@ -160,9 +160,12 @@ l'objet d'un point dédié ou d'une acceptation écrite.
 | D4-bis | À FAIRE | — | QUOTE_STALE et DEPTH_EXCEEDED ne doivent pas incrémenter rpcErrors (bot/index.js) |
 | D4-ter | DOCUMENTÉ | — | blockTag non propagé à execute.js (re-quote runtime reste "latest"). Voir bot/ARCHITECTURE.md. |
 | D5-bis | DOCUMENTÉ | — | gasPaidWei (total L2+L1) vs l1FeeWei (détail L1) : ne pas additionner. Voir bot/ARCHITECTURE.md. |
-| D5-ter | À FAIRE | — | calibrer L1_COST_MULTIPLIER_BPS sur receipts réels |
-| D6a-bis | À FAIRE | — | tests validation maxQuoteAgeMs et L1_COST_MULTIPLIER_BPS |
-| D6-bis | À FAIRE | — | test unitaire direct de readAaveFlashLoanPremium (3 chemins) |
+| D5-ter | À FAIRE | — | calibrer L1_COST_MULTIPLIER_BPS sur receipts réels (données de production requises) |
+| D6a-bis | FERMÉ | c3f1e1b | tests validation maxQuoteAgeMs et L1_COST_MULTIPLIER_BPS |
+| D6-bis | FERMÉ | 18d2927 | test unitaire direct de readAaveFlashLoanPremium (3 chemins) |
+| D1-ter | À FAIRE | — | fallback getTransactionCount dans reconcilePendingExecutions pour les records UNKNOWN sans txHash |
+| D3-breaker-bis-c | À FAIRE | — | détection d'un taux d'erreurs RPC anormal sur fenêtre (nécessite persistance) |
+| D3-breaker-bis-b | À FAIRE | — | détection d'un gaz anormal (médiane gasPrice sur N cycles, ADR requis) |
 
 ---
 
