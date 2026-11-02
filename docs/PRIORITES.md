@@ -155,21 +155,21 @@ l'objet d'un point dédié ou d'une acceptation écrite.
 
 | # | Statut | Commit | Note |
 |---|---|---|---|
-| D1-bis | À FAIRE | — | catch ambigu sans txHash : ne pas requalifier DROPPED, utiliser getTransactionCount |
+| D1-bis | FERMÉ | — | dépassée par F-05-C : le gestionnaire de nonce et la réconciliation couvrent le catch ambigu. Voir bot/ARCHITECTURE.md (F-05-C). |
 | D3-PnL-bis | FERMÉ | abb6fac | parser receipt.logs dans le catch err.receipt (fermé par F-05-A) |
 | D3-PnL-ter | FERMÉ | abb6fac | lateReceipt.status === 0 : écrire une ligne PnL REVERTED (fermé par F-05-B) |
-| D3-breaker-bis | À FAIRE | — | détection gaz anormal (drawdown, RPC, gaz) |
+| D3-breaker-bis | FERMÉ | — | couverte par D3-breaker-bis-a (e6c0ecf), D3-breaker-bis-b (c86673f), D3-breaker-bis-c (df21ec5). |
 | D3-breaker-ter | DOCUMENTÉ | — | garde revertWindowFull/unknownWindowFull (fenêtre partielle). Voir bot/ARCHITECTURE.md. |
 | D3-breaker-quater | DOCUMENTÉ | — | rate non réévalué après expiration du cooldown. Voir bot/ARCHITECTURE.md. |
 | D3-breaker-quinquies | FERMÉ | 477ced5 | distinguer ENOENT de STATE_FILE_CORRUPT dans le breaker (déjà implémenté dans readState) |
-| D3-breaker-sexies | À FAIRE | — | tests validation config breaker (4 options) |
-| D4-bis | À FAIRE | — | QUOTE_STALE et DEPTH_EXCEEDED ne doivent pas incrémenter rpcErrors (bot/index.js) |
+| D3-breaker-sexies | FERMÉ | — | tests validation config breaker présents dans test/BotGuards.test.js (revertRateWindowSize, revertRateThreshold, unknownRateWindowSize, unknownRateThreshold). |
+| D4-bis | FERMÉ | — | QUOTE_STALE et DEPTH_EXCEEDED ne sont pas comptés comme RPC errors : voir test/BotMain.test.js « does not count QUOTE_STALE or DEPTH_EXCEEDED as RPC errors ». |
 | D4-ter | DOCUMENTÉ | — | blockTag non propagé à execute.js (re-quote runtime reste "latest"). Voir bot/ARCHITECTURE.md. |
 | D5-bis | DOCUMENTÉ | — | gasPaidWei (total L2+L1) vs l1FeeWei (détail L1) : ne pas additionner. Voir bot/ARCHITECTURE.md. |
 | D5-ter | À FAIRE | — | calibrer L1_COST_MULTIPLIER_BPS sur receipts réels (données de production requises) |
 | D6a-bis | FERMÉ | c3f1e1b | tests validation maxQuoteAgeMs et L1_COST_MULTIPLIER_BPS |
 | D6-bis | FERMÉ | 18d2927 | test unitaire direct de readAaveFlashLoanPremium (3 chemins) |
-| D1-ter | À FAIRE | — | fallback getTransactionCount dans reconcilePendingExecutions pour les records UNKNOWN sans txHash |
+| D1-ter | FERMÉ | cd4397c | fallback getTransactionCount dans reconcilePendingExecutions pour les records UNKNOWN sans txHash. |
 | D3-breaker-bis-c | FERMÉ | df21ec5 | RPC error rate breaker (persistance logs/rpc_errors.json, fenêtre 10, seuil 0.5, ADR 0004) |
 | D3-breaker-bis-b | FERMÉ | c86673f | gas anomaly breaker (persistance logs/gas_history.json, médiane glissante, multiplicateur 3, ADR 0005) |
 
