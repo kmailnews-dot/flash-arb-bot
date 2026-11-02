@@ -113,6 +113,7 @@ historique de la matrice initiale.
 | P1-10-bis | FERMÉ | 2d2f34a | adaptive par profil : effectiveMaxTradeSize {majors,longtail}, applyAdaptive conscient du profil, gestion logSweep |
 | P1-10-bis-logSweep | FERMÉ | 2d2f34a | applyAdaptive traite désormais pair.logSweep (facteur appliqué, clamp au cap du profil) |
 | P1-16-bis | NON PLANIFIÉ | — | écart médian dynamique |
+| P1-10-ter | À FAIRE | — | cap maxTradeSize en unités de borrowedToken rend les paires stables (USDC/USDT/DAI) inutilisables : 0.1 USDC = $0.10. Recalibrer en USD ou en valeur notionnelle. Bloque G1 économique. |
 
 ## Suivi D0–D12 (issus de l'audit)
 
@@ -240,5 +241,35 @@ divergence journal/manager ne peut pas faire perdre de fonds
 `F-05-C` est **fermé** pour le mode réel, avec les deux dettes
 documentées ci-dessus. En `DRY_RUN=true`, comportement
 strictement inchangé.
+
+## G1 — Rapport dry-run (2 novembre 2026)
+
+Statut : techniquement VALIDÉ, économiquement NON CONCLUANT.
+
+Ce qui a été mesuré (3 paires, 10+ cycles, logs/scans.jsonl) :
+
+    WETH/USDC V3 100 + V3 100 : gross toujours négatif (~-0.0000086 WETH), spread nul (même pool, pas d'arbitrage possible).
+
+    WETH/ARB V3 100 + V3 100 : DEPTH_EXCEEDED (0.1 WETH) et ERROR (1 WETH, pool 100 bps absent ou vide).
+
+    USDC/WBTC Camelot V2 + SushiSwap V2 : DEPTH_EXCEEDED (0.1 USDC) sur tous les cycles.
+
+Ce qui fonctionne :
+
+    10+ cycles, 0 crash, 0 transaction (DRY_RUN=true).
+
+    Adaptive chargé, prix USD lu on-chain, quotes exécutées, rejets motivés.
+
+    guards, breaker, journal, PnL : non déclenchés en dry-run, comportement inchangé.
+
+Ce qui bloque une conclusion économique :
+
+    P1-10-ter : le cap maxTradeSize (0.1 majors, 1 longtail) est en unités de borrowedToken, ce qui rend les paires stables (USDC/USDT/DAI) inutilisables (0.1 USDC = $0.10).
+
+    P1-11 : V3 100 contre V3 100 ne peut pas produire d'arbitrage (même pool). Il faut deux DEX différents.
+
+    Aucune paire inter-DEX avec un borrowedToken non-stable n'a été testée avec des tailles réalistes.
+
+Verdict : G2 (shadow) est PRÉMATURÉ. Il faut d'abord corriger P1-10-ter (cap en USD ou en valeur notionnelle) et tester une paire inter-DEX avec un borrowedToken non-stable (WETH/ARB Uniswap V3 vs Sushi V2, par exemple). Sans ces corrections, G1 ne peut pas conclure.
 
 ---
