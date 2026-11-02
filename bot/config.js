@@ -276,6 +276,7 @@ function validateScannerConfig({
   maxGasLimit,
   maxWalletBalanceEth,
   maxDailyGasEth,
+  gasDrawdownMultiplier = 1.2,
   throttleMinIntervalMs,
   rpcTimeoutMs,
   txInFlightMaxMs,
@@ -336,6 +337,16 @@ function validateScannerConfig({
   }
   if (maxDailyGasEth > 10) {
     throw new Error("MAX_DAILY_GAS_ETH must be <= 10.");
+  }
+  if (
+    typeof gasDrawdownMultiplier !== "number" ||
+    !Number.isFinite(gasDrawdownMultiplier) ||
+    gasDrawdownMultiplier <= 1 ||
+    gasDrawdownMultiplier > 5
+  ) {
+    throw new Error(
+      `GAS_DRAWDOWN_MULTIPLIER must be a finite number in (1, 5], got ${gasDrawdownMultiplier}`
+    );
   }
   if (throttleMinIntervalMs !== undefined && throttleMinIntervalMs !== null) {
     if (!Number.isInteger(throttleMinIntervalMs) || throttleMinIntervalMs < 0) {
@@ -422,6 +433,7 @@ const config = {
   maxRpcErrorsPerScan: optionalNumber("MAX_RPC_ERRORS_PER_SCAN", 3),
   maxQuoteAgeMs: optionalNumber("MAX_QUOTE_AGE_MS", 60_000),
   maxDailyGasEth: optionalNumber("MAX_DAILY_GAS_ETH", 0.01),
+  gasDrawdownMultiplier: optionalNumber("GAS_DRAWDOWN_MULTIPLIER", 1.2),
   maxConsecutiveFailures: optionalNumber("MAX_CONSECUTIVE_FAILURES", 5),
   circuitBreakerCooldownMinutes: optionalNumber("CIRCUIT_BREAKER_COOLDOWN_MINUTES", 60),
   revertRateWindowSize: optionalNumber("REVERT_RATE_WINDOW_SIZE", 20),
@@ -452,6 +464,7 @@ validateScannerConfig({
   maxGasLimit: config.maxGasLimit,
   maxWalletBalanceEth: config.maxWalletBalanceEth,
   maxDailyGasEth: config.maxDailyGasEth,
+  gasDrawdownMultiplier: config.gasDrawdownMultiplier,
   throttleMinIntervalMs: config.throttleMinIntervalMs,
   rpcTimeoutMs: config.rpcTimeoutMs,
   txInFlightMaxMs: config.txInFlightMaxMs,

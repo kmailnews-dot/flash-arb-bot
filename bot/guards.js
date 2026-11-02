@@ -151,7 +151,13 @@ async function readCircuitBreaker({ filePath = DEFAULT_CIRCUIT_BREAKER_PATH } = 
   };
 }
 
-async function checkCircuitBreaker({ filePath = DEFAULT_CIRCUIT_BREAKER_PATH, now = Date.now() } = {}) {
+async function checkCircuitBreaker({
+    filePath = DEFAULT_CIRCUIT_BREAKER_PATH,
+    now = Date.now(),
+    maxDailyGasEth = 0.01,
+    gasSpentPath = DEFAULT_GAS_SPENT_PATH,
+    gasDrawdownMultiplier = 1.2,
+  } = {}) {
   const state = await readCircuitBreaker({ filePath });
   if (state.openUntil !== null && now < state.openUntil) {
     return {
@@ -237,6 +243,28 @@ async function checkCircuitBreaker({ filePath = DEFAULT_CIRCUIT_BREAKER_PATH, no
       unknownRate,
       error: `CIRCUIT_BREAKER_OPEN: unknown rate ${(unknownRate * 100).toFixed(0)}% over last ${unknownRateWindowSize} (threshold ${(unknownRateThreshold * 100).toFixed(0)}%)`,
     };
+  }
+  if (maxDailyGasEth > 0 && gasSpentPath) {
+    try {
+      const { gasSpentWei } = await readGasSpent({ filePath: gasSpentPath });
+      const drawdownLimitWei = ethers.parseEther(
+        String(maxDailyGasEth * gasDrawdownMultiplier)
+      );
+      if (gasSpentWei > drawdownLimitWei) {
+        const openUntil = now + cooldownMinutes * 60_000;
+        await writeState(filePath, { consecutiveFailures: state.consecutiveFailures, openUntil });
+        return {
+          ok: false,
+          ...state,
+          openUntil,
+          gasSpentWei: gasSpentWei.toString(),
+          gasDrawdownLimitWei: drawdownLimitWei.toString(),
+          error: `CIRCUIT_BREAKER_OPEN: gas drawdown ${ethers.formatEther(gasSpentWei)} ETH > ${ethers.formatEther(drawdownLimitWei)} ETH (maxDailyGasEth * gasDrawdownMultiplier)`,
+        };
+      }
+    } catch (err) {
+      console.warn(`[GUARD WARNING] gas drawdown check failed: ${err.message}`);
+    }
   }
   return { ok: true, ...state, revertRate, unknownRate };
 }

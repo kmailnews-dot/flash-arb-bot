@@ -82,6 +82,7 @@ function guardSettings(config) {
     maxConsecutiveFailures: config.maxConsecutiveFailures ?? 5,
     circuitBreakerCooldownMinutes: config.circuitBreakerCooldownMinutes ?? 60,
     gasSpentPath: config.gasSpentPath || DEFAULT_GAS_SPENT_PATH,
+    gasDrawdownMultiplier: config.gasDrawdownMultiplier ?? 1.2,
     circuitBreakerPath: config.circuitBreakerPath || DEFAULT_CIRCUIT_BREAKER_PATH,
   };
 }
@@ -308,6 +309,9 @@ async function execute({
       unknownRateWindowSize: config.unknownRateWindowSize,
       unknownRateThreshold: config.unknownRateThreshold,
       cooldownMinutes: config.circuitBreakerCooldownMinutes,
+      maxDailyGasEth: settings.maxDailyGasEth,
+      gasSpentPath: settings.gasSpentPath,
+      gasDrawdownMultiplier: settings.gasDrawdownMultiplier,
     })
   );
   if (!breaker.ok) {
@@ -391,6 +395,9 @@ async function execute({
       unknownRateWindowSize: config.unknownRateWindowSize,
       unknownRateThreshold: config.unknownRateThreshold,
       cooldownMinutes: config.circuitBreakerCooldownMinutes,
+      maxDailyGasEth: settings.maxDailyGasEth,
+      gasSpentPath: settings.gasSpentPath,
+      gasDrawdownMultiplier: settings.gasDrawdownMultiplier,
     })
   );
   if (!breakerBeforeSend.ok) {

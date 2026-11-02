@@ -276,6 +276,45 @@ describe("bot/guards breaker windows", function () {
       checkCircuitBreaker({ filePath, unknownRateThreshold: NaN })
     ).to.be.rejectedWith("INVALID_CIRCUIT_BREAKER_CONFIG");
   });
+
+  it("opens the breaker when the daily gas spend exceeds the drawdown threshold", async function () {
+    const filePath = path.join(guardDir, "circuit_breaker.json");
+    const gasSpentPath = path.join(guardDir, "gas_spent.json");
+    const today = new Date().toISOString().slice(0, 10);
+    fs.writeFileSync(
+      gasSpentPath,
+      `${JSON.stringify({ date: today, gasSpentWei: ethers.parseEther("0.013").toString() })}\n`,
+      "utf8"
+    );
+    const result = await checkCircuitBreaker({
+      filePath,
+      gasSpentPath,
+      maxDailyGasEth: 0.01,
+      gasDrawdownMultiplier: 1.2,
+      now: Date.parse("2026-11-02T12:00:00.000Z"),
+    });
+    expect(result.ok).to.equal(false);
+    expect(result.error).to.include("gas drawdown");
+  });
+
+  it("keeps the breaker closed when the daily gas spend is below the drawdown threshold", async function () {
+    const filePath = path.join(guardDir, "circuit_breaker.json");
+    const gasSpentPath = path.join(guardDir, "gas_spent.json");
+    const today = new Date().toISOString().slice(0, 10);
+    fs.writeFileSync(
+      gasSpentPath,
+      `${JSON.stringify({ date: today, gasSpentWei: ethers.parseEther("0.005").toString() })}\n`,
+      "utf8"
+    );
+    const result = await checkCircuitBreaker({
+      filePath,
+      gasSpentPath,
+      maxDailyGasEth: 0.01,
+      gasDrawdownMultiplier: 1.2,
+      now: Date.parse("2026-11-02T12:00:00.000Z"),
+    });
+    expect(result.ok).to.equal(true);
+  });
 });
 
 describe("bot/guards checkContractOwner", function () {
