@@ -3,7 +3,7 @@ const { ethers } = require("hardhat");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { main } = require("../bot/index");
+const { main, readAaveFlashLoanPremium } = require("../bot/index");
 const { NETWORKS } = require("../bot/networks");
 const { reconcilePendingExecutions } = require("../bot/execute");
 const { readExecutionJournal, writeExecutionJournal } = require("../bot/persist");
@@ -584,5 +584,71 @@ describe("bot/index reconcilePendingExecutions", function () {
     });
 
     fs.rmSync(journalDir, { recursive: true, force: true });
+  });
+});
+
+describe("bot/index readAaveFlashLoanPremium", function () {
+  it("returns the on-chain premium when it diverges from the configured value", async function () {
+    const abi = ethers.AbiCoder.defaultAbiCoder();
+    let calledWith;
+    const provider = {
+      async call(tx) {
+        calledWith = tx;
+        return abi.encode(["uint128"], [23n]);
+      },
+    };
+    const config = { aaveFlashLoanPremiumBps: 5n };
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (msg) => warnings.push(String(msg));
+    try {
+      const result = await readAaveFlashLoanPremium({ provider, chainId: 42161, config });
+      expect(result).to.equal(23n);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(calledWith.to).to.equal(NETWORKS[42161].pool);
+    expect(warnings.join("\n")).to.include("23 bps");
+    expect(warnings.join("\n")).to.include("5 bps");
+  });
+
+  it("returns the configured premium when the chain is unknown", async function () {
+    const provider = {
+      async call() {
+        throw new Error("should not be called");
+      },
+    };
+    const config = { aaveFlashLoanPremiumBps: 5n };
+    const originalWarn = console.warn;
+    let warned = false;
+    console.warn = () => {
+      warned = true;
+    };
+    try {
+      const result = await readAaveFlashLoanPremium({ provider, chainId: 999, config });
+      expect(result).to.equal(5n);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warned).to.equal(false);
+  });
+
+  it("returns the configured premium when the on-chain call throws", async function () {
+    const provider = {
+      async call() {
+        throw new Error("RPC unavailable");
+      },
+    };
+    const config = { aaveFlashLoanPremiumBps: 5n };
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (msg) => warnings.push(String(msg));
+    try {
+      const result = await readAaveFlashLoanPremium({ provider, chainId: 42161, config });
+      expect(result).to.equal(5n);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings.join("\n")).to.include("could not read Aave flash loan premium");
   });
 });
