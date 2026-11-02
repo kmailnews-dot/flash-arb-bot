@@ -131,7 +131,7 @@ imminente en DRY_RUN ». Chacun fera l'objet d'un point dédié.
 | D7-bis | FERMÉ | 1f74225 | effectiveMinProfitBps({pair, config}) extrait dans bot/pricing.js |
 | D10 | FERMÉ | — | non-défaut : test/ForkArbitrum.test.js buildParams() fournit déjà minAmountOut (1n) et minProfitBps (0n), aligné sur bot/abis.js:16 et FlashArbExecutor.sol:37,43,44. Les 2 pending sont un opt-in (RUN_FORK_TESTS=true) par design, pas un bug. |
 | D11 | FERMÉ | — | non-défaut : MIN_PROFIT_BPS est déjà transmis dans live.yml:113 et scan.yml:44 (défaut 30), documenté dans .env.example:50 et README.md:357. Note : MIN_PROFIT_USD défaut workflow=5 vs .env.example=0.50, incohérence hors périmètre D11 à traiter séparément. |
-| D12 | À FAIRE | — | EXPECTED_CHAIN_ID=31337 dans seedLocalMocks + README |
+| D12 | FERMÉ | — | non-défaut : scripts/seedLocalMocks.js:76 imprime EXPECTED_CHAIN_ID=31337, README.md:332-334 documente la limitation chainId 31337 et la solution seed. |
 | D1 | À FAIRE | — | journal d'exécution durable (machine à états tx) |
 | D2 | À FAIRE | — | classification ethers v6 complète (CALL_EXCEPTION, NONCE_EXPIRED, REPLACEMENT_UNDERPRICED, TRANSACTION_REPLACED) |
 | D3 | À FAIRE | — | P&L réalisé + circuit breaker étendu (drawdown, RPC, gaz) |
