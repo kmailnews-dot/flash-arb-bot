@@ -110,8 +110,8 @@ historique de la matrice initiale.
 | P1-17 | REPORTÉ | — | irréalisable avec eth_call seul, sans helper on-chain |
 | P1-12 | FERMÉ | 24d9ff0 | balayage logarithmique + interpolation locale (ADR 0003) |
 | P1-18 | À FAIRE | — | multi-hop |
-| P1-10-bis | PLANIFIÉ | — | adaptive par profil : effectiveMaxTradeSize {majors,longtail}, applyAdaptive conscient du profil, gestion logSweep (défaut latent) |
-| P1-10-bis-logSweep | PLANIFIÉ | — | applyAdaptive ne traite pas pair.logSweep : facteur non appliqué silencieusement (inclus dans P1-10-bis) |
+| P1-10-bis | FERMÉ | 2d2f34a | adaptive par profil : effectiveMaxTradeSize {majors,longtail}, applyAdaptive conscient du profil, gestion logSweep |
+| P1-10-bis-logSweep | FERMÉ | 2d2f34a | applyAdaptive traite désormais pair.logSweep (facteur appliqué, clamp au cap du profil) |
 | P1-16-bis | NON PLANIFIÉ | — | écart médian dynamique |
 
 ## Suivi D0–D12 (issus de l'audit)
