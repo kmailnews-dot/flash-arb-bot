@@ -162,3 +162,72 @@ l'objet d'un point dédié ou d'une acceptation écrite.
 | D6-bis | À FAIRE | — | test unitaire direct de readAaveFlashLoanPremium (3 chemins) |
 
 ---
+---
+
+## F-05-C — red team et clôture (commit 0e5960a)
+
+### Périmètre
+
+Le gestionnaire de nonce (`bot/nonce.js`, ADR
+`docs/adr/0001-nonce-manager.md`) est intégré à
+`bot/execute.js`. Il n'est actif que si `config.dryRun === false`
+ET `provider.getTransactionCount` est une fonction. En
+`DRY_RUN=true` (défaut, CI, scan.yml), le comportement est
+strictement inchangé.
+
+### Scénarios adverses examinés
+
+| Scénario | Statut | Couverture |
+|---|---|---|
+| Panne après `SIGNED` mais avant envoi | Couvert | `reconcilePendingExecutions` → `DROPPED` (crash before submit) |
+| Panne après `SUBMITTED` | Couvert | `reconcilePendingExecutions` → `CONFIRMED`/`REVERTED` par hash |
+| RPC menteur (retourne un mauvais nonce) | Partiel | `manager.next()` accepte le nonce retourné ; pas de vérification croisée. Ticket `F-05-C-bis`. |
+| Concurrence sur le même `(provider, address)` | Couvert | `WeakMap<provider, Map<address, manager>>` + `manager.next()` sérialise le cache |
+| Réorg entre envoi et receipt | Couvert | `waitForReceipt` + `lateReceipt` + `reconcilePendingExecutions` |
+| Double soumission (deux process) | Hors périmètre | Le manager est en mémoire ; deux process auraient deux caches. Non traité (process unique attendu). |
+| `NONCE_EXPIRED` après envoi | Couvert fail-closed | `REJECTED_BEFORE_ACCEPTANCE` libère la réservation, breaker non incrémenté |
+| `NONCE_EXPIRED` avant envoi (`estimateGas`) | **Ouvert** | `F-05-C-bis` : pas de `manager.reset()`. Le prochain `next()` utilise l'ancien cache. |
+| Redémarrage process avec nonce managé | Couvert | Le manager relit `getTransactionCount(addr, "pending")` au premier `next()` |
+| Journal et nonce managé incohérents | Partiel | `tx.nonce` est journalisé après envoi ; le manager n'est pas réconcilié avec le journal. Ticket `F-05-C-ter`. |
+
+### Dette F-05-C-bis — resynchronisation sur `NONCE_EXPIRED`
+
+**Statut** : ouverte.
+
+**Cas réel** : catch d'envoi `execute.js:402` (branche
+`REJECTED_BEFORE_ACCEPTANCE`) et catch `estimateGas`
+`executor.js:110-124`.
+
+**Impact** : en cas de nonce désynchronisé (rare), le prochain
+`next()` utilise l'ancien cache jusqu'à épuisement ou
+redémarrage. Fail-closed : `startArbitrage` échoue avec
+`NONCE_EXPIRED`, réservation libérée, breaker non incrémenté.
+Le prochain démarrage du process resynchronise.
+
+**Correctif futur** : ajouter `manager.reset()` dans le catch
+`REJECTED_BEFORE_ACCEPTANCE` quand `err.code === "NONCE_EXPIRED"`,
+avec un test discriminant.
+
+### Dette F-05-C-ter — réconciliation du nonce managé avec le journal
+
+**Statut** : ouverte.
+
+**Description** : le journal (`SIGNED`/`SUBMITTED`) contient
+`tx.nonce` après envoi, mais le manager n'est pas réconcilié avec
+le journal au-delà de ce champ. Un nonce pourrait diverger si le
+journal contient un nonce que le manager ignore (par exemple,
+après une réconciliation manuelle).
+
+**Correctif futur** : optionnel. La réconciliation par hash
+(`reconcilePendingExecutions`) couvre la sécurité du capital.
+Le manager ne sert qu'à éviter les collisions de nonce. Une
+divergence journal/manager ne peut pas faire perdre de fonds
+(le `nonce` du journal est purement informatif).
+
+### Clôture
+
+`F-05-C` est **fermé** pour le mode réel, avec les deux dettes
+documentées ci-dessus. En `DRY_RUN=true`, comportement
+strictement inchangé.
+
+---

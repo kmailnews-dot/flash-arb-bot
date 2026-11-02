@@ -138,6 +138,25 @@ bot/run.js run() (process persistant)
   Tout rapport P&L qui ferait `gasPaidWei + l1FeeWei` doublerait le
   coût L1. La réconciliation du budget gaz dans `guards.js` utilise
   déjà le total, ne pas réinjecter `l1FeeWei` séparément.
+- **Le gestionnaire de nonce n'est actif qu'en mode réel
+  (F-05-C).** `execute()` ne passe un `nonce` explicite à
+  `startArbitrage` que si `config.dryRun === false` **et** que
+  `provider.getTransactionCount` est une fonction. En
+  `DRY_RUN=true`, comportement strictement inchangé. Le cache
+  est module-level (`WeakMap<provider, Map<address, manager>>`),
+  partagé entre appels pour un même provider, et relu au premier
+  `next()` de chaque manager. Réf. : `bot/nonce.js`,
+  `bot/execute.js` (`getNonceManager`, `nonceOverride`),
+  `docs/adr/0001-nonce-manager.md`.
+- **La resynchronisation sur `NONCE_EXPIRED` n'est pas faite en
+  3c (F-05-C-bis).** Le catch d'envoi
+  (`REJECTED_BEFORE_ACCEPTANCE`, `bot/execute.js:402`) libère la
+  réservation et n'incrémente pas le breaker, mais n'appelle pas
+  `manager.reset()`. Le catch `estimateGas`
+  (`bot/executor.js:110-124`) est hors périmètre. Impact :
+  fail-closed (le prochain `startArbitrage` échoue avec
+  `NONCE_EXPIRED`, réservation libérée), et le prochain
+  démarrage du process resynchronise. Ticket `F-05-C-bis`.
 - **Le retry est borné.** `shouldRetry` ne retente que les erreurs `TRANSIENT`, strictement sous
   `maxAttempts` (défaut 3), avec un backoff exponentiel plafonné à 4 s :
   `bot/resilient.js:1-3`, `19-30`, `84-104`.
