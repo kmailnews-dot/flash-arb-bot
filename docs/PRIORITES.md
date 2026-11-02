@@ -254,6 +254,8 @@ Ce qui a été mesuré (3 paires, 10+ cycles, logs/scans.jsonl) :
 
     USDC/WBTC Camelot V2 + SushiSwap V2 : DEPTH_EXCEEDED (0.1 USDC) sur tous les cycles.
 
+    WETH/ARB Uniswap V3 500 + SushiSwap V2 : gross toujours négatif (~-0.000047 WETH à 0.01 WETH, ~-0.0023 WETH à 0.1 WETH). Spread inter-DEX structurellement négatif après 40 bps de frais.
+
 Ce qui fonctionne :
 
     10+ cycles, 0 crash, 0 transaction (DRY_RUN=true).
