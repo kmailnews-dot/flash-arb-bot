@@ -245,6 +245,37 @@ describe("bot/guards breaker windows", function () {
     expect(result.revertRate).to.equal(0);
     expect(result.unknownRate).to.equal(0);
   });
+
+  it("throws on an invalid revertRateWindowSize", async function () {
+    const filePath = path.join(guardDir, "circuit_breaker.json");
+    await expect(
+      checkCircuitBreaker({ filePath, revertRateWindowSize: 0 })
+    ).to.be.rejectedWith("INVALID_CIRCUIT_BREAKER_CONFIG");
+    await expect(
+      checkCircuitBreaker({ filePath, revertRateWindowSize: -1 })
+    ).to.be.rejectedWith("INVALID_CIRCUIT_BREAKER_CONFIG");
+  });
+
+  it("throws on an invalid revertRateThreshold", async function () {
+    const filePath = path.join(guardDir, "circuit_breaker.json");
+    await expect(
+      checkCircuitBreaker({ filePath, revertRateThreshold: NaN })
+    ).to.be.rejectedWith("INVALID_CIRCUIT_BREAKER_CONFIG");
+  });
+
+  it("throws on an invalid unknownRateWindowSize", async function () {
+    const filePath = path.join(guardDir, "circuit_breaker.json");
+    await expect(
+      checkCircuitBreaker({ filePath, unknownRateWindowSize: 0 })
+    ).to.be.rejectedWith("INVALID_CIRCUIT_BREAKER_CONFIG");
+  });
+
+  it("throws on an invalid unknownRateThreshold", async function () {
+    const filePath = path.join(guardDir, "circuit_breaker.json");
+    await expect(
+      checkCircuitBreaker({ filePath, unknownRateThreshold: NaN })
+    ).to.be.rejectedWith("INVALID_CIRCUIT_BREAKER_CONFIG");
+  });
 });
 
 describe("bot/guards checkContractOwner", function () {

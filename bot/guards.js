@@ -176,6 +176,26 @@ async function checkCircuitBreaker({ filePath = DEFAULT_CIRCUIT_BREAKER_PATH, no
   const executionJournalPath =
     arguments[0]?.executionJournalPath || DEFAULT_EXECUTION_JOURNAL_PATH;
 
+  if (
+    !Number.isInteger(revertRateWindowSize) ||
+    revertRateWindowSize < 1 ||
+    !Number.isInteger(unknownRateWindowSize) ||
+    unknownRateWindowSize < 1 ||
+    !Number.isFinite(revertRateThreshold) ||
+    revertRateThreshold < 0 ||
+    revertRateThreshold > 1 ||
+    !Number.isFinite(unknownRateThreshold) ||
+    unknownRateThreshold < 0 ||
+    unknownRateThreshold > 1
+  ) {
+    throw new Error(
+      `INVALID_CIRCUIT_BREAKER_CONFIG: revertRateWindowSize=${revertRateWindowSize}, ` +
+        `revertRateThreshold=${revertRateThreshold}, ` +
+        `unknownRateWindowSize=${unknownRateWindowSize}, ` +
+        `unknownRateThreshold=${unknownRateThreshold}`
+    );
+  }
+
   const windowRecords = await listRecentTerminalExecutions(
     Math.max(revertRateWindowSize, unknownRateWindowSize),
     executionJournalPath
