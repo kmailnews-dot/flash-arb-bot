@@ -290,3 +290,34 @@ Contrat de types : `bot/domain.js` (aucun export runtime, `bot/domain.js:172`).
 - **Pas de garantie de profit.** Les filtres de `decide()` (`bot/decide.js:93-253`), le `staticCall`
   (`bot/execute.js:231-238`) et les guards réduisent le risque mais ne garantissent rien. Rappel
   MEV point 7 : la configuration actuelle est jugée économiquement défavorable.
+
+## Dettes documentées
+
+Les quatre dettes ci-dessous sont documentées mais non
+corrigées. Elles correspondent à des choix de conception
+assumés, pas à des bugs.
+
+- **D3-breaker-ter — fenêtre partielle du breaker.** La garde
+  `revertWindowFull`/`unknownWindowFull` exige que la fenêtre
+  soit pleine (20 records) avant d'évaluer un taux de revert ou
+  d'unknown. Avant la fenêtre pleine, le breaker est fail-open.
+  C'est volontaire : sur les 19 premiers trades, un taux calculé
+  sur 3 records n'a pas de sens statistique.
+- **D3-breaker-quater — réévaluation du taux après cooldown.**
+  Le taux de revert/unknown n'est pas réévalué à l'expiration du
+  cooldown. Le breaker se ferme, puis la prochaine tentative
+  incrémente le compteur et évalue le taux sur l'historique
+  courant. C'est volontaire : évite de rouvrir immédiatement
+  sur un historique non purgé.
+- **D4-ter — propagation du blockTag de scan à execute.** `scanPair`
+  fige un `blockTag` unique pour toutes les quotes du cycle, mais
+  `execute()` re-quote en `"latest"`. C'est volontaire : on veut
+  l'état frais au moment de l'envoi, pas l'état figé au scan. Une
+  opportunité peut disparaître entre `scanPair` et `execute()`, et
+  c'est `decide()` dans `execute()` qui tranche.
+- **D5-bis — gasPaidWei vs l1FeeWei.** `gasPaidWei` est le coût
+  total (gas L2 × gasPrice + `receipt.l1Fee`), tandis que
+  `l1FeeWei` n'est que la composante L1. Tout rapport P&L qui
+  ferait `gasPaidWei + l1FeeWei` doublerait le coût L1. La
+  réconciliation du budget gaz dans `guards.js` utilise déjà le
+  total, ne pas réinjecter `l1FeeWei` séparément.

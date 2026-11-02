@@ -139,6 +139,10 @@ imminente en DRY_RUN ». Chacun fera l'objet d'un point dédié.
 
 ## Suivi des dettes post-audit (D1–D6)
 
+> **Note.** D3-PnL-bis et D3-PnL-ter sont fermées par le commit
+> `abb6fac` (F-05-A/B), mais restent listées pour traçabilité
+> historique. Ne pas les rouvrir sans nouvelle authentification.
+
 Défauts identifiés pendant la remédiation de l'audit (lots 1–3)
 mais non corrigés dans les commits fermés D1–D6. Chacun fera
 l'objet d'un point dédié ou d'une acceptation écrite.
@@ -146,16 +150,16 @@ l'objet d'un point dédié ou d'une acceptation écrite.
 | # | Statut | Commit | Note |
 |---|---|---|---|
 | D1-bis | À FAIRE | — | catch ambigu sans txHash : ne pas requalifier DROPPED, utiliser getTransactionCount |
-| D3-PnL-bis | À FAIRE | — | parser receipt.logs dans le catch err.receipt (mocks uniquement aujourd'hui) |
-| D3-PnL-ter | À FAIRE | — | lateReceipt.status === 0 : écrire une ligne PnL REVERTED |
+| D3-PnL-bis | FERMÉ | abb6fac | parser receipt.logs dans le catch err.receipt (fermé par F-05-A) |
+| D3-PnL-ter | FERMÉ | abb6fac | lateReceipt.status === 0 : écrire une ligne PnL REVERTED (fermé par F-05-B) |
 | D3-breaker-bis | À FAIRE | — | détection gaz anormal (drawdown, RPC, gaz) |
-| D3-breaker-ter | À DOCUMENTER | — | garde revertWindowFull/unknownWindowFull (fenêtre partielle) |
-| D3-breaker-quater | À DOCUMENTER | — | rate non réévalué après expiration du cooldown |
+| D3-breaker-ter | DOCUMENTÉ | — | garde revertWindowFull/unknownWindowFull (fenêtre partielle). Voir bot/ARCHITECTURE.md. |
+| D3-breaker-quater | DOCUMENTÉ | — | rate non réévalué après expiration du cooldown. Voir bot/ARCHITECTURE.md. |
 | D3-breaker-quinquies | À FAIRE | — | distinguer ENOENT de STATE_FILE_CORRUPT dans le breaker |
 | D3-breaker-sexies | À FAIRE | — | tests validation config breaker (4 options) |
 | D4-bis | À FAIRE | — | QUOTE_STALE et DEPTH_EXCEEDED ne doivent pas incrémenter rpcErrors (bot/index.js) |
-| D4-ter | À DOCUMENTER | — | blockTag non propagé à execute.js (re-quote runtime reste "latest") |
-| D5-bis | À DOCUMENTER | — | gasPaidWei (total L2+L1) vs l1FeeWei (détail L1) : ne pas additionner |
+| D4-ter | DOCUMENTÉ | — | blockTag non propagé à execute.js (re-quote runtime reste "latest"). Voir bot/ARCHITECTURE.md. |
+| D5-bis | DOCUMENTÉ | — | gasPaidWei (total L2+L1) vs l1FeeWei (détail L1) : ne pas additionner. Voir bot/ARCHITECTURE.md. |
 | D5-ter | À FAIRE | — | calibrer L1_COST_MULTIPLIER_BPS sur receipts réels |
 | D6a-bis | À FAIRE | — | tests validation maxQuoteAgeMs et L1_COST_MULTIPLIER_BPS |
 | D6-bis | À FAIRE | — | test unitaire direct de readAaveFlashLoanPremium (3 chemins) |
