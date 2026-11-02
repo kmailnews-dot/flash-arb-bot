@@ -323,6 +323,8 @@ function validateScannerConfig({
   unknownRateWindowSize = 20,
   unknownRateThreshold = 0.3,
   maxQuoteAgeMs = 60_000,
+  rpcErrorRateWindowSize = 10,
+  rpcErrorRateThreshold = 0.5,
 }) {
   if (minProfitUsd !== undefined && minProfitUsd !== null) {
     if (typeof minProfitUsd !== "number" || !Number.isFinite(minProfitUsd) || minProfitUsd < 0) {
@@ -426,6 +428,17 @@ function validateScannerConfig({
   if (!Number.isInteger(maxQuoteAgeMs) || maxQuoteAgeMs <= 0) {
     throw new Error("MAX_QUOTE_AGE_MS must be a positive integer.");
   }
+  if (!Number.isInteger(rpcErrorRateWindowSize) || rpcErrorRateWindowSize < 3 || rpcErrorRateWindowSize > 100) {
+    throw new Error("RPC_ERROR_RATE_WINDOW_SIZE must be an integer between 3 and 100.");
+  }
+  if (
+    typeof rpcErrorRateThreshold !== "number" ||
+    !Number.isFinite(rpcErrorRateThreshold) ||
+    rpcErrorRateThreshold <= 0 ||
+    rpcErrorRateThreshold > 1
+  ) {
+    throw new Error("RPC_ERROR_RATE_THRESHOLD must be a finite number > 0 and <= 1.");
+  }
 }
 
 const slippageBps = validateSlippageBps();
@@ -470,6 +483,9 @@ const config = {
   minWalletBalanceEth: optionalNumber("MIN_WALLET_BALANCE_ETH", 0.005),
   maxRpcErrorsPerScan: optionalNumber("MAX_RPC_ERRORS_PER_SCAN", 3),
   maxQuoteAgeMs: optionalNumber("MAX_QUOTE_AGE_MS", 60_000),
+  rpcErrorRateWindowSize: optionalNumber("RPC_ERROR_RATE_WINDOW_SIZE", 10),
+  rpcErrorRateThreshold: optionalNumber("RPC_ERROR_RATE_THRESHOLD", 0.5),
+  rpcErrorsPath: optionalString("RPC_ERRORS_PATH", path.join(LOG_DIR, "rpc_errors.json")),
   maxDailyGasEth: optionalNumber("MAX_DAILY_GAS_ETH", 0.01),
   gasDrawdownMultiplier: optionalNumber("GAS_DRAWDOWN_MULTIPLIER", 1.2),
   maxConsecutiveFailures: optionalNumber("MAX_CONSECUTIVE_FAILURES", 5),
@@ -511,6 +527,8 @@ validateScannerConfig({
   unknownRateWindowSize: config.unknownRateWindowSize,
   unknownRateThreshold: config.unknownRateThreshold,
   maxQuoteAgeMs: config.maxQuoteAgeMs,
+  rpcErrorRateWindowSize: config.rpcErrorRateWindowSize,
+  rpcErrorRateThreshold: config.rpcErrorRateThreshold,
 });
 
 module.exports = config;

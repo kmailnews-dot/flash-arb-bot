@@ -13,6 +13,10 @@ const {
   checkCircuitBreaker,
   recordFailure,
   recordSuccess,
+  readRpcErrors,
+  recordRpcCycle,
+  checkRpcErrorRate,
+  DEFAULT_RPC_ERRORS_PATH,
 } = require("../bot/guards");
 const { writeExecutionJournal } = require("../bot/persist");
 
@@ -338,5 +342,57 @@ describe("bot/guards checkContractOwner", function () {
     expect(result.ok).to.equal(false);
     expect(result.owner).to.equal(owner);
     expect(result.error).to.include("CONTRACT_OWNER_MISMATCH");
+  });
+});
+
+describe("bot/guards rpcErrors", function () {
+  let guardDir;
+
+  beforeEach(function () {
+    guardDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-rpc-errors-"));
+  });
+
+  afterEach(function () {
+    fs.rmSync(guardDir, { recursive: true, force: true });
+  });
+
+  it("records an RPC cycle and truncates to windowSize", async function () {
+    const filePath = path.join(guardDir, "rpc_errors.json");
+    for (let i = 0; i < 5; i += 1) {
+      await recordRpcCycle({ filePath, errors: i, total: 10, at: 1000 + i, windowSize: 3 });
+    }
+    const state = await readRpcErrors({ filePath });
+    expect(state.version).to.equal(1);
+    expect(state.cycles).to.have.length(3);
+    expect(state.cycles.map((c) => c.errors)).to.deep.equal([2, 3, 4]);
+  });
+
+  it("returns ok when the RPC error rate is below threshold", async function () {
+    const filePath = path.join(guardDir, "rpc_errors.json");
+    await recordRpcCycle({ filePath, errors: 1, total: 10, at: 1000 });
+    await recordRpcCycle({ filePath, errors: 0, total: 10, at: 2000 });
+    const result = await checkRpcErrorRate({ filePath, threshold: 0.5, now: 3000 });
+    expect(result.ok).to.equal(true);
+    expect(result.rate).to.equal(0.05);
+    expect(result.samples).to.equal(2);
+  });
+
+  it("opens the breaker when the RPC error rate exceeds threshold", async function () {
+    const filePath = path.join(guardDir, "rpc_errors.json");
+    await recordRpcCycle({ filePath, errors: 8, total: 10, at: 1000 });
+    await recordRpcCycle({ filePath, errors: 9, total: 10, at: 2000 });
+    const result = await checkRpcErrorRate({ filePath, threshold: 0.5, now: 3000 });
+    expect(result.ok).to.equal(false);
+    expect(result.rate).to.equal(0.85);
+    expect(result.error).to.include("RPC error rate");
+    expect(result.error).to.include("85%");
+  });
+
+  it("returns ok on missing file (fail-open)", async function () {
+    const filePath = path.join(guardDir, "missing.json");
+    const result = await checkRpcErrorRate({ filePath, threshold: 0.5 });
+    expect(result.ok).to.equal(true);
+    expect(result.rate).to.equal(0);
+    expect(result.samples).to.equal(0);
   });
 });

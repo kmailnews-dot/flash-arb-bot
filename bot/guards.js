@@ -9,6 +9,7 @@ const {
 const LOG_DIR = path.resolve(__dirname, "..", "logs");
 const DEFAULT_GAS_SPENT_PATH = path.join(LOG_DIR, "gas_spent.json");
 const DEFAULT_CIRCUIT_BREAKER_PATH = path.join(LOG_DIR, "circuit_breaker.json");
+const DEFAULT_RPC_ERRORS_PATH = path.join(LOG_DIR, "rpc_errors.json");
 
 function utcDay(now = Date.now()) {
   return new Date(now).toISOString().slice(0, 10);
@@ -293,9 +294,86 @@ async function recordFailure({
   return { consecutiveFailures, openUntil, opened: openUntil !== null };
 }
 
+async function readRpcErrors({ filePath = DEFAULT_RPC_ERRORS_PATH } = {}) {
+  const state = await readState(filePath, null);
+  if (!state || typeof state !== "object" || Array.isArray(state)) {
+    return { version: 1, cycles: [] };
+  }
+  if (state.version !== 1 || !Array.isArray(state.cycles)) {
+    return { version: 1, cycles: [] };
+  }
+  return { version: 1, cycles: state.cycles };
+}
+
+async function writeRpcErrors({ filePath = DEFAULT_RPC_ERRORS_PATH, state } = {}) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const tmpPath = `${filePath}.${process.pid}.tmp`;
+  const fh = await fs.open(tmpPath, "w");
+  try {
+    await fh.writeFile(`${JSON.stringify(state, null, 2)}\n`, "utf8");
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+  await fs.rename(tmpPath, filePath);
+}
+
+async function recordRpcCycle({
+  filePath = DEFAULT_RPC_ERRORS_PATH,
+  errors,
+  total,
+  at = Date.now(),
+  windowSize = 10,
+} = {}) {
+  if (!Number.isInteger(errors) || errors < 0) {
+    throw new Error("recordRpcCycle: errors must be a non-negative integer");
+  }
+  if (!Number.isInteger(total) || total < 0) {
+    throw new Error("recordRpcCycle: total must be a non-negative integer");
+  }
+  if (!Number.isInteger(windowSize) || windowSize < 1) {
+    throw new Error("recordRpcCycle: windowSize must be a positive integer");
+  }
+  const state = await readRpcErrors({ filePath });
+  const cycles = [...state.cycles, { errors, total, at }].slice(-windowSize);
+  await writeRpcErrors({ filePath, state: { version: 1, cycles } });
+  return { version: 1, cycles };
+}
+
+async function checkRpcErrorRate({
+  filePath = DEFAULT_RPC_ERRORS_PATH,
+  windowSize = 10,
+  threshold = 0.5,
+  now = Date.now(),
+} = {}) {
+  const state = await readRpcErrors({ filePath });
+  const recent = state.cycles
+    .filter((c) => typeof c.at === "number" && c.at <= now)
+    .slice(-windowSize);
+  if (recent.length === 0) {
+    return { ok: true, rate: 0, samples: 0 };
+  }
+  const sumErrors = recent.reduce((acc, c) => acc + Number(c.errors || 0), 0);
+  const sumTotal = recent.reduce((acc, c) => acc + Number(c.total || 0), 0);
+  if (sumTotal === 0) {
+    return { ok: true, rate: 0, samples: recent.length };
+  }
+  const rate = sumErrors / sumTotal;
+  if (rate > threshold) {
+    return {
+      ok: false,
+      rate,
+      samples: recent.length,
+      error: `CIRCUIT_BREAKER_OPEN: RPC error rate ${(rate * 100).toFixed(0)}% over last ${recent.length} cycles (threshold ${(threshold * 100).toFixed(0)}%)`,
+    };
+  }
+  return { ok: true, rate, samples: recent.length };
+}
+
 module.exports = {
   DEFAULT_GAS_SPENT_PATH,
   DEFAULT_CIRCUIT_BREAKER_PATH,
+  DEFAULT_RPC_ERRORS_PATH,
   utcDay,
   checkChainId,
   checkContractOwner,
@@ -308,4 +386,8 @@ module.exports = {
   checkCircuitBreaker,
   recordSuccess,
   recordFailure,
+  readRpcErrors,
+  writeRpcErrors,
+  recordRpcCycle,
+  checkRpcErrorRate,
 };
