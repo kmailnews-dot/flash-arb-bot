@@ -113,7 +113,7 @@ historique de la matrice initiale.
 | P1-10-bis | FERMÉ | 2d2f34a | adaptive par profil : effectiveMaxTradeSize {majors,longtail}, applyAdaptive conscient du profil, gestion logSweep |
 | P1-10-bis-logSweep | FERMÉ | 2d2f34a | applyAdaptive traite désormais pair.logSweep (facteur appliqué, clamp au cap du profil) |
 | P1-16-bis | NON PLANIFIÉ | — | écart médian dynamique |
-| P1-10-ter | À FAIRE | — | cap maxTradeSize en unités de borrowedToken rend les paires stables (USDC/USDT/DAI) inutilisables : 0.1 USDC = $0.10. Recalibrer en USD ou en valeur notionnelle. Bloque G1 économique. |
+| P1-10-ter | FERMÉ | bc182c4 | cap maxTradeSizeUsd (500 majors, 2000 longtail) + fallback token units. Validé en réel : tailles 10/50/100/500 USDC passent validatePairs et applyAdaptive sans écrasement. |
 
 ## Suivi D0–D12 (issus de l'audit)
 
@@ -273,5 +273,7 @@ Ce qui bloque une conclusion économique :
     Aucune paire inter-DEX avec un borrowedToken non-stable n'a été testée avec des tailles réalistes.
 
 Verdict : G2 (shadow) est PRÉMATURÉ. Il faut d'abord corriger P1-10-ter (cap en USD ou en valeur notionnelle) et tester une paire inter-DEX avec un borrowedToken non-stable (WETH/ARB Uniswap V3 vs Sushi V2, par exemple). Sans ces corrections, G1 ne peut pas conclure.
+
+Mise à jour P1-10-ter (3 novembre 2026) : le cap maxTradeSizeUsd est validé en réel. Les tailles 10, 50, 100 et 500 USDC passent la validation de config et ne sont plus écrasées à 0.1 par applyAdaptive. La paire USDC/WBTC via Camelot V2 + SushiSwap V2 reste non exploitable : DEPTH_EXCEEDED même à 10 USDC, le pool d'entrée Camelot WBTC/USDC est trop mince. Pour tester USDC/WBTC, il faudrait un pool WBTC/USDC profond (Uniswap V3 fee 500 ou 3000), dont l'adresse n'est pas vérifiée dans le dépôt.
 
 ---
