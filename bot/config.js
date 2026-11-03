@@ -33,9 +33,23 @@ function validateAddress(value, path) {
 
 const VALID_PROFILES = new Set(["majors", "longtail"]);
 const PROFILE_BOUNDS = {
-  majors: { minProfitBps: [10, 15], maxTradeSize: 0.1 },
-  longtail: { minProfitBps: [60, 100], maxTradeSize: 1 },
+  majors: { minProfitBps: [10, 15], maxTradeSizeUsd: 500, maxTradeSizeTokenUnits: 0.1 },
+  longtail: { minProfitBps: [60, 100], maxTradeSizeUsd: 2000, maxTradeSizeTokenUnits: 1 },
 };
+
+function profileMaxTradeSizeInTokenUnits({ bounds, borrowedToken, ethUsdPrice }) {
+  const borrowed = borrowedToken || {};
+  const { maxTradeSizeUsd, maxTradeSizeTokenUnits } = bounds || {};
+  let tokenUsdPrice = null;
+  if (borrowed.isStable === true) tokenUsdPrice = 1;
+  else if (borrowed.isWeth === true && Number.isFinite(Number(ethUsdPrice)) && Number(ethUsdPrice) > 0) {
+    tokenUsdPrice = Number(ethUsdPrice);
+  }
+  if (tokenUsdPrice === null) {
+    return { maxTradeSize: maxTradeSizeTokenUnits, tokenUsdPrice: null, source: "token_units_fallback" };
+  }
+  return { maxTradeSize: maxTradeSizeUsd / tokenUsdPrice, tokenUsdPrice, source: "usd" };
+}
 
 function validatePairs(pairs) {
   return pairs.map((pair, index) => {
@@ -78,6 +92,17 @@ function validatePairs(pairs) {
     const hasLogSweep = pair.logSweep !== undefined && pair.logSweep !== null;
     const bounds = PROFILE_BOUNDS[pair.profile];
     const decimals = pair.borrowedToken.decimals;
+    const capInfo = profileMaxTradeSizeInTokenUnits({
+      bounds,
+      borrowedToken: pair.borrowedToken,
+      ethUsdPrice: process.env.ETH_USD_PRICE_FOR_CAP,
+    });
+    const effectiveMaxTradeSize = capInfo.maxTradeSize;
+    if (bounds && capInfo.source === "token_units_fallback") {
+      console.warn(
+        `[CAP] no USD price for borrowedToken ${pair.borrowedToken.symbol || pair.borrowedToken.address}, falling back to maxTradeSize=${capInfo.maxTradeSize} in token units (cap not USD-calibrated).`
+      );
+    }
     if (hasTradeSizes && hasLogSweep) {
       throw new Error(`${prefix}.tradeSizes and ${prefix}.logSweep are mutually exclusive.`);
     }
@@ -109,8 +134,8 @@ function validatePairs(pairs) {
       if (maxBigInt <= minBigInt) {
         throw new Error(`${prefix}.logSweep.max must be greater than ${prefix}.logSweep.min.`);
       }
-      if (maxBigInt > ethers.parseUnits(String(bounds.maxTradeSize), decimals)) {
-        throw new Error(`${prefix}.logSweep.max must be <= ${bounds.maxTradeSize} for profile "${pair.profile}".`);
+      if (maxBigInt > ethers.parseUnits(String(effectiveMaxTradeSize), decimals)) {
+        throw new Error(`${prefix}.logSweep.max must be <= ${effectiveMaxTradeSize} for profile "${pair.profile}".`);
       }
     }
     if (hasTradeSizes) {
@@ -161,8 +186,8 @@ function validatePairs(pairs) {
     if (hasTradeSizes) {
       for (const size of pair.tradeSizes) {
         const num = parseFloat(size);
-        if (num > bounds.maxTradeSize) {
-          throw new Error(`${prefix}.tradeSizes contains ${size}, above the ${bounds.maxTradeSize} cap for profile "${pair.profile}".`);
+        if (num > effectiveMaxTradeSize) {
+          throw new Error(`${prefix}.tradeSizes contains ${size}, above the ${effectiveMaxTradeSize} cap for profile "${pair.profile}".`);
         }
       }
     }

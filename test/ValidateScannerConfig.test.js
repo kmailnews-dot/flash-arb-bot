@@ -34,7 +34,7 @@ process.env.PAIRS_CONFIG_JSON = JSON.stringify([
 ]);
 process.env.ETH_USD_ROUTE_JSON = "";
 
-const { validateScannerConfig } = require("../bot/config");
+const { validateScannerConfig, validatePairs } = require("../bot/config");
 
 for (const [key, value] of Object.entries(previousEnv)) {
   if (value === undefined) delete process.env[key];
@@ -218,6 +218,30 @@ describe("bot/config validateScannerConfig", function () {
   it("rejects an l1CostMultiplierBps above 10000", function () {
     expect(() => validateScannerConfig({ ...VALID_CONFIG, l1CostMultiplierBps: 10001 })).to.throw(
       "L1_COST_MULTIPLIER_BPS must be an integer between 0 and 10000."
+    );
+  });
+});
+
+describe("bot/config validatePairs USD cap", function () {
+  function makeStablePair(tradeSizes) {
+    return {
+      profile: "majors",
+      minProfitBps: 10,
+      borrowedToken: { address: BORROWED, decimals: 6, isStable: true },
+      intermediateToken: { address: INTERMEDIATE, decimals: 18 },
+      legOut: { kind: "V2", router: ROUTER_OUT, tokenOut: INTERMEDIATE },
+      legBack: { kind: "V2", router: ROUTER_BACK, tokenOut: BORROWED },
+      tradeSizes,
+    };
+  }
+
+  it("accepts tradeSizes above 0.1 for a stablecoin pair (USD cap)", function () {
+    expect(() => validatePairs([makeStablePair(["100"])])).to.not.throw();
+  });
+
+  it("rejects tradeSizes above the USD cap for a stablecoin pair", function () {
+    expect(() => validatePairs([makeStablePair(["600"])])).to.throw(
+      'PAIRS_CONFIG_JSON[0].tradeSizes contains 600, above the 500 cap for profile "majors".'
     );
   });
 });
