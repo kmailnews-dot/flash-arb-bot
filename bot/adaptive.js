@@ -7,7 +7,6 @@ const ADAPTIVE_MIN_SIZE_FACTOR = 0.10;
 const ADAPTIVE_MAX_SIZE_FACTOR = 1.00;
 const VALID_PROFILES = new Set(["majors", "longtail"]);
 const DEFAULT_PROFILE = "majors";
-const PROFILE_CAPS = { majors: 0.1, longtail: 1 };
 const ADAPTIVE_WINDOW = 20;
 const ADAPTIVE_STEP_BPS = 5;
 const ADAPTIVE_STEP_SIZE = 0.10;
@@ -224,11 +223,10 @@ function applyAdaptive({ config, state } = {}) {
     ? config.pairs.map((pair) => {
         const profile = VALID_PROFILES.has(pair.profile) ? pair.profile : DEFAULT_PROFILE;
         const factor = factors[profile];
-        const maxTradeSize = PROFILE_CAPS[profile];
         const scaled = (value) => {
           const n = parseFloat(value);
           if (!Number.isFinite(n)) return value;
-          return (Math.min(n * factor, maxTradeSize)).toFixed(4);
+          return (n * factor).toFixed(4);
         };
         if (Array.isArray(pair.tradeSizes)) {
           return {

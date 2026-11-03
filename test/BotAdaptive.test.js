@@ -241,7 +241,7 @@ describe("bot/adaptive", function () {
     expect(applied.effectiveMinProfitBps).to.equal(60);
     expect(applied.effectiveMaxTradeSize).to.deep.equal({ majors: "0.50", longtail: "0.50" });
     expect(applied.tradeSizeFactor).to.deep.equal({ majors: 0.5, longtail: 0.5 });
-    expect(applied.pairs[0].tradeSizes).to.deep.equal(["0.1000", "0.1000"]);
+    expect(applied.pairs[0].tradeSizes).to.deep.equal(["500.0000", "1000.0000"]);
     expect(config.minProfitBps).to.equal(30);
     expect(config.pairs[0].tradeSizes).to.deep.equal(["1000", "2000"]);
 
@@ -271,7 +271,7 @@ describe("bot/adaptive", function () {
     expect(applied.pairs[1].tradeSizes).to.deep.equal(["0.1600", "0.1800"]);
   });
 
-  it("clamps scaled tradeSizes to the profile cap", function () {
+  it("does not clamp scaled tradeSizes (cap is applied by validatePairs)", function () {
     const config = makeConfig({
       pairs: [
         { label: "MAJORS", profile: "majors", tradeSizes: ["0.08", "0.09"] },
@@ -298,8 +298,8 @@ describe("bot/adaptive", function () {
         { label: "MAJORS", profile: "majors", tradeSizes: ["1", "2"] },
       ],
     });
-    const clamped = applyAdaptive({ config: bigConfig, state: bigState });
-    expect(clamped.pairs[0].tradeSizes).to.deep.equal(["0.1000", "0.1000"]);
+    const scaledBig = applyAdaptive({ config: bigConfig, state: bigState });
+    expect(scaledBig.pairs[0].tradeSizes).to.deep.equal(["1.0000", "2.0000"]);
   });
 
   it("applies per-profile factor to logSweep without hitting the cap", function () {
