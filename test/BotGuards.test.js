@@ -135,7 +135,12 @@ describe("bot/guards", function () {
       });
     }
 
-    const open = await checkCircuitBreaker({ filePath: breakerPath, now });
+    const open = await checkCircuitBreaker({
+      filePath: breakerPath,
+      rpcErrorsPath: path.join(guardDir, "rpc_errors.json"),
+      gasHistoryPath: path.join(guardDir, "gas_history.json"),
+      now,
+    });
     expect(open.ok).to.equal(false);
     expect(open.error).to.include("CIRCUIT_BREAKER_OPEN");
 
@@ -143,11 +148,18 @@ describe("bot/guards", function () {
     expect(state.consecutiveFailures).to.equal(5);
     expect(state.openUntil).to.equal(now + 60 * 60_000);
 
-    const stillOpen = await checkCircuitBreaker({ filePath: breakerPath, now: now + 1000 });
+    const stillOpen = await checkCircuitBreaker({
+      filePath: breakerPath,
+      rpcErrorsPath: path.join(guardDir, "rpc_errors.json"),
+      gasHistoryPath: path.join(guardDir, "gas_history.json"),
+      now: now + 1000,
+    });
     expect(stillOpen.ok).to.equal(false);
 
     const afterCooldown = await checkCircuitBreaker({
       filePath: breakerPath,
+      rpcErrorsPath: path.join(guardDir, "rpc_errors.json"),
+      gasHistoryPath: path.join(guardDir, "gas_history.json"),
       now: now + 60 * 60_000 + 1,
     });
     expect(afterCooldown.ok).to.equal(true);
@@ -197,6 +209,8 @@ describe("bot/guards breaker windows", function () {
 
     const result = await checkCircuitBreaker({
       filePath: path.join(guardDir, "circuit_breaker.json"),
+      rpcErrorsPath: path.join(guardDir, "rpc_errors.json"),
+      gasHistoryPath: path.join(guardDir, "gas_history.json"),
       executionJournalPath,
       now,
     });
@@ -216,6 +230,8 @@ describe("bot/guards breaker windows", function () {
 
     const result = await checkCircuitBreaker({
       filePath: path.join(guardDir, "circuit_breaker.json"),
+      rpcErrorsPath: path.join(guardDir, "rpc_errors.json"),
+      gasHistoryPath: path.join(guardDir, "gas_history.json"),
       executionJournalPath,
     });
 
@@ -233,6 +249,8 @@ describe("bot/guards breaker windows", function () {
 
     const result = await checkCircuitBreaker({
       filePath: path.join(guardDir, "circuit_breaker.json"),
+      rpcErrorsPath: path.join(guardDir, "rpc_errors.json"),
+      gasHistoryPath: path.join(guardDir, "gas_history.json"),
       executionJournalPath,
       now,
     });
@@ -246,6 +264,8 @@ describe("bot/guards breaker windows", function () {
   it("keeps the breaker closed when the execution journal is missing", async function () {
     const result = await checkCircuitBreaker({
       filePath: path.join(guardDir, "circuit_breaker.json"),
+      rpcErrorsPath: path.join(guardDir, "rpc_errors.json"),
+      gasHistoryPath: path.join(guardDir, "gas_history.json"),
       executionJournalPath: path.join(guardDir, "missing.json"),
     });
 
@@ -257,31 +277,56 @@ describe("bot/guards breaker windows", function () {
   it("throws on an invalid revertRateWindowSize", async function () {
     const filePath = path.join(guardDir, "circuit_breaker.json");
     await expect(
-      checkCircuitBreaker({ filePath, revertRateWindowSize: 0 })
+      checkCircuitBreaker({
+        filePath,
+        rpcErrorsPath: path.join(guardDir, "rpc_errors.json"),
+        gasHistoryPath: path.join(guardDir, "gas_history.json"),
+        revertRateWindowSize: 0,
+      })
     ).to.be.rejectedWith("INVALID_CIRCUIT_BREAKER_CONFIG");
     await expect(
-      checkCircuitBreaker({ filePath, revertRateWindowSize: -1 })
+      checkCircuitBreaker({
+        filePath,
+        rpcErrorsPath: path.join(guardDir, "rpc_errors.json"),
+        gasHistoryPath: path.join(guardDir, "gas_history.json"),
+        revertRateWindowSize: -1,
+      })
     ).to.be.rejectedWith("INVALID_CIRCUIT_BREAKER_CONFIG");
   });
 
   it("throws on an invalid revertRateThreshold", async function () {
     const filePath = path.join(guardDir, "circuit_breaker.json");
     await expect(
-      checkCircuitBreaker({ filePath, revertRateThreshold: NaN })
+      checkCircuitBreaker({
+        filePath,
+        rpcErrorsPath: path.join(guardDir, "rpc_errors.json"),
+        gasHistoryPath: path.join(guardDir, "gas_history.json"),
+        revertRateThreshold: NaN,
+      })
     ).to.be.rejectedWith("INVALID_CIRCUIT_BREAKER_CONFIG");
   });
 
   it("throws on an invalid unknownRateWindowSize", async function () {
     const filePath = path.join(guardDir, "circuit_breaker.json");
     await expect(
-      checkCircuitBreaker({ filePath, unknownRateWindowSize: 0 })
+      checkCircuitBreaker({
+        filePath,
+        rpcErrorsPath: path.join(guardDir, "rpc_errors.json"),
+        gasHistoryPath: path.join(guardDir, "gas_history.json"),
+        unknownRateWindowSize: 0,
+      })
     ).to.be.rejectedWith("INVALID_CIRCUIT_BREAKER_CONFIG");
   });
 
   it("throws on an invalid unknownRateThreshold", async function () {
     const filePath = path.join(guardDir, "circuit_breaker.json");
     await expect(
-      checkCircuitBreaker({ filePath, unknownRateThreshold: NaN })
+      checkCircuitBreaker({
+        filePath,
+        rpcErrorsPath: path.join(guardDir, "rpc_errors.json"),
+        gasHistoryPath: path.join(guardDir, "gas_history.json"),
+        unknownRateThreshold: NaN,
+      })
     ).to.be.rejectedWith("INVALID_CIRCUIT_BREAKER_CONFIG");
   });
 
@@ -297,6 +342,8 @@ describe("bot/guards breaker windows", function () {
     const result = await checkCircuitBreaker({
       filePath,
       gasSpentPath,
+      rpcErrorsPath: path.join(guardDir, "rpc_errors.json"),
+      gasHistoryPath: path.join(guardDir, "gas_history.json"),
       maxDailyGasEth: 0.01,
       gasDrawdownMultiplier: 1.2,
       now: Date.parse("2026-11-02T12:00:00.000Z"),
@@ -317,6 +364,8 @@ describe("bot/guards breaker windows", function () {
     const result = await checkCircuitBreaker({
       filePath,
       gasSpentPath,
+      rpcErrorsPath: path.join(guardDir, "rpc_errors.json"),
+      gasHistoryPath: path.join(guardDir, "gas_history.json"),
       maxDailyGasEth: 0.01,
       gasDrawdownMultiplier: 1.2,
       now: Date.parse("2026-11-02T12:00:00.000Z"),
