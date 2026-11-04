@@ -141,6 +141,7 @@ imminente en DRY_RUN ». Chacun fera l'objet d'un point dédié.
 | D6 | FERMÉ | 18d2927 | une seule source de premium Aave (readAaveFlashLoanPremium, D6-bis fermé 18d2927) |
 | D8 | FERMÉ | b3b12e7 | owner() dans FLASH_ARB_EXECUTOR_ABI |
 | D9 | FERMÉ | — | non-défaut : bot/config.js garantit MIN_PROFIT_USD=0.50 et MIN_PROFIT_BPS=30 par défaut. Le cas « aucun seuil » n'est atteignable qu'en test et n'a pas été ajouté pour ne pas casser 51 fixtures de bot/executor. |
+| D13 | FERMÉ | 0bdfbd7 | isolation des tests bot/guards breaker windows : chemins rpcErrorsPath et gasHistoryPath passés explicitement (guardDir), ne lisent plus logs/ du bot réel. Test discriminant : bot/index.js en parallèle + npx hardhat test → 339 passing. |
 
 ---
 
