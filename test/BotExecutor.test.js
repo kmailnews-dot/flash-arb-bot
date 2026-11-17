@@ -1844,6 +1844,66 @@ describe("bot/executor maybeExecute", function () {
     expect(send.args[3].nonce).to.equal(42);
   });
 
+  it("resets the cached nonce after NONCE_EXPIRED before the next send", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const config = makeConfig();
+    const { opportunity: freshOpportunity } = await opportunityAboveGasFloor({
+      opportunity,
+      config,
+    });
+    let nonceReads = 0;
+    const provider = {
+      getTransactionCount: async () => {
+        nonceReads += 1;
+        return nonceReads === 1 ? 42 : 45;
+      },
+      getFeeData: async () => ({ gasPrice: 1n, maxFeePerGas: null }),
+      getNetwork: () => ethers.provider.getNetwork(),
+      getBalance: (address) => ethers.provider.getBalance(address),
+    };
+    const quoteLeg = async (_provider, leg) =>
+      leg === opportunity.pair.legOut ? opportunity.intermediateOut : opportunity.finalOut;
+    const sentNonces = [];
+    let attempts = 0;
+    const contract = {
+      owner: async () => defaultOwnerAddress,
+      startArbitrage: async (...args) => {
+        attempts += 1;
+        if (attempts === 1) {
+          const err = new Error("nonce has already been used");
+          err.code = "NONCE_EXPIRED";
+          throw err;
+        }
+        sentNonces.push(args[3].nonce);
+        return {
+          hash: `0x${"77".repeat(32)}`,
+          wait: async () => ({ status: 1, gasUsed: 300000n, gasPrice: 1n, blockNumber: 1 }),
+        };
+      },
+    };
+    contract.startArbitrage.estimateGas = async () => 300000n;
+    contract.startArbitrage.staticCall = async () => true;
+
+    const first = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+    expect(first.submitted).to.equal(false);
+
+    const second = await maybeExecute({
+      opportunity: freshOpportunity,
+      provider,
+      config,
+      contract,
+      quoteLeg,
+    });
+    expect(second.submitted).to.equal(true);
+    expect(sentNonces).to.deep.equal([45]);
+  });
+
   it("does not pass a nonce when the provider lacks getTransactionCount", async function () {
     const { opportunity, makeConfig } = await deployFixture();
     const config = makeConfig();

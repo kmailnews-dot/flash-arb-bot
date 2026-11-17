@@ -130,15 +130,27 @@ function createProxyAgent({ rpcUrl, proxyUrl, rejectUnauthorized = true }) {
 
 /// Fabrique unique des providers JSON-RPC http(s) du bot.
 /// proxyUrl non défini → strictement équivalent à `new ethers.JsonRpcProvider(rpcUrl)`.
-function createJsonRpcProvider({ rpcUrl, proxyUrl }) {
+///
+/// `chainId` défini → réseau statique : ethers ne refait plus un `eth_chainId`
+/// avant chaque `eth_call` (mesuré : +1 RPC et ~1 aller-retour par quote).
+/// L'appelant doit alors vérifier le chainId réel une fois via `eth_chainId`
+/// (bot/index.js et checkChainId le font), sinon le contrôle serait fictif.
+function createJsonRpcProvider({ rpcUrl, proxyUrl, chainId }) {
+  const network = Number.isInteger(chainId) && chainId > 0 ? chainId : null;
+  const options = network === null ? undefined : { staticNetwork: true };
   if (proxyUrl === undefined || proxyUrl === null || proxyUrl === "") {
-    return new ethers.JsonRpcProvider(rpcUrl);
+    return network === null
+      ? new ethers.JsonRpcProvider(rpcUrl)
+      : new ethers.JsonRpcProvider(rpcUrl, network, options);
   }
   const agent = createProxyAgent({ rpcUrl, proxyUrl });
   // registerGetUrl est global au process : acceptable, la config est chargée une
   // seule fois par process (config.js) et l'agent est dédié à l'URL RPC.
   ethers.FetchRequest.registerGetUrl(ethers.FetchRequest.createGetUrlFunc({ agent }));
-  return new ethers.JsonRpcProvider(new ethers.FetchRequest(rpcUrl));
+  const request = new ethers.FetchRequest(rpcUrl);
+  return network === null
+    ? new ethers.JsonRpcProvider(request)
+    : new ethers.JsonRpcProvider(request, network, options);
 }
 
 module.exports = {

@@ -48,15 +48,20 @@ async function checkChainId({ provider, expectedChainId }) {
     return { ok: true };
   }
 
-  const network = await provider.getNetwork();
-  if (BigInt(network.chainId) !== BigInt(expectedChainId)) {
+  // Providers created with a static network answer getNetwork() from their configuration, so
+  // ask the RPC endpoint directly whenever possible; fall back for minimal test providers.
+  const actualChainId =
+    typeof provider.send === "function"
+      ? BigInt(await provider.send("eth_chainId", []))
+      : BigInt((await provider.getNetwork()).chainId);
+  if (actualChainId !== BigInt(expectedChainId)) {
     return {
       ok: false,
-      chainId: Number(network.chainId),
-      error: `CHAIN_ID_MISMATCH: expected ${expectedChainId}, RPC reports ${network.chainId}`,
+      chainId: Number(actualChainId),
+      error: `CHAIN_ID_MISMATCH: expected ${expectedChainId}, RPC reports ${actualChainId}`,
     };
   }
-  return { ok: true, chainId: Number(network.chainId) };
+  return { ok: true, chainId: Number(actualChainId) };
 }
 
 async function checkContractOwner({ contract, walletAddress }) {
@@ -166,7 +171,14 @@ async function checkCircuitBreaker({
     gasAnomalyWindowSize = 20,
     gasAnomalyMultiplier = 3,
     gasAnomalyMinSamples = 5,
+    revertRateWindowSize = 20,
+    revertRateThreshold = 0.6,
+    unknownRateWindowSize = 20,
+    unknownRateThreshold = 0.3,
+    cooldownMinutes = 60,
+    executionJournalPath: executionJournalPathOption = DEFAULT_EXECUTION_JOURNAL_PATH,
   } = {}) {
+  const executionJournalPath = executionJournalPathOption || DEFAULT_EXECUTION_JOURNAL_PATH;
   const state = await readCircuitBreaker({ filePath });
   if (state.openUntil !== null && now < state.openUntil) {
     return {
@@ -182,14 +194,6 @@ async function checkCircuitBreaker({
     await writeState(filePath, { consecutiveFailures: 0, openUntil: null });
     return { ok: true, consecutiveFailures: 0, openUntil: null };
   }
-
-  const revertRateWindowSize = arguments[0]?.revertRateWindowSize ?? 20;
-  const revertRateThreshold = arguments[0]?.revertRateThreshold ?? 0.6;
-  const unknownRateWindowSize = arguments[0]?.unknownRateWindowSize ?? 20;
-  const unknownRateThreshold = arguments[0]?.unknownRateThreshold ?? 0.3;
-  const cooldownMinutes = arguments[0]?.cooldownMinutes ?? 60;
-  const executionJournalPath =
-    arguments[0]?.executionJournalPath || DEFAULT_EXECUTION_JOURNAL_PATH;
 
   if (
     !Number.isInteger(revertRateWindowSize) ||
@@ -492,7 +496,12 @@ async function checkGasAnomaly({
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   const mid = Math.floor(values.length / 2);
   const median = values.length % 2 === 0 ? (values[mid - 1] + values[mid]) / 2n : values[mid];
-  const last = values[values.length - 1];
+  // Compare the median to the most recent sample, not to the window maximum: a single old
+  // spike would otherwise keep the breaker open long after gas came back down.
+  const latestSample = recent.reduce((latest, sample) =>
+    sample.at >= latest.at ? sample : latest
+  );
+  const last = BigInt(latestSample.gasPriceWei);
   if (last > median * BigInt(multiplier)) {
     return {
       ok: false,

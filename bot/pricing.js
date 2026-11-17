@@ -34,9 +34,10 @@ function gasCostInBorrowedToken({ gasCostWei, pair, config, l1MultiplierBps }) {
   if (borrowedToken.isWeth === true) {
     const ethUsdPrice = Number(config.ethUsdPrice);
     if (!Number.isFinite(ethUsdPrice) || ethUsdPrice <= 0) return null;
-    const WETH_PRICE_IN_USD = ethUsdPrice;
-    const inTokenUnits = (Number(effectiveGasWei) / 1e18 / ethUsdPrice) * WETH_PRICE_IN_USD;
-    return BigInt(Math.ceil(inTokenUnits * 10 ** Number(borrowedToken.decimals ?? 18)));
+    // gasCostWei is already denominated in ETH/WETH: no USD conversion needed.
+    // Integer arithmetic avoids the float64 rounding of the previous formula.
+    const scale = 10n ** BigInt(borrowedToken.decimals ?? 18);
+    return (effectiveGasWei * scale + WEI_PER_ETHER - 1n) / WEI_PER_ETHER;
   }
 
   return null;
@@ -89,47 +90,50 @@ function interpolateMaximum({ sizes, profits, maxTradeSize = null }) {
   if (sizes.length !== profits.length || sizes.length === 0) {
     throw new Error("interpolateMaximum: sizes and profits must have the same non-zero length");
   }
-  let bestIndex = -1;
-  let bestProfit = null;
-  for (let i = 0; i < profits.length; i += 1) {
-    const p = profits[i];
-    if (p === null || p === undefined || typeof p === "bigint" || Number(p) < 0) continue;
-    if (bestProfit === null || Number(p) > bestProfit) {
-      bestProfit = Number(p);
-      bestIndex = i;
+
+  // Sort by size: callers previously passed points in profit order, which made the
+  // parabola fit use x0/x1/x2 out of order and silently returned a wrong amount.
+  const points = [];
+  for (let i = 0; i < sizes.length; i += 1) {
+    const sizeNum = Number(sizes[i]);
+    const profitNum = profits[i] === null || profits[i] === undefined ? NaN : Number(profits[i]);
+    if (!Number.isFinite(sizeNum) || sizeNum <= 0 || !Number.isFinite(profitNum) || profitNum < 0) {
+      continue;
     }
+    points.push({ size: sizeNum, rawSize: sizes[i], x: Math.log10(sizeNum), y: profitNum });
   }
-  if (bestIndex < 0) {
+  if (points.length === 0) {
     return { size: sizes[0], interpolated: false };
   }
-  if (bestIndex === 0 || bestIndex === profits.length - 1) {
-    return { size: sizes[bestIndex], interpolated: false };
+  points.sort((a, b) => a.x - b.x);
+
+  let bestIndex = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    if (points[i].y > points[bestIndex].y) bestIndex = i;
   }
-  const prevProfit = profits[bestIndex - 1];
-  const nextProfit = profits[bestIndex + 1];
-  if (
-    prevProfit === null || prevProfit === undefined || typeof prevProfit === "bigint" || Number(prevProfit) < 0 ||
-    nextProfit === null || nextProfit === undefined || typeof nextProfit === "bigint" || Number(nextProfit) < 0
-  ) {
-    return { size: sizes[bestIndex], interpolated: false };
+  const best = points[bestIndex];
+  if (bestIndex === 0 || bestIndex === points.length - 1) {
+    return { size: best.rawSize, interpolated: false };
   }
-  const x0 = Math.log10(Number(sizes[bestIndex - 1]));
-  const x1 = Math.log10(Number(sizes[bestIndex]));
-  const x2 = Math.log10(Number(sizes[bestIndex + 1]));
-  const y0 = Number(prevProfit);
-  const y1 = bestProfit;
-  const y2 = Number(nextProfit);
-  const denom = y0 - 2 * y1 + y2;
-  if (denom >= 0) {
-    return { size: sizes[bestIndex], interpolated: false };
+
+  const p0 = points[bestIndex - 1];
+  const p1 = best;
+  const p2 = points[bestIndex + 1];
+  // Quadratic through (x0,y0), (x1,y1), (x2,y2). a >= 0 means no interior maximum.
+  const slope01 = (p1.y - p0.y) / (p1.x - p0.x);
+  const slope12 = (p2.y - p1.y) / (p2.x - p1.x);
+  const a = (slope12 - slope01) / (p2.x - p0.x);
+  if (!(a < 0)) {
+    return { size: best.rawSize, interpolated: false };
   }
-  const h = x2 - x1;
-  const xStar = x1 + (h / 2) * ((y0 - y2) / denom);
+  const b = slope01 - a * (p0.x + p1.x);
+  const xStar = -b / (2 * a);
+  if (!Number.isFinite(xStar)) {
+    return { size: best.rawSize, interpolated: false };
+  }
   let sizeStar = 10 ** xStar;
-  const lower = Math.min(Number(sizes[bestIndex - 1]), Number(sizes[bestIndex + 1]));
-  const upper = Math.max(Number(sizes[bestIndex - 1]), Number(sizes[bestIndex + 1]));
-  if (sizeStar < lower) sizeStar = lower;
-  if (sizeStar > upper) sizeStar = upper;
+  if (sizeStar < p0.size) sizeStar = p0.size;
+  if (sizeStar > p2.size) sizeStar = p2.size;
   if (maxTradeSize !== null && maxTradeSize !== undefined) {
     const cap = Number(maxTradeSize);
     if (Number.isFinite(cap) && sizeStar > cap) sizeStar = cap;

@@ -115,6 +115,39 @@ describe("bot/scanner scanTradeSize", function () {
     expect(above.netProfitUsd).to.be.closeTo(3.50, 0.01);
     expect(above.isOpportunity).to.equal(true);
   });
+
+  it("applies the L1 multiplier and the pair BPS floor to exact net profit", async function () {
+    const bpsConfig = {
+      ...config,
+      minProfitUsd: 1,
+      minProfitBps: 10,
+      l1CostMultiplierBps: 5000,
+    };
+    const finalOut = AMOUNT_IN + PREMIUM + GROSS_PROFIT_ABOVE_THRESHOLD;
+    const scanWithPairFloor = (minProfitBps) =>
+      scanTradeSize({
+        provider: {},
+        pair: { ...pair, minProfitBps },
+        tradeSizeHuman: "1000",
+        config: bpsConfig,
+        gasPriceWei: GAS_PRICE_WEI,
+        ethUsdPrice: ETH_USD_PRICE,
+        quoteLeg: makeQuoteLeg(finalOut),
+      });
+
+    const below = await scanWithPairFloor(100);
+    // 700000 gas * 1.2 * 1 gwei, +50% L1 = 0.00126 ETH * $1800 = $2.268 = 2.268 USDC.
+    expect(below.gasCostInToken).to.equal(2_268_000n);
+    expect(below.netProfit).to.equal(7_732_000n);
+    expect(below.netProfitBps).to.equal(77n);
+    expect(below.minProfitBps).to.equal(100n);
+    expect(below.isOpportunity).to.equal(false);
+
+    const above = await scanWithPairFloor(10);
+    expect(above.netProfit).to.equal(7_732_000n);
+    expect(above.minProfitBps).to.equal(10n);
+    expect(above.isOpportunity).to.equal(true);
+  });
 });
 
 describe("bot/scanner isTradeSizeWithinDepth", function () {
@@ -173,15 +206,50 @@ describe("bot/scanner scanPair", function () {
       quoteLeg: makeScanPairQuoteLeg(calls),
     });
 
-    expect(calls).to.have.length(4);
+    // full entry quote (reused by scanTradeSize), half entry quote, exit quote: 3 RPC calls.
+    expect(calls).to.have.length(3);
     expect(calls[0].amountIn).to.equal(AMOUNT_IN);
     expect(calls[1].amountIn).to.equal(AMOUNT_IN / 2n);
-    expect(calls[2].leg).to.equal(pair.legOut);
-    expect(calls[3].leg).to.equal(pair.legBack);
-    expect(calls.slice(0, 2).map((call) => call.blockTag)).to.deep.equal([BLOCK_TAG, BLOCK_TAG]);
-    expect(calls.slice(2).map((call) => call.blockTag)).to.deep.equal([BLOCK_TAG, BLOCK_TAG]);
+    expect(calls[2].leg).to.equal(pair.legBack);
+    expect(calls.map((call) => call.blockTag)).to.deep.equal([BLOCK_TAG, BLOCK_TAG, BLOCK_TAG]);
     expect(results).to.have.length(1);
     expect(results[0].error).to.equal(undefined);
+    expect(results[0].intermediateOut).to.equal(AMOUNT_IN);
+  });
+
+  it("stops quoting larger sizes once a smaller size exceeds pool depth", async function () {
+    const calls = [];
+    const provider = { getBlockNumber: async () => BLOCK_TAG };
+    const sizedPair = {
+      ...pair,
+      tradeSizes: ["100", "1000", "10000"],
+    };
+    const quoteLeg = async (_provider, leg, _tokenIn, amountIn) => {
+      calls.push({ leg, amountIn });
+      return amountIn === ethers.parseUnits("100", 6)
+        ? 1_500_000n
+        : amountIn === ethers.parseUnits("50", 6)
+          ? 1_000_000n
+          : 0n;
+    };
+
+    const results = await scanPair({
+      provider,
+      pair: sizedPair,
+      config,
+      gasPriceWei: GAS_PRICE_WEI,
+      ethUsdPrice: ETH_USD_PRICE,
+      quoteLeg,
+    });
+
+    expect(calls).to.have.length(2);
+    expect(calls.every((call) => call.leg === pair.legOut)).to.equal(true);
+    expect(results).to.have.length(3);
+    expect(results.map((r) => r.error)).to.deep.equal([
+      "DEPTH_EXCEEDED",
+      "DEPTH_EXCEEDED",
+      "DEPTH_EXCEEDED",
+    ]);
   });
 
   it("flags a quote older than maxQuoteAgeMs as QUOTE_STALE", async function () {
@@ -252,5 +320,78 @@ describe("bot/scanner scanPair", function () {
     });
     expect(results).to.have.length(1);
     expect(results[0].interpolated).to.be.undefined;
+  });
+
+  describe("logSweep interpolation", function () {
+    const gridAmounts = ["100", "1000", "10000"].map((size) =>
+      ethers.parseUnits(size, 6)
+    );
+    const gridProfits = [5_000_000n, 10_000_000n, 8_000_000n];
+    const logSweepPair = {
+      ...pair,
+      tradeSizes: undefined,
+      logSweep: { min: "100", max: "10000", steps: 3 },
+    };
+
+    /// Entry leg is 1:1; exit leg returns a size-dependent gross profit. Any non-grid amount
+    /// (i.e. the interpolated re-quote) gets `requoteProfit`.
+    function makeInterpQuoteLeg(calls, requoteProfit) {
+      return async (_provider, leg, _tokenIn, amountIn, blockTag) => {
+        calls.push({ leg, amountIn, blockTag });
+        if (leg === pair.legOut) return amountIn;
+        const gridIndex = gridAmounts.findIndex((amount) => amount === amountIn);
+        const profit = gridIndex >= 0 ? gridProfits[gridIndex] : requoteProfit;
+        const premium = (amountIn * 5n) / 10000n;
+        return amountIn + premium + profit;
+      };
+    }
+
+    it("re-quotes the interpolated size before selecting it", async function () {
+      const calls = [];
+      const provider = { getBlockNumber: async () => BLOCK_TAG };
+      const results = await scanPair({
+        provider,
+        pair: logSweepPair,
+        config,
+        gasPriceWei: GAS_PRICE_WEI,
+        ethUsdPrice: ETH_USD_PRICE,
+        quoteLeg: makeInterpQuoteLeg(calls, 50_000_000n),
+      });
+
+      expect(results).to.have.length(3);
+      const best = results[0];
+      expect(best.interpolated).to.equal(true);
+      expect(best.grossProfit).to.equal(50_000_000n);
+
+      const requote = calls.find(
+        (call) => call.leg === pair.legBack && !gridAmounts.includes(call.amountIn)
+      );
+      expect(requote).to.not.equal(undefined);
+      expect(best.intermediateOut).to.equal(requote.amountIn);
+      expect(Number(best.tradeSizeHuman)).to.be.closeTo(
+        Number(ethers.formatUnits(requote.amountIn, pair.borrowedToken.decimals)),
+        1e-6
+      );
+      expect(requote.blockTag).to.equal(BLOCK_TAG);
+    });
+
+    it("keeps the best grid point when the interpolated re-quote is worse", async function () {
+      const calls = [];
+      const provider = { getBlockNumber: async () => BLOCK_TAG };
+      const results = await scanPair({
+        provider,
+        pair: logSweepPair,
+        config,
+        gasPriceWei: GAS_PRICE_WEI,
+        ethUsdPrice: ETH_USD_PRICE,
+        quoteLeg: makeInterpQuoteLeg(calls, 1_000_000n),
+      });
+
+      expect(results[0].tradeSizeHuman).to.equal("1000.000000");
+      expect(results[0].interpolated).to.be.undefined;
+      expect(
+        calls.some((call) => call.leg === pair.legBack && !gridAmounts.includes(call.amountIn))
+      ).to.equal(true);
+    });
   });
 });

@@ -44,6 +44,17 @@ describe("bot/netproxy", function () {
       expect(provider).to.be.instanceOf(ethers.JsonRpcProvider);
     });
 
+    it("pins the network when chainId is provided, without a detection RPC", async function () {
+      const provider = createJsonRpcProvider({
+        rpcUrl: "https://example.invalid/rpc",
+        proxyUrl: null,
+        chainId: 42161,
+      });
+      const network = await provider.getNetwork();
+      expect(Number(network.chainId)).to.equal(42161);
+      provider.destroy();
+    });
+
     it("builds a keepAlive tunnel agent and a FetchRequest-based provider when set", function () {
       const agent = createProxyAgent({
         rpcUrl: "https://example.invalid/rpc",

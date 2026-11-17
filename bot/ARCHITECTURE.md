@@ -10,18 +10,24 @@ d'environnement est `bot/config.js`. Les références sont volontairement des po
 
 1. `.github/workflows/scan.yml` s'exécute en `DRY_RUN=true` sans secrets wallet et lance
    `npm run scan` (`package.json:13`) → `node bot/index.js`.
-2. `main()` (`bot/index.js:84`) charge la config (`bot/index.js:90`), crée le provider, lit en
-   parallèle réseau, `feeData` et prix ETH/USD (`bot/index.js:99-104`), puis refuse le live si le
-   prix ETH/USD est indisponible (`bot/index.js:121-126`). Le premium Aave est relu on-chain
-   (`bot/index.js:128`).
-3. Pour chaque paire, `scanPair()` (`bot/scanner.js:123-137`) quote toutes les tailles via
-   `scanTradeSize()` (`bot/scanner.js:71-119`). Chaque résultat est persisté immédiatement dans
-   `scans.jsonl` (`bot/index.js:154-156`) avant de choisir le meilleur (`bot/index.js:192-204`).
-4. Si le meilleur résultat est `isOpportunity` (`bot/scanner.js:117`), `main()` appelle
-   `maybeExecute()` (`bot/index.js:206-209`). En `DRY_RUN`, `maybeExecute()` logge et s'arrête
-   (`bot/executor.js:51-59`). Sinon il vérifie les secrets (`bot/executor.js:61-64`), estime le gaz
-   (`bot/executor.js:80-102`), re-quote (`bot/executor.js:111-129`), appelle `decide()`
-   (`bot/executor.js:153-158`) puis `execute()` (`bot/executor.js:171-179`).
+2. `main()` (`bot/index.js`) charge la config et crée le provider (réseau statique quand
+   `EXPECTED_CHAIN_ID` est défini). Il lit d'abord le chainId réel via un seul `eth_chainId` brut
+   et refuse le cycle s'il diffère de `EXPECTED_CHAIN_ID`, **avant** la réconciliation du journal
+   et tout scan. Il lit ensuite en parallèle `feeData`, le prix ETH/USD et le numéro de bloc du
+   cycle. Le premium Aave est relu on-chain.
+3. Pour chaque paire, `scanPair()` (`bot/scanner.js`) quote les tailles sur un `blockTag` unique
+   fourni par le cycle. La quote d'entrée complète sert à la fois au contrôle de profondeur et à
+   `scanTradeSize()` : 3 appels RPC pour une taille retenue (entrée pleine, entrée moitié, sortie)
+   au lieu de 4. Les tailles sont scannées par ordre croissant ; dès qu'une taille dépasse la
+   profondeur, toutes les tailles supérieures sont marquées `DEPTH_EXCEEDED` sans RPC. Chaque
+   résultat est persisté dans `scans.jsonl` avant de choisir le meilleur.
+4. Le scanner calcule un `netProfit` exact en unités du token emprunté (BigInt) : profit brut
+   moins le gaz, lui-même converti avec le multiplicateur L1 (`l1CostMultiplierBps`). Une
+   opportunité doit passer le plancher `effectiveMinProfitBps` sur le net, le plancher USD
+   (`max(MIN_PROFIT_USD, 3×gaz)`) et rester strictement positive. Si le meilleur résultat est
+   `isOpportunity`, `main()` appelle `maybeExecute()`. En `DRY_RUN`, `maybeExecute()` logge et
+   s'arrête. Sinon il vérifie les secrets, estime le gaz, re-quote, appelle `decide()` puis
+   `execute()`.
 5. `execute()` (`bot/execute.js:129`) applique les guards, fait le `staticCall`, réserve le gaz,
    revérifie le breaker, envoie, attend le receipt et réconcilie le gaz (`bot/execute.js:182-336`).
    L'état d'exécution (gaz, breaker) est persisté par `guards.js`, pas par `persist.js`.
@@ -63,13 +69,13 @@ bot/run.js run() (process persistant)
 | `bot/guards.js` | Checks fail-closed + état persistant gaz/breaker | `checkCircuitBreaker`, `recordFailure`, `addGasSpent` | `fs/promises`, `path`, `ethers` |
 | `bot/prices.js` | Quotes DEX V2 (`getAmountsOut`) et V3 (QuoterV2) | `quoteLeg` | `ethers`, `abis` |
 | `bot/persist.js` | Journal JSONL des scans + formatage des logs | `appendScanResult`, `logEvent` | `fs/promises`, `path`, `sanitizeError` |
-| `bot/scanner.js` | Scan des paires/tailles, prix ETH/USD, coût gaz USD | `scanPair`, `scanTradeSize`, `getEthUsdPrice` | `ethers`, `prices` |
+| `bot/scanner.js` | Scan des paires/tailles, profondeur, profit net exact (BigInt), prix ETH/USD | `scanPair`, `scanTradeSize`, `getEthUsdPrice` | `ethers`, `prices`, `pricing`, `sanitizeError`, `minProfitUsd` |
 | `bot/index.js` | Un cycle complet (`main`) | `main` | `ethers`, `scanner`, `executor`, `persist`, `networks`, `guards`, `config` (lazy) |
 | `bot/run.js` | Boucle persistante et gestion provider/signaux | `run` | `ethers`, `index` |
 | `bot/adaptive.js` | Seuils adaptatifs bornés (MIN_PROFIT_BPS, taille de trade), historique | `loadAdaptive`, `recordOutcome`, `applyAdaptive` | `fs/promises`, `path` |
 | `bot/resilient.js` | Classification d'erreur + retry borné + backoff | `classifyError`, `shouldRetry`, `backoffMs` | aucune |
 | `bot/throttle.js` | Sérialisation RPC + intervalle minimum + stats | `createThrottle`, `withThrottle`, `getStats` | aucune |
-| `bot/netproxy.js` | Proxy SOCKS5 minimal (sans dépendance) + fabrique provider JSON-RPC ; actif seulement si `RPC_PROXY_URL` défini | `createJsonRpcProvider` | `ethers`, `net`, `tls` |
+| `bot/netproxy.js` | Proxy SOCKS5 minimal (sans dépendance) + fabrique provider JSON-RPC ; réseau statique si `chainId` fourni, proxy si `RPC_PROXY_URL` défini | `createJsonRpcProvider` | `ethers`, `net`, `tls` |
 | `bot/config.js` | Environnement → `Config` validée | `config` | `dotenv`, `ethers` |
 | `bot/abis.js` | ABIs ERC-20, routeurs V2, QuoterV2, exécuteur | `FLASH_ARB_EXECUTOR_ABI` (et autres) | aucune |
 | `bot/networks.js` | Adresses Aave par chaîne | `NETWORKS` | aucune |
@@ -279,11 +285,16 @@ Contrat de types : `bot/domain.js` (aucun export runtime, `bot/domain.js:172`).
 - **Pas de Timeboost.** L'envoi est un appel `contract.startArbitrage` via le provider ethers
   standard (`bot/execute.js:274-279`) ; aucun chemin Express Lane ni transaction privée. Rappel
   MEV point 2 : environ 200 ms de délai pour les transactions non-Express-Lane.
-- **Pas de RPC privé par défaut.** Une seule URL `ARBITRUM_RPC_URL` (`bot/config.js:271`) ; `run.js`
-  choisit WebSocket ou HTTP (`bot/run.js:22-42`). Un RPC public ajoute typiquement 100–500 ms par
-  appel.
-- **Pas de proxy réseau par défaut.** `RPC_PROXY_URL` non défini → providers créés exactement comme
-  avant (`bot/index.js:140-141`, `bot/run.js:40`, `bot/netproxy.js` no-op strict). Sémantique
+- **Pas de RPC privé par défaut.** Une seule URL `ARBITRUM_RPC_URL` (`bot/config.js`) ; `run.js`
+  choisit WebSocket ou HTTP. Un RPC public ajoute typiquement 100–500 ms par appel.
+- **Réseau statique + vérification brute.** Quand `EXPECTED_CHAIN_ID` est défini,
+  `createJsonRpcProvider({ chainId })` construit un provider à réseau statique : ethers ne refait
+  plus un `eth_chainId` avant chaque `eth_call`. Le benchmark final ne compte plus qu'un seul
+  `eth_chainId` par cycle. La sécurité est conservée par un `eth_chainId` brut unique dans `main()` et par
+  `checkChainId()` (`bot/guards.js`), qui interroge aussi le RPC directement quand `provider.send`
+  existe. Un provider injecté sans `send` retombe sur `getNetwork()`.
+- **Pas de proxy réseau par défaut.** `RPC_PROXY_URL` non défini → aucun agent SOCKS5 n'est créé
+  (`bot/netproxy.js` no-op strict) ; le pinning de réseau reste indépendant. Sémantique
   socks5h (résolution du hostname par le proxy). Mesuré (`scripts/measure-rpc-latency.js`, N=25,
   2026-11-16, 0 erreur) : direct p50/p95 = 208/233 ms ; Tor connexion neuve = 559/995 ms (rejeté) ;
   Tor tunnel keep-alive = 217/598 ms. Fail-closed : `ws://` rejeté au chargement de config quand le
@@ -334,14 +345,16 @@ assumés, pas à des bugs.
   (nouveau). Les deux sont mutuellement exclusifs. Avec
   `logSweep`, `scanPair` génère une grille logarithmique via
   `logSweepSizes` (`bot/pricing.js`), quote chaque taille,
-  trie par `grossProfit` décroissant, puis appelle
-  `interpolateMaximum` sur les tailles croissantes. Si un
-  maximum local est trouvé, `sorted[0]` est remplacé par un
-  résultat marqué `interpolated: true` avec
-  `tradeSizeHuman = interp.size`. Les champs `grossProfit`,
-  `netProfitUsd`, etc. restent ceux du meilleur point brut
-  (l'interpolation ne re-quote pas ; `decide()` dans
-  `execute()` re-quote à `"latest"`). Réf. :
+  trie par profit décroissant, puis appelle
+  `interpolateMaximum` sur les points triés par taille. Si un
+  maximum local est trouvé, la taille interpolée est
+  **re-quotée** sur le même `blockTag` ; elle n'est retenue
+  que si son profit net (BigInt) dépasse celui du meilleur
+  point de grille. Le résultat retenu est marqué
+  `interpolated: true` et ses montants correspondent à la
+  quote réelle. Une erreur de re-quote conserve le meilleur
+  point de grille. `decide()` dans `execute()` re-quote
+  ensuite à `"latest"` avant tout envoi. Réf. :
   `docs/adr/0003-log-sweep-regression.md`,
   `bot/pricing.js` (`logSweepSizes`, `interpolateMaximum`),
   `bot/scanner.js` (`scanPair`), `bot/config.js`

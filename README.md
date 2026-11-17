@@ -186,7 +186,11 @@ gas.
 Every scan result — one line per pair/trade size, including errors — is appended to a JSONL file
 at `SCAN_LOG_PATH` (default `./logs/scans.jsonl`). Each line records `timestamp`, `chainId`,
 `pair`, `borrowedToken`, `tradeSize`, `grossProfit` (raw token units as a string),
-`grossProfitSymbol`, `grossProfitUsd`, `netProfitUsd`, `gasCostUsd`, `isOpportunity`, and `error`.
+`grossProfitSymbol`, `grossProfitUsd`, `gasCostWei`, `gasCostInToken`, `gasCostUsd`, `netProfit`
+(raw token units, after gas and the L1 multiplier), `netProfitBps`, `minProfitBps`,
+`netProfitUsd`, `isOpportunity`, and `error`. The scanner flags an opportunity only when the
+exact BigInt net profit clears both the per-pair `MIN_PROFIT_BPS` floor and
+`max(MIN_PROFIT_USD, 3 × gas cost)`, matching the `decide()` checks applied before submission.
 Parent directories are created automatically, and a persistence failure is logged as a warning
 without stopping the scan. `logs/` is ignored by Git.
 

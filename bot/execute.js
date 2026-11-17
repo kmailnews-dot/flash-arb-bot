@@ -439,12 +439,13 @@ async function execute({
     console.warn(`  [JOURNAL WARNING] SIGNED: ${err.message}`)
   );
 
+  let nonceManager = null;
   let tx;
   try {
     let nonceOverride;
     if (config.dryRun === false && typeof provider.getTransactionCount === "function") {
-      const manager = await getNonceManager({ provider, address: wallet.address });
-      nonceOverride = { nonce: await manager.next({ forceRefresh: false }) };
+      nonceManager = await getNonceManager({ provider, address: wallet.address });
+      nonceOverride = { nonce: await nonceManager.next({ forceRefresh: false }) };
     }
     tx = await contract.startArbitrage(pair.borrowedToken.address, amountIn, finalParams, {
       gasLimit: gasLimitWithMargin,
@@ -453,6 +454,16 @@ async function execute({
     });
   } catch (err) {
     const message = errorMessage(err);
+    // A stale/consumed nonce must not poison the next attempt: drop the cached value so the
+    // next send re-reads the pending nonce from the RPC.
+    if (
+      nonceManager &&
+      (err?.code === "NONCE_EXPIRED" || err?.code === "REPLACEMENT_UNDERPRICED")
+    ) {
+      await nonceManager.reset().catch((resetErr) => {
+        console.warn(`  [NONCE WARNING] could not reset nonce manager: ${resetErr.message}`);
+      });
+    }
     if (err.receipt) {
       const actualGasCostWei =
         err.receipt.gasUsed * (err.receipt.gasPrice ?? gasPriceWei) +

@@ -65,6 +65,17 @@ function selectBestResult(results) {
   return [...results].sort(compareResults)[0];
 }
 
+/// Reads the real chain id with one raw `eth_chainId` call. Ethers providers configured with a
+/// static network intentionally skip their per-call chain-id check, so this is the single
+/// authoritative check that the RPC endpoint serves the expected network.
+async function readChainId(provider) {
+  if (typeof provider.send === "function") {
+    return Number(BigInt(await provider.send("eth_chainId", [])));
+  }
+  const network = await provider.getNetwork();
+  return Number(network.chainId);
+}
+
 async function readAaveFlashLoanPremium({ provider, chainId, config }) {
   const network = NETWORKS[chainId];
   if (!network) return config.aaveFlashLoanPremiumBps;
@@ -139,15 +150,32 @@ async function main({
     }
   }
   const provider =
-    injectedProvider || createJsonRpcProvider({ rpcUrl: config.rpcUrl, proxyUrl: config.rpcProxyUrl });
+    injectedProvider ||
+    createJsonRpcProvider({
+      rpcUrl: config.rpcUrl,
+      proxyUrl: config.rpcProxyUrl,
+      chainId: config.expectedChainId,
+    });
   const scanLogPath = config.scanLogPath || DEFAULT_SCAN_LOG_PATH;
+  const walletAddress = config.privateKey ? new ethers.Wallet(config.privateKey).address : null;
 
-  const reconciliationWallet =
-    config.privateKey ? new ethers.Wallet(config.privateKey).address : null;
+  // Verify the real chain id before touching any journal or scanning: a provider pinned to a
+  // static network would otherwise answer from its configuration, and reconciliation on the
+  // wrong chain could mark valid pending executions as dropped.
+  const chainIdOutcome = await withThrottle(getMainThrottle(config), () => readChainId(provider));
+  const chainId = chainIdOutcome.result;
+  if (config.expectedChainId !== undefined && chainId !== Number(config.expectedChainId)) {
+    const reason =
+      `CHAIN_ID_MISMATCH: expected ${config.expectedChainId}, RPC reports ${chainId}. ` +
+      "Refusing to scan or execute on the wrong network.";
+    console.error(`[CHAIN ID MISMATCH] ${reason}`);
+    return { refused: true, reason, exitCode: 1 };
+  }
+
   await reconcilePendingExecutions({
     provider,
     config,
-    walletAddress: reconciliationWallet,
+    walletAddress,
   }).catch((err) => {
     console.warn(`[RECONCILE] startup reconciliation failed: ${err.message}`);
   });
@@ -157,17 +185,17 @@ async function main({
     console.log("Running in SIMULATION mode: opportunities are logged, no transaction is sent.");
   }
 
-  const [networkOutcome, feeDataOutcome, ethUsdPrice] = await Promise.all([
-    withThrottle(getMainThrottle(config), () => provider.getNetwork()),
+  const [feeDataOutcome, ethUsdPrice, blockTagOutcome] = await Promise.all([
     withThrottle(getMainThrottle(config), () => provider.getFeeData()),
     getEthUsdPrice(provider, config.ethUsdRoute, config),
+    typeof provider.getBlockNumber === "function"
+      ? withThrottle(getMainThrottle(config), () => provider.getBlockNumber())
+      : Promise.resolve({ result: "latest" }),
   ]);
-  const network = networkOutcome.result;
   const feeData = feeDataOutcome.result;
-  const chainId = Number(network.chainId);
+  const blockTag = blockTagOutcome.result;
 
-  if (config.privateKey) {
-    const walletAddress = new ethers.Wallet(config.privateKey).address;
+  if (walletAddress) {
     const balanceCheck = await checkWalletBalanceLow({
       provider,
       address: walletAddress,
@@ -212,7 +240,14 @@ async function main({
   for (const pair of cycleConfig.pairs) {
     try {
       console.log(`\nScanning ${pair.label} ...`);
-      const results = await scanPairImpl({ provider, pair, config: executionConfig, gasPriceWei, ethUsdPrice });
+      const results = await scanPairImpl({
+        provider,
+        pair,
+        config: executionConfig,
+        gasPriceWei,
+        ethUsdPrice,
+        blockTag,
+      });
 
       for (const result of results) {
         scanned += 1;

@@ -59,6 +59,14 @@ describe("bot/pricing gasCostInBorrowedToken L1 cost", function () {
     expect(withMultiplier).to.equal((base * 3n) / 2n);
     expect(withConfiguredDefault).to.equal(withMultiplier);
   });
+
+  it("keeps the WETH gas cost exact at wei precision (no float round-trip)", function () {
+    const pair = { borrowedToken: { isWeth: true, decimals: 18 } };
+    const oddGasCostWei = 1_234_567_890_123_456_789n;
+    expect(
+      gasCostInBorrowedToken({ gasCostWei: oddGasCostWei, pair, config, l1MultiplierBps: 0 })
+    ).to.equal(oddGasCostWei);
+  });
 });
 
 describe("bot/pricing logSweepSizes", function () {
@@ -104,6 +112,18 @@ describe("bot/pricing interpolateMaximum", function () {
     const profits = [10, 1, 10];
     const result = interpolateMaximum({ sizes, profits });
     expect(result.interpolated).to.equal(false);
+  });
+
+  it("sorts points by size when the caller passes them in profit order", function () {
+    const bySize = interpolateMaximum({
+      sizes: ["0.01", "0.0316", "0.1"],
+      profits: [1, 10, 4],
+    });
+    const byProfit = interpolateMaximum({
+      sizes: ["0.0316", "0.1", "0.01"],
+      profits: [10, 4, 1],
+    });
+    expect(byProfit).to.deep.equal(bySize);
   });
 });
 

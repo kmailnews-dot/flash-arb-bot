@@ -9,6 +9,83 @@ const { reconcilePendingExecutions } = require("../bot/execute");
 const { readExecutionJournal, writeExecutionJournal } = require("../bot/persist");
 
 describe("bot/index main", function () {
+  function makeMinimalProvider({ chainId = "0x7a69", blockNumber = 777 } = {}) {
+    const calls = [];
+    return {
+      calls,
+      async send(method) {
+        calls.push(method);
+        if (method === "eth_chainId") return chainId;
+        throw new Error(`unexpected method ${method}`);
+      },
+      async getFeeData() {
+        calls.push("getFeeData");
+        return { gasPrice: 1n, maxFeePerGas: null };
+      },
+      async getBlockNumber() {
+        calls.push("getBlockNumber");
+        return blockNumber;
+      },
+    };
+  }
+
+  function makeMinimalConfig(tmpDir, overrides = {}) {
+    return {
+      dryRun: true,
+      pairs: [],
+      aaveFlashLoanPremiumBps: 5n,
+      ethUsdRoute: null,
+      maxRpcErrorsPerScan: 0,
+      scanLogPath: path.join(tmpDir, "scans.jsonl"),
+      adaptivePath: path.join(tmpDir, "adaptive.json"),
+      rpcErrorsPath: path.join(tmpDir, "rpc_errors.json"),
+      gasHistoryPath: path.join(tmpDir, "gas_history.json"),
+      executionJournalPath: path.join(tmpDir, "executions.json"),
+      ...overrides,
+    };
+  }
+
+  it("refuses to scan when the raw eth_chainId differs from expectedChainId", async function () {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-chain-mismatch-"));
+    let scans = 0;
+    const provider = makeMinimalProvider({ chainId: "0xa4b1" });
+    const summary = await main({
+      provider,
+      config: makeMinimalConfig(tmpDir, { expectedChainId: 421614 }),
+      scanPair: async () => {
+        scans += 1;
+        return [];
+      },
+    });
+
+    expect(summary.refused).to.equal(true);
+    expect(summary.reason).to.include("CHAIN_ID_MISMATCH");
+    expect(scans).to.equal(0);
+    // Fail closed before fees, block number, reconciliation, or any scan.
+    expect(provider.calls).to.deep.equal(["eth_chainId"]);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("pins one blockTag per cycle and passes it to scanPair", async function () {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-blocktag-"));
+    const blockTags = [];
+    const summary = await main({
+      provider: makeMinimalProvider({ blockNumber: 777 }),
+      config: makeMinimalConfig(tmpDir, {
+        expectedChainId: 31337,
+        pairs: [{ label: "TEST pair", borrowedToken: { symbol: "USDC", decimals: 6 } }],
+      }),
+      scanPair: async ({ blockTag }) => {
+        blockTags.push(blockTag);
+        return [];
+      },
+    });
+
+    expect(summary.refused).to.equal(undefined);
+    expect(blockTags).to.deep.equal([777]);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
   it("keeps scanning when the ETH/USD route points at an address with no code", async function () {
     const MockERC20 = await ethers.getContractFactory("MockERC20");
     const borrowToken = await MockERC20.deploy("Borrow Token", "BOR");

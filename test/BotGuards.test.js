@@ -44,6 +44,21 @@ describe("bot/guards", function () {
     expect(mismatched.error).to.include("CHAIN_ID_MISMATCH");
   });
 
+  it("checks the raw eth_chainId instead of trusting a static provider network", async function () {
+    const provider = {
+      async getNetwork() {
+        return { chainId: 42161n };
+      },
+      async send(method) {
+        if (method === "eth_chainId") return "0x7a69";
+        throw new Error(`unexpected method ${method}`);
+      },
+    };
+    const result = await checkChainId({ provider, expectedChainId: 31337 });
+    expect(result.ok).to.equal(true);
+    expect(result.chainId).to.equal(31337);
+  });
+
   it("rejects a wallet balance above MAX_WALLET_BALANCE_ETH", async function () {
     const [signer] = await ethers.getSigners();
 
@@ -536,6 +551,18 @@ describe("bot/guards gasHistory", function () {
     expect(result.ok).to.equal(false);
     expect(result.median).to.equal("1000000000");
     expect(result.last).to.equal("5000000000");
+  });
+
+  it("compares the latest sample, not an old spike, to the median", async function () {
+    const filePath = path.join(guardDir, "gas_history.json");
+    await recordGasSample({ filePath, gasPriceWei: 5_000_000_000n, at: 1000 });
+    for (let i = 1; i <= 4; i += 1) {
+      await recordGasSample({ filePath, gasPriceWei: 1_000_000_000n, at: 1000 + i });
+    }
+    const result = await checkGasAnomaly({ filePath, multiplier: 3, minSamples: 5, now: 3000 });
+    expect(result.ok).to.equal(true);
+    expect(result.median).to.equal("1000000000");
+    expect(result.last).to.equal("1000000000");
   });
 
   it("returns ok on missing file (fail-open)", async function () {

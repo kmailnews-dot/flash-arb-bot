@@ -1,9 +1,17 @@
 const { ethers } = require("ethers");
 const { quoteLeg, quoteV2, quoteV3 } = require("./prices");
 const { createThrottle, withThrottle } = require("./throttle");
-const { GAS_PROFIT_MULTIPLIER, logSweepSizes, interpolateMaximum } = require("./pricing");
+const {
+  BPS_DENOMINATOR,
+  GAS_PROFIT_MULTIPLIER,
+  effectiveMinProfitBps,
+  gasCostInBorrowedToken,
+  logSweepSizes,
+  interpolateMaximum,
+} = require("./pricing");
+const { sanitizeError } = require("./sanitizeError");
+const { usdToTokenUnits } = require("./minProfitUsd");
 
-const BPS_DENOMINATOR = 10000n;
 const MAX_DEPTH_IMPACT_BPS = 50n;
 
 let scannerThrottle = null;
@@ -16,19 +24,6 @@ function getScannerThrottle(config = {}) {
     });
   }
   return scannerThrottle;
-}
-
-function redactUrls(value) {
-  if (typeof value !== "string") return value;
-  return value.replace(/https:\/\/[^\s]+/g, "[REDACTED_URL]");
-}
-
-function sanitizeError(err) {
-  const source = err || {};
-  return {
-    code: redactUrls(source.code ?? null),
-    shortMessage: redactUrls(source.shortMessage ?? source.message ?? null),
-  };
 }
 
 /// Quotes 1 WETH -> a reference stablecoin on a live DEX pool, so gas costs and profit can be
@@ -63,33 +58,50 @@ async function getEthUsdPrice(provider, ethUsdRoute, config = {}) {
   }
 }
 
-/// Estimates the USD cost of submitting the arbitrage transaction.
-function estimateGasCostUsd({ gasPriceWei, gasLimit, gasPriceBufferPct, ethUsdPrice }) {
-  if (ethUsdPrice === null) return null;
+/// Buffers the gas price and multiplies it by the gas limit. Returns null when gas pricing is
+/// unavailable: a missing or zero gas price must never be treated as free gas (fail closed).
+function estimateGasCostWei({ gasPriceWei, gasLimit, gasPriceBufferPct }) {
   if (gasPriceWei === null || gasPriceWei === undefined || gasPriceWei === 0n) return null;
-  const bufferedGasPrice = (gasPriceWei * BigInt(100 + gasPriceBufferPct)) / 100n;
-  const gasCostWei = bufferedGasPrice * gasLimit;
-  return Number(ethers.formatUnits(gasCostWei, 18)) * ethUsdPrice;
+  const limit = typeof gasLimit === "bigint" ? gasLimit : BigInt(gasLimit ?? 0);
+  if (limit === 0n) return null;
+  const bufferPct = Number(gasPriceBufferPct);
+  const buffer = Number.isFinite(bufferPct) && bufferPct >= 0 ? Math.round(bufferPct) : 0;
+  const bufferedGasPrice = (gasPriceWei * BigInt(100 + buffer)) / 100n;
+  return bufferedGasPrice * limit;
 }
 
-/// Converts a raw profit amount (in borrowedToken units) into USD, when possible.
+/// Converts a raw amount (in borrowedToken units) into USD, when possible.
 /// Returns null when the borrowed token is neither a stablecoin nor WETH, since that's the only
 /// case this bot can price without an external feed - see README "Configuring pairs & DEXs".
-function profitInUsd(profitTokenUnits, borrowedToken, ethUsdPrice) {
-  const asFloat = Number(ethers.formatUnits(profitTokenUnits, borrowedToken.decimals));
+function profitInUsd(amountTokenUnits, borrowedToken, ethUsdPrice) {
+  if (amountTokenUnits === null || amountTokenUnits === undefined) return null;
+  const asFloat = Number(ethers.formatUnits(amountTokenUnits, borrowedToken.decimals));
   if (borrowedToken.isStable) return asFloat;
   if (borrowedToken.isWeth && ethUsdPrice !== null) return asFloat * ethUsdPrice;
   return null;
 }
 
+function tokenUsdPrice(borrowedToken, ethUsdPrice) {
+  if (borrowedToken.isStable === true) return 1;
+  const ethPrice = Number(ethUsdPrice);
+  if (borrowedToken.isWeth === true && Number.isFinite(ethPrice) && ethPrice > 0) return ethPrice;
+  return null;
+}
+
+/// USD floor: max(MIN_PROFIT_USD, 3x gas cost). The gas multiple makes sure a trade pays for
+/// itself several times over instead of merely clearing its own gas.
 function effectiveMinProfitUsd(gasCostUsd, config) {
-  const absolute = Number(config.minProfitUsd);
+  const configured = Number(config.minProfitUsd);
+  const absolute = Number.isFinite(configured) && configured > 0 ? configured : 0;
   const gasMultiple = gasCostUsd !== null ? Number(gasCostUsd) * Number(GAS_PROFIT_MULTIPLIER) : 0;
   return Math.max(absolute, gasMultiple);
 }
 
 /// Scans one configured trade size for one pair and returns an opportunity descriptor
 /// (profitable or not) - never throws for "just not profitable", only for real errors.
+///
+/// `intermediateOut` lets `scanPair` reuse the entry-leg quote it already fetched for the depth
+/// check instead of paying a second identical RPC call for the same amount and block.
 async function scanTradeSize({
   provider,
   pair,
@@ -99,13 +111,18 @@ async function scanTradeSize({
   ethUsdPrice,
   quoteLeg: injectedQuoteLeg = quoteLeg,
   blockTag = "latest",
+  intermediateOut: precomputedIntermediateOut = null,
 }) {
   const quoteTimestamp = new Date().toISOString();
   const amountIn = ethers.parseUnits(tradeSizeHuman, pair.borrowedToken.decimals);
 
-  const { result: intermediateOut } = await withThrottle(getScannerThrottle(config), () =>
-    injectedQuoteLeg(provider, pair.legOut, pair.borrowedToken.address, amountIn, blockTag)
-  );
+  let intermediateOut = precomputedIntermediateOut;
+  if (intermediateOut === null || intermediateOut === undefined) {
+    const quote = await withThrottle(getScannerThrottle(config), () =>
+      injectedQuoteLeg(provider, pair.legOut, pair.borrowedToken.address, amountIn, blockTag)
+    );
+    intermediateOut = quote.result;
+  }
   const { result: finalOut } = await withThrottle(getScannerThrottle(config), () =>
     injectedQuoteLeg(
       provider,
@@ -116,24 +133,59 @@ async function scanTradeSize({
     )
   );
 
-  const premium = (amountIn * config.aaveFlashLoanPremiumBps) / BPS_DENOMINATOR;
+  const premiumBps = BigInt(config.aaveFlashLoanPremiumBps ?? 0);
+  const premium = (amountIn * premiumBps) / BPS_DENOMINATOR;
   const owed = amountIn + premium;
   const grossProfit = finalOut - owed; // bigint, may be negative
 
-  const gasCostUsd = estimateGasCostUsd({
+  const gasCostWei = estimateGasCostWei({
     gasPriceWei,
     gasLimit: config.gasLimitEstimate,
     gasPriceBufferPct: config.gasPriceBufferPct,
-    ethUsdPrice,
   });
-  const grossProfitUsd = profitInUsd(grossProfit, pair.borrowedToken, ethUsdPrice);
-  const netProfitUsd = grossProfitUsd !== null && gasCostUsd !== null ? grossProfitUsd - gasCostUsd : null;
+  const gasCostInToken =
+    gasCostWei === null
+      ? null
+      : gasCostInBorrowedToken({
+          gasCostWei,
+          pair,
+          config: { ...config, ethUsdPrice },
+          l1MultiplierBps: config.l1CostMultiplierBps,
+        });
+  const netProfit = gasCostInToken === null ? null : grossProfit - gasCostInToken;
+  const netProfitBps =
+    netProfit !== null && amountIn > 0n ? (netProfit * BPS_DENOMINATOR) / amountIn : null;
 
+  const grossProfitUsd = profitInUsd(grossProfit, pair.borrowedToken, ethUsdPrice);
+  const gasCostUsd = profitInUsd(gasCostInToken, pair.borrowedToken, ethUsdPrice);
+  const netProfitUsd = profitInUsd(netProfit, pair.borrowedToken, ethUsdPrice);
   const priced = netProfitUsd !== null;
+
+  // Mirror decide(): the BPS floor is applied to net profit, not gross profit.
+  const minProfitBps = effectiveMinProfitBps({ pair, config });
+  const meetsBpsFloor =
+    netProfit !== null &&
+    amountIn > 0n &&
+    netProfit * BPS_DENOMINATOR >= amountIn * minProfitBps;
+
+  const usdPrice = tokenUsdPrice(pair.borrowedToken, ethUsdPrice);
+  const minProfitUsdConfigured = config.minProfitUsd !== undefined && config.minProfitUsd !== null;
+  let minProfitUsdInToken = null;
+  if (priced && minProfitUsdConfigured && usdPrice !== null) {
+    minProfitUsdInToken = usdToTokenUnits({
+      usdAmount: effectiveMinProfitUsd(gasCostUsd, config),
+      tokenUsdPrice: usdPrice,
+      decimals: pair.borrowedToken.decimals,
+    });
+  }
+  const meetsUsdFloor =
+    !minProfitUsdConfigured ||
+    (minProfitUsdInToken !== null && netProfit !== null && netProfit >= minProfitUsdInToken);
 
   return {
     pair,
     tradeSizeHuman,
+    blockNumber: typeof blockTag === "number" ? blockTag : null,
     quoteTimestamp,
     gasPriceWei,
     ethUsdPrice,
@@ -144,19 +196,28 @@ async function scanTradeSize({
     owed,
     grossProfit,
     grossProfitUsd,
+    gasCostWei,
+    gasCostInToken,
     gasCostUsd,
+    netProfit,
+    netProfitBps,
     netProfitUsd,
+    minProfitBps,
+    minProfitUsdInToken,
     priced,
     isOpportunity:
       priced === true &&
       grossProfit > 0n &&
-      netProfitUsd >= effectiveMinProfitUsd(gasCostUsd, config),
+      netProfit !== null &&
+      netProfit > 0n &&
+      meetsBpsFloor &&
+      meetsUsdFloor,
   };
 }
 
-/// Returns true when the entry-leg quote of X is not more than MAX_DEPTH_IMPACT_BPS
-/// below twice the quote of X/2, i.e. when X stays within 0.5% of the pool depth.
-async function isTradeSizeWithinDepth({
+/// Quotes the entry leg at X and X/2. Returns the full X quote so `scanTradeSize` can reuse it.
+/// The depth rule is `fullOut >= 2 * halfOut * (1 - 0.5%)`: X stays within 0.5% of pool depth.
+async function quoteEntryDepth({
   pair,
   tradeSizeHuman,
   provider,
@@ -166,7 +227,7 @@ async function isTradeSizeWithinDepth({
 }) {
   const amountIn = ethers.parseUnits(tradeSizeHuman, pair.borrowedToken.decimals);
   const halfAmountIn = amountIn / 2n;
-  if (halfAmountIn === 0n) return true;
+  if (halfAmountIn === 0n) return { within: true, fullOut: null };
 
   const { result: fullOut } = await withThrottle(getScannerThrottle(config), () =>
     injectedQuoteLeg(provider, pair.legOut, pair.borrowedToken.address, amountIn, blockTag)
@@ -176,11 +237,23 @@ async function isTradeSizeWithinDepth({
   );
 
   const expectedOut = (2n * halfOut * (BPS_DENOMINATOR - MAX_DEPTH_IMPACT_BPS)) / BPS_DENOMINATOR;
-  return fullOut >= expectedOut;
+  return { within: fullOut >= expectedOut, fullOut };
+}
+
+/// Returns true when the entry-leg quote of X is not more than MAX_DEPTH_IMPACT_BPS
+/// below twice the quote of X/2, i.e. when X stays within 0.5% of the pool depth.
+async function isTradeSizeWithinDepth(args) {
+  return (await quoteEntryDepth(args)).within;
+}
+
+function bestProfitInToken(result) {
+  if (result.netProfit !== null && result.netProfit !== undefined) return result.netProfit;
+  return result.grossProfit;
 }
 
 /// Scans every configured trade size for a pair and returns only the results worth logging,
-/// sorted with the best (highest net-of-fee output) first.
+/// sorted with the best (highest net-of-fee output) first. `blockTag` pins every quote of the
+/// pair to one block; callers scanning several pairs should fetch it once and pass it in.
 async function scanPair({
   provider,
   pair,
@@ -188,8 +261,12 @@ async function scanPair({
   gasPriceWei,
   ethUsdPrice,
   quoteLeg: injectedQuoteLeg = quoteLeg,
+  blockTag: pinnedBlockTag = null,
 }) {
-  const blockTag = await provider.getBlockNumber();
+  const blockTag =
+    pinnedBlockTag !== null && pinnedBlockTag !== undefined
+      ? pinnedBlockTag
+      : await provider.getBlockNumber();
   const tradeSizes = pair.logSweep
     ? logSweepSizes({
         min: pair.logSweep.min,
@@ -197,20 +274,29 @@ async function scanPair({
         steps: pair.logSweep.steps,
       })
     : pair.tradeSizes;
+  // Scan sizes ascending: average price impact is non-decreasing with size, so once one size
+  // exceeds pool depth every larger size does too and can be marked without any RPC call.
+  const orderedTradeSizes = [...tradeSizes].sort((a, b) => Number(a) - Number(b));
+  const blockNumber = typeof blockTag === "number" ? blockTag : null;
   const results = [];
-  for (const tradeSizeHuman of tradeSizes) {
+  let depthExceededAbove = null;
+  for (const tradeSizeHuman of orderedTradeSizes) {
+    if (depthExceededAbove !== null) {
+      results.push({ pair, tradeSizeHuman, blockNumber, error: "DEPTH_EXCEEDED" });
+      continue;
+    }
     try {
-      if (
-        !(await isTradeSizeWithinDepth({
-          pair,
-          tradeSizeHuman,
-          provider,
-          config,
-          quoteLeg: injectedQuoteLeg,
-          blockTag,
-        }))
-      ) {
-        results.push({ pair, tradeSizeHuman, error: "DEPTH_EXCEEDED" });
+      const depth = await quoteEntryDepth({
+        pair,
+        tradeSizeHuman,
+        provider,
+        config,
+        quoteLeg: injectedQuoteLeg,
+        blockTag,
+      });
+      if (!depth.within) {
+        depthExceededAbove = Number(tradeSizeHuman);
+        results.push({ pair, tradeSizeHuman, blockNumber, error: "DEPTH_EXCEEDED" });
         continue;
       }
       results.push(
@@ -223,10 +309,11 @@ async function scanPair({
           ethUsdPrice,
           quoteLeg: injectedQuoteLeg,
           blockTag,
+          intermediateOut: depth.fullOut,
         })
       );
     } catch (err) {
-      results.push({ pair, tradeSizeHuman, error: sanitizeError(err) });
+      results.push({ pair, tradeSizeHuman, blockNumber, error: sanitizeError(err) });
     }
   }
   const now = Date.now();
@@ -245,7 +332,9 @@ async function scanPair({
   });
 
   if (pair.logSweep && sorted.length >= 3 && sorted.every((r) => !r.error)) {
-    const ascending = [...sorted].reverse();
+    const ascending = [...sorted].sort(
+      (a, b) => Number(a.tradeSizeHuman) - Number(b.tradeSizeHuman)
+    );
     const sizes = ascending.map((r) => r.tradeSizeHuman);
     const profits = ascending.map((r) =>
       r.netProfitUsd !== null ? r.netProfitUsd : Number(r.grossProfit)
@@ -256,11 +345,31 @@ async function scanPair({
       maxTradeSize: pair.logSweep.max,
     });
     if (interp.interpolated) {
-      sorted[0] = {
-        ...sorted[0],
-        tradeSizeHuman: interp.size,
-        interpolated: true,
-      };
+      try {
+        // The interpolated size is only a hypothesis: re-quote it at the same block before
+        // selecting it, otherwise the logged size would not match the logged amounts.
+        const requoted = await scanTradeSize({
+          provider,
+          pair,
+          tradeSizeHuman: interp.size,
+          config,
+          gasPriceWei,
+          ethUsdPrice,
+          quoteLeg: injectedQuoteLeg,
+          blockTag,
+        });
+        requoted.interpolated = true;
+        const best = sorted[0];
+        const samePricingBasis = (requoted.netProfit === null) === (best.netProfit === null);
+        if (samePricingBasis && bestProfitInToken(requoted) > bestProfitInToken(best)) {
+          sorted[0] = requoted;
+        }
+      } catch (err) {
+        const { shortMessage } = sanitizeError(err);
+        console.warn(
+          `WARNING: could not re-quote interpolated size ${interp.size}: ${shortMessage} - keeping best quoted size.`
+        );
+      }
     }
   }
 
@@ -269,7 +378,7 @@ async function scanPair({
 
 module.exports = {
   getEthUsdPrice,
-  estimateGasCostUsd,
+  estimateGasCostWei,
   sanitizeError,
   scanTradeSize,
   scanPair,

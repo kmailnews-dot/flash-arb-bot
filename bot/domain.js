@@ -45,10 +45,17 @@
  * @property {bigint} owed
  * @property {bigint} grossProfit
  * @property {number|null} grossProfitUsd
+ * @property {bigint|null} gasCostWei
+ * @property {bigint|null} gasCostInToken
  * @property {number|null} gasCostUsd
+ * @property {bigint|null} netProfit
+ * @property {bigint|null} netProfitBps
+ * @property {bigint} minProfitBps
+ * @property {bigint|null} minProfitUsdInToken
  * @property {number|null} netProfitUsd
  * @property {boolean} priced
  * @property {boolean} isOpportunity
+ * @property {boolean} [interpolated]
  */
 
 /**

@@ -1,9 +1,28 @@
 const { ethers } = require("ethers");
 const { V2_ROUTER_ABI, V3_QUOTER_ABI } = require("./abis");
 
+// Contract instances are immutable and cheap to reuse. Caching them per provider avoids
+// rebuilding an Interface and re-resolving the network on every quote.
+const v2Contracts = new WeakMap();
+const v3Contracts = new WeakMap();
+
+function cachedContract(cache, provider, address, abi) {
+  let byAddress = cache.get(provider);
+  if (!byAddress) {
+    byAddress = new Map();
+    cache.set(provider, byAddress);
+  }
+  let contract = byAddress.get(address);
+  if (!contract) {
+    contract = new ethers.Contract(address, abi, provider);
+    byAddress.set(address, contract);
+  }
+  return contract;
+}
+
 /// Quotes a V2-style router (SushiSwap, Camelot V2, ...): amountIn of tokenIn -> tokenOut.
 async function quoteV2(provider, routerAddress, tokenIn, tokenOut, amountIn, blockTag = "latest") {
-  const router = new ethers.Contract(routerAddress, V2_ROUTER_ABI, provider);
+  const router = cachedContract(v2Contracts, provider, routerAddress, V2_ROUTER_ABI);
   const amounts = await router.getAmountsOut(amountIn, [tokenIn, tokenOut], { blockTag });
   return amounts[amounts.length - 1];
 }
@@ -18,7 +37,7 @@ async function quoteV3(
   amountIn,
   blockTag = "latest"
 ) {
-  const quoter = new ethers.Contract(quoterAddress, V3_QUOTER_ABI, provider);
+  const quoter = cachedContract(v3Contracts, provider, quoterAddress, V3_QUOTER_ABI);
   const result = await quoter.quoteExactInputSingle.staticCall(
     {
       tokenIn,

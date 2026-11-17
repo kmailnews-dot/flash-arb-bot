@@ -21,15 +21,27 @@ function normalizeInterval(value) {
 /// Creates the provider used by the persistent runner. A ws:// or wss:// URL gets a
 /// WebSocketProvider; HTTP URLs get a JsonRpcProvider with polling. If the WebSocket provider
 /// cannot be constructed, fall back to the HTTP form of the same URL.
-function createProvider({ rpcUrl, pollIntervalMs = DEFAULT_POLL_INTERVAL_MS, proxyUrl = null } = {}) {
+function createProvider({
+  rpcUrl,
+  pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
+  proxyUrl = null,
+  chainId = null,
+} = {}) {
   if (!rpcUrl) {
     throw new Error("bot/run.js requires config.rpcUrl or an injected provider.");
   }
 
   const interval = normalizeInterval(pollIntervalMs);
+  const network = Number.isInteger(chainId) && chainId > 0 ? chainId : null;
   if (isWebSocketUrl(rpcUrl)) {
     try {
-      return { provider: new ethers.WebSocketProvider(rpcUrl), kind: "websocket" };
+      // A pinned network avoids ethers' per-call chain-id check; bot/index.js verifies the
+      // actual chain id once with a raw eth_chainId call at startup.
+      const provider =
+        network === null
+          ? new ethers.WebSocketProvider(rpcUrl)
+          : new ethers.WebSocketProvider(rpcUrl, network, { staticNetwork: true });
+      return { provider, kind: "websocket" };
     } catch (err) {
       console.warn(
         `[RUN] WebSocket provider unavailable (${err?.shortMessage || err?.message || err}); ` +
@@ -38,7 +50,11 @@ function createProvider({ rpcUrl, pollIntervalMs = DEFAULT_POLL_INTERVAL_MS, pro
     }
   }
 
-  const provider = createJsonRpcProvider({ rpcUrl: httpFallbackUrl(rpcUrl), proxyUrl });
+  const provider = createJsonRpcProvider({
+    rpcUrl: httpFallbackUrl(rpcUrl),
+    proxyUrl,
+    chainId: network,
+  });
   provider.pollingInterval = interval;
   return { provider, kind: "polling" };
 }
@@ -69,6 +85,8 @@ function run({
     : createProvider({
         rpcUrl: config.rpcUrl,
         pollIntervalMs: config.pollIntervalMs ?? pollIntervalMs,
+        proxyUrl: config.rpcProxyUrl,
+        chainId: config.expectedChainId,
       });
   const provider = providerInfo.provider;
   const intervalMs = normalizeInterval(config.pollIntervalMs ?? pollIntervalMs);
