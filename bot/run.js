@@ -1,4 +1,5 @@
 const { ethers } = require("ethers");
+const { createJsonRpcProvider } = require("./netproxy");
 const { main } = require("./index");
 const { reconcilePendingExecutions } = require("./execute");
 
@@ -20,7 +21,7 @@ function normalizeInterval(value) {
 /// Creates the provider used by the persistent runner. A ws:// or wss:// URL gets a
 /// WebSocketProvider; HTTP URLs get a JsonRpcProvider with polling. If the WebSocket provider
 /// cannot be constructed, fall back to the HTTP form of the same URL.
-function createProvider({ rpcUrl, pollIntervalMs = DEFAULT_POLL_INTERVAL_MS } = {}) {
+function createProvider({ rpcUrl, pollIntervalMs = DEFAULT_POLL_INTERVAL_MS, proxyUrl = null } = {}) {
   if (!rpcUrl) {
     throw new Error("bot/run.js requires config.rpcUrl or an injected provider.");
   }
@@ -37,7 +38,7 @@ function createProvider({ rpcUrl, pollIntervalMs = DEFAULT_POLL_INTERVAL_MS } = 
     }
   }
 
-  const provider = new ethers.JsonRpcProvider(httpFallbackUrl(rpcUrl));
+  const provider = createJsonRpcProvider({ rpcUrl: httpFallbackUrl(rpcUrl), proxyUrl });
   provider.pollingInterval = interval;
   return { provider, kind: "polling" };
 }
@@ -65,7 +66,10 @@ function run({
   const config = injectedConfig || require("./config");
   const providerInfo = injectedProvider
     ? { provider: injectedProvider, kind: "injected" }
-    : createProvider({ rpcUrl: config.rpcUrl, pollIntervalMs: config.pollIntervalMs ?? pollIntervalMs });
+    : createProvider({
+        rpcUrl: config.rpcUrl,
+        pollIntervalMs: config.pollIntervalMs ?? pollIntervalMs,
+      });
   const provider = providerInfo.provider;
   const intervalMs = normalizeInterval(config.pollIntervalMs ?? pollIntervalMs);
 

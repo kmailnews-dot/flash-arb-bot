@@ -12,6 +12,7 @@ const {
   recordOutcome,
 } = require("./adaptive");
 const { createThrottle, withThrottle } = require("./throttle");
+const { createJsonRpcProvider } = require("./netproxy");
 
 const AAVE_POOL_PREMIUM_ABI = ["function FLASHLOAN_PREMIUM_TOTAL() view returns (uint128)"];
 
@@ -137,7 +138,8 @@ async function main({
       console.warn(adaptiveMessage);
     }
   }
-  const provider = injectedProvider || new ethers.JsonRpcProvider(config.rpcUrl);
+  const provider =
+    injectedProvider || createJsonRpcProvider({ rpcUrl: config.rpcUrl, proxyUrl: config.rpcProxyUrl });
   const scanLogPath = config.scanLogPath || DEFAULT_SCAN_LOG_PATH;
 
   const reconciliationWallet =

@@ -69,6 +69,7 @@ bot/run.js run() (process persistant)
 | `bot/adaptive.js` | Seuils adaptatifs bornés (MIN_PROFIT_BPS, taille de trade), historique | `loadAdaptive`, `recordOutcome`, `applyAdaptive` | `fs/promises`, `path` |
 | `bot/resilient.js` | Classification d'erreur + retry borné + backoff | `classifyError`, `shouldRetry`, `backoffMs` | aucune |
 | `bot/throttle.js` | Sérialisation RPC + intervalle minimum + stats | `createThrottle`, `withThrottle`, `getStats` | aucune |
+| `bot/netproxy.js` | Proxy SOCKS5 minimal (sans dépendance) + fabrique provider JSON-RPC ; actif seulement si `RPC_PROXY_URL` défini | `createJsonRpcProvider` | `ethers`, `net`, `tls` |
 | `bot/config.js` | Environnement → `Config` validée | `config` | `dotenv`, `ethers` |
 | `bot/abis.js` | ABIs ERC-20, routeurs V2, QuoterV2, exécuteur | `FLASH_ARB_EXECUTOR_ABI` (et autres) | aucune |
 | `bot/networks.js` | Adresses Aave par chaîne | `NETWORKS` | aucune |
@@ -281,6 +282,12 @@ Contrat de types : `bot/domain.js` (aucun export runtime, `bot/domain.js:172`).
 - **Pas de RPC privé par défaut.** Une seule URL `ARBITRUM_RPC_URL` (`bot/config.js:271`) ; `run.js`
   choisit WebSocket ou HTTP (`bot/run.js:22-42`). Un RPC public ajoute typiquement 100–500 ms par
   appel.
+- **Pas de proxy réseau par défaut.** `RPC_PROXY_URL` non défini → providers créés exactement comme
+  avant (`bot/index.js:140-141`, `bot/run.js:40`, `bot/netproxy.js` no-op strict). Sémantique
+  socks5h (résolution du hostname par le proxy). Mesuré (`scripts/measure-rpc-latency.js`, N=25,
+  2026-11-16, 0 erreur) : direct p50/p95 = 208/233 ms ; Tor connexion neuve = 559/995 ms (rejeté) ;
+  Tor tunnel keep-alive = 217/598 ms. Fail-closed : `ws://` rejeté au chargement de config quand le
+  proxy est défini (`bot/config.js`, `validateProxyConfig`).
 - **Pas de live sans `DRY_RUN=false` + `PRIVATE_KEY` + `CONTRACT_ADDRESS`.** `dryRun` vaut `true`
   par défaut (`bot/config.js:197`), et `maybeExecute()` refuse d'envoyer sans les deux secrets
   (`bot/executor.js:51-64`). Le live exige aussi un prix ETH/USD (`bot/index.js:121-126`).

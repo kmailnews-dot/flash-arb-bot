@@ -1,6 +1,7 @@
 require("dotenv").config();
 const { ethers } = require("ethers");
 const path = require("path");
+const { validateProxyConfig } = require("./netproxy");
 
 function required(name) {
   const value = process.env[name];
@@ -494,6 +495,9 @@ const LOG_DIR = path.resolve(__dirname, "..", "logs");
 
 const config = {
   rpcUrl: required("ARBITRUM_RPC_URL"),
+  // Optional SOCKS5 proxy (e.g. Tor) for all http(s) JSON-RPC traffic. Unset = strict no-op.
+  // Validated fail-closed below; never logged (no redaction needed if no credentials inside).
+  rpcProxyUrl: optionalString("RPC_PROXY_URL", null),
   dryRun,
   // Persistent runner (bot/run.js): polling interval for HTTP JSON-RPC providers. A ws:// or
   // wss:// ARBITRUM_RPC_URL uses WebSocketProvider instead.
@@ -554,6 +558,8 @@ const config = {
   // Array of pair configs to scan - tokens, routers, trade sizes. See .env.example for the shape.
   pairs: loadPairs(),
 };
+
+validateProxyConfig({ rpcUrl: config.rpcUrl, proxyUrl: config.rpcProxyUrl });
 
 validateScannerConfig({
   minProfitUsd: config.minProfitUsd,
