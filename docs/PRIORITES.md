@@ -278,3 +278,36 @@ Verdict : G2 (shadow) est PRÉMATURÉ. Il faut d'abord corriger P1-10-ter (cap e
 Mise à jour P1-10-ter (3 novembre 2026) : le cap maxTradeSizeUsd est validé en réel. Les tailles 10, 50, 100 et 500 USDC passent la validation de config et ne sont plus écrasées à 0.1 par applyAdaptive. La paire USDC/WBTC via Camelot V2 + SushiSwap V2 reste non exploitable : DEPTH_EXCEEDED même à 10 USDC, le pool d'entrée Camelot WBTC/USDC est trop mince. Pour tester USDC/WBTC, il faudrait un pool WBTC/USDC profond (Uniswap V3 fee 500 ou 3000), dont l'adresse n'est pas vérifiée dans le dépôt.
 
 ---
+
+## Audit indépendant GLM 5.3 — cc26a64 (17 novembre 2026)
+
+Statut : audité, sain. 0 critique, 0 majeur, 4 mineurs, 5 risques potentiels.
+
+### Défauts mineurs (acceptés, non corrigés)
+
+| # | Fichier | Problème | Décision |
+|---|---|---|---|
+| M1 | bot/guards.js:218,278,302,328 | Sous-conditions du breaker en fail-open partiel (catch → warn → continue) si les fichiers d'état sont illisibles. readState lève sur corruption, ce qui fail-closed via runGuard. | Accepté : le trou est théorique, la corruption est rare (écriture atomique tmp+rename). |
+| M2 | bot/scanner.js:347-366 | Le re-quote de la taille interpolée contourne QUOTE_STALE et quoteEntryDepth. Stalence théorique (re-quote immédiat), profondeur bornée par la monotonie des AMM standards. | Accepté : risque borné, re-quote immédiat. |
+| M3 | bot/pricing.js:34-41 | gasCostInBorrowedToken (branche isWeth) exige ethUsdPrice valide alors qu'il n'est pas utilisé. Fail-closed, réduit la disponibilité. | Accepté : sans effet en pratique (MIN_PROFIT_USD exige déjà ethUsdPrice). |
+| M4 | bot/nonce.js:58-78 | bump() est du code mort (jamais appelé). | Accepté : préparé pour un futur mécanisme de replacement de transaction. |
+
+### Risques potentiels (documentés)
+
+| # | Fichier | Risque |
+|---|---|---|
+| R1 | bot/netproxy.js:149 | registerGetUrl est global au process : tous les FetchRequest passent par le proxy si RPC_PROXY_URL est défini. Acceptable (un seul provider), fragile si un second endpoint est ajouté. |
+| R2 | bot/execute.js:867 | receipt.gasPrice ?? 0n sous-estime le gaz si gasPrice manque (chemin secondaire). |
+| R3 | bot/index.js:340 | exitCode = rpcErrors > max \|\| scanned === 0 ? 1 : 0 : un cycle où toutes les quotes échouent ressort avec exitCode 0. Atténué par recordRpcCycle + breaker RPC. |
+| R4 | .github/workflows/scan.yml | secrets.* utilisé pour des configs non secrètes (MIN_PROFIT_USD, SLIPPAGE_BPS). Pas un problème de sécurité, problème d'observabilité. |
+| R5 | contracts/FlashArbExecutor.sol:161 | deadline: block.timestamp dans _swap V3 : deadline sans effet. Protection réelle = minAmountOut + EXPIRED sur ArbParams.deadline. |
+
+### Points correctement implémentés (11)
+
+Contrat (onlyOwner + nonReentrant + whenNotPaused, CALLER_NOT_POOL, UNTRUSTED_INITIATOR, cohérence legs, _swapAndMeasure, NOT_PROFITABLE), premium Aave 3 chemins (on-chain, config, dérivation), BigInt partout, fail-closed decide, profondeur 0,5 % + short-circuit, staticCall avant envoi, breaker 6 conditions, nonce reset, provider statique + eth_chainId brut, workflow DRY_RUN=true + permissions read + actions épinglées.
+
+### Décision
+
+Le refactor DeepSeek est sain. Les 4 défauts mineurs (M1–M4) et les 5 risques (R1–R5) sont acceptés et documentés. Aucune correction n'est appliquée : ils sont théoriques, bornés, ou sans effet en pratique. Le bot est stable, testé, documenté.
+
+G1 économique : non concluant. Les paires testées (WETH/USDC, WETH/ARB, WETH/WBTC, USDT0, DAI) ont des spreads négatifs. Le marché est efficace. Aucune opportunité nette positive capturable avec l'infrastructure actuelle (GitHub Actions, RPC public, pas de mempool privé).
