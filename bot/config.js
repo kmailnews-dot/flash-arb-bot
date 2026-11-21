@@ -2,6 +2,13 @@ require("dotenv").config();
 const { ethers } = require("ethers");
 const path = require("path");
 const { validateProxyConfig } = require("./netproxy");
+const {
+  DEFAULT_MAX_AGE_MS: DEFAULT_PAIR_SPREAD_MAX_AGE_MS,
+  DEFAULT_MIN_SAMPLES: DEFAULT_PAIR_SPREAD_MIN_SAMPLES,
+  DEFAULT_WINDOW_SIZE: DEFAULT_PAIR_SPREAD_WINDOW_SIZE,
+  normalizeMode: normalizePairSpreadMode,
+} = require("./pairSpread");
+const { DEFAULT_PAIR_SPREADS_PATH } = require("./pairSpreadStore");
 
 function required(name) {
   const value = process.env[name];
@@ -30,6 +37,51 @@ function validateAddress(value, path) {
   } catch (err) {
     throw new Error(`Invalid address at ${path}: ${value} (${err.message})`);
   }
+}
+
+const PAIR_SPREAD_MIN_WINDOW_SIZE = 5;
+const PAIR_SPREAD_MAX_WINDOW_SIZE = 100;
+const PAIR_SPREAD_MAX_MAX_AGE_MS = 168 * 60 * 60 * 1000;
+
+function validatePairSpreadMode(value) {
+  try {
+    return normalizePairSpreadMode(value);
+  } catch (err) {
+    throw new Error(`PAIR_SPREAD_MODE is invalid: ${err.message}`);
+  }
+}
+
+function validatePairSpreadSettings({ mode, windowSize, minSamples, maxAgeMs }) {
+  const normalizedMode = validatePairSpreadMode(mode);
+  if (
+    !Number.isInteger(windowSize) ||
+    windowSize < PAIR_SPREAD_MIN_WINDOW_SIZE ||
+    windowSize > PAIR_SPREAD_MAX_WINDOW_SIZE
+  ) {
+    throw new Error(
+      `PAIR_SPREAD_WINDOW_SIZE must be an integer between ${PAIR_SPREAD_MIN_WINDOW_SIZE} and ${PAIR_SPREAD_MAX_WINDOW_SIZE}.`
+    );
+  }
+  if (
+    !Number.isInteger(minSamples) ||
+    minSamples < DEFAULT_PAIR_SPREAD_MIN_SAMPLES ||
+    minSamples > windowSize
+  ) {
+    throw new Error(
+      `PAIR_SPREAD_MIN_SAMPLES must be an integer between ${DEFAULT_PAIR_SPREAD_MIN_SAMPLES} and PAIR_SPREAD_WINDOW_SIZE.`
+    );
+  }
+  if (
+    typeof maxAgeMs !== "number" ||
+    !Number.isFinite(maxAgeMs) ||
+    maxAgeMs <= 0 ||
+    maxAgeMs > PAIR_SPREAD_MAX_MAX_AGE_MS
+  ) {
+    throw new Error(
+      `PAIR_SPREAD_MAX_AGE_MS must be a finite number in (0, ${PAIR_SPREAD_MAX_MAX_AGE_MS}].`
+    );
+  }
+  return normalizedMode;
 }
 
 const VALID_PROFILES = new Set(["majors", "longtail"]);
@@ -354,6 +406,10 @@ function validateScannerConfig({
   gasAnomalyWindowSize = 20,
   gasAnomalyMultiplier = 3,
   gasAnomalyMinSamples = 5,
+  pairSpreadMode = "off",
+  pairSpreadWindowSize = DEFAULT_PAIR_SPREAD_WINDOW_SIZE,
+  pairSpreadMinSamples = DEFAULT_PAIR_SPREAD_MIN_SAMPLES,
+  pairSpreadMaxAgeMs = DEFAULT_PAIR_SPREAD_MAX_AGE_MS,
 }) {
   if (minProfitUsd !== undefined && minProfitUsd !== null) {
     if (typeof minProfitUsd !== "number" || !Number.isFinite(minProfitUsd) || minProfitUsd < 0) {
@@ -482,6 +538,12 @@ function validateScannerConfig({
   if (!Number.isInteger(gasAnomalyMinSamples) || gasAnomalyMinSamples < 3 || gasAnomalyMinSamples > gasAnomalyWindowSize) {
     throw new Error("GAS_ANOMALY_MIN_SAMPLES must be an integer between 3 and GAS_ANOMALY_WINDOW_SIZE.");
   }
+  validatePairSpreadSettings({
+    mode: pairSpreadMode,
+    windowSize: pairSpreadWindowSize,
+    minSamples: pairSpreadMinSamples,
+    maxAgeMs: pairSpreadMaxAgeMs,
+  });
 }
 
 const slippageBps = validateSlippageBps();
@@ -550,6 +612,24 @@ const config = {
   // Append-only JSONL log of every scan result, used to measure opportunities over time.
   scanLogPath: optionalString("SCAN_LOG_PATH", path.join(LOG_DIR, "scans.jsonl")),
 
+  // P1-16-bis dynamic pair-spread filter (ADR 0006). Default off means no state I/O.
+  pairSpreadMode: validatePairSpreadMode(optionalString("PAIR_SPREAD_MODE", "off")),
+  pairSpreadPath:
+    optionalString("PAIR_SPREAD_PATH", DEFAULT_PAIR_SPREADS_PATH).trim() ||
+    DEFAULT_PAIR_SPREADS_PATH,
+  pairSpreadWindowSize: optionalNumber(
+    "PAIR_SPREAD_WINDOW_SIZE",
+    DEFAULT_PAIR_SPREAD_WINDOW_SIZE
+  ),
+  pairSpreadMinSamples: optionalNumber(
+    "PAIR_SPREAD_MIN_SAMPLES",
+    DEFAULT_PAIR_SPREAD_MIN_SAMPLES
+  ),
+  pairSpreadMaxAgeMs: optionalNumber(
+    "PAIR_SPREAD_MAX_AGE_MS",
+    DEFAULT_PAIR_SPREAD_MAX_AGE_MS
+  ),
+
   // Optional: lets the bot price gas in USD by quoting 1 WETH -> a stablecoin on a live DEX pool.
   // Required only for pairs whose borrowed token is WETH or a stablecoin (see README). Leave unset
   // to skip USD filtering entirely and rely solely on the contract's on-chain minProfit guard.
@@ -584,9 +664,14 @@ validateScannerConfig({
   gasAnomalyWindowSize: config.gasAnomalyWindowSize,
   gasAnomalyMultiplier: config.gasAnomalyMultiplier,
   gasAnomalyMinSamples: config.gasAnomalyMinSamples,
+  pairSpreadMode: config.pairSpreadMode,
+  pairSpreadWindowSize: config.pairSpreadWindowSize,
+  pairSpreadMinSamples: config.pairSpreadMinSamples,
+  pairSpreadMaxAgeMs: config.pairSpreadMaxAgeMs,
 });
 
 module.exports = config;
 module.exports.validatePairs = validatePairs;
 module.exports.validateSlippageBps = validateSlippageBps;
 module.exports.validateScannerConfig = validateScannerConfig;
+module.exports.validatePairSpreadSettings = validatePairSpreadSettings;

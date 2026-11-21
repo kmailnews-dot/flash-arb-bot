@@ -13,6 +13,20 @@ const {
 } = require("./adaptive");
 const { createThrottle, withThrottle } = require("./throttle");
 const { createJsonRpcProvider } = require("./netproxy");
+const {
+  DEFAULT_MAX_AGE_MS: DEFAULT_PAIR_SPREAD_MAX_AGE_MS,
+  DEFAULT_MIN_SAMPLES: DEFAULT_PAIR_SPREAD_MIN_SAMPLES,
+  DEFAULT_WINDOW_SIZE: DEFAULT_PAIR_SPREAD_WINDOW_SIZE,
+  bestNetProfitBps,
+  buildPairKey,
+  decidePairSpread,
+  normalizeMode: normalizePairSpreadMode,
+} = require("./pairSpread");
+const {
+  DEFAULT_PAIR_SPREADS_PATH,
+  loadPairSpreadState,
+  recordPairSpreadSamples,
+} = require("./pairSpreadStore");
 
 const AAVE_POOL_PREMIUM_ABI = ["function FLASHLOAN_PREMIUM_TOTAL() view returns (uint128)"];
 
@@ -63,6 +77,35 @@ function compareResults(a, b) {
 function selectBestResult(results) {
   if (!Array.isArray(results) || results.length === 0) return null;
   return [...results].sort(compareResults)[0];
+}
+
+function logPairSpreadEvent(event) {
+  if (logFormat() === "json") {
+    logEvent(event);
+    return;
+  }
+  const message = event.message ?? JSON.stringify(event);
+  if (event.level === "warn" || event.level === "error") {
+    console.warn(message);
+  } else {
+    console.log(message);
+  }
+}
+
+function resolvePairSpreadSettings(config) {
+  let mode;
+  try {
+    mode = normalizePairSpreadMode(config.pairSpreadMode ?? "off");
+  } catch (err) {
+    throw new Error(`PAIR_SPREAD_MODE is invalid: ${err.message}`);
+  }
+  return {
+    mode,
+    filePath: config.pairSpreadPath ?? DEFAULT_PAIR_SPREADS_PATH,
+    windowSize: config.pairSpreadWindowSize ?? DEFAULT_PAIR_SPREAD_WINDOW_SIZE,
+    minSamples: config.pairSpreadMinSamples ?? DEFAULT_PAIR_SPREAD_MIN_SAMPLES,
+    maxAgeMs: config.pairSpreadMaxAgeMs ?? DEFAULT_PAIR_SPREAD_MAX_AGE_MS,
+  };
 }
 
 /// Reads the real chain id with one raw `eth_chainId` call. Ethers providers configured with a
@@ -120,6 +163,7 @@ async function main({
   maybeExecute: maybeExecuteImpl = maybeExecute,
 } = {}) {
   const config = injectedConfig || require("./config");
+  const pairSpread = resolvePairSpreadSettings(config);
   const adaptivePath = config.adaptivePath ?? DEFAULT_ADAPTIVE_PATH;
   let cycleConfig = config;
   try {
@@ -170,6 +214,54 @@ async function main({
       "Refusing to scan or execute on the wrong network.";
     console.error(`[CHAIN ID MISMATCH] ${reason}`);
     return { refused: true, reason, exitCode: 1 };
+  }
+
+  // P1-16-bis: load the pair-spread history once per cycle, after the chain id is verified.
+  // Mode off performs no state I/O at all.
+  const pairSpreadNow = Date.now();
+  let pairSpreadLoaded = null;
+  let pairSpreadStateAvailable = false;
+  if (pairSpread.mode !== "off") {
+    logPairSpreadEvent({
+      event: "pair_spread_mode",
+      level: "info",
+      mode: pairSpread.mode,
+      path: pairSpread.filePath,
+      message: `[PAIR SPREAD] mode=${pairSpread.mode} path=${pairSpread.filePath}`,
+    });
+    try {
+      pairSpreadLoaded = await loadPairSpreadState({
+        filePath: pairSpread.filePath,
+        now: pairSpreadNow,
+        windowSize: pairSpread.windowSize,
+        maxAgeMs: pairSpread.maxAgeMs,
+      });
+      pairSpreadStateAvailable = true;
+      const stateMessage =
+        `[PAIR SPREAD] state=${pairSpreadLoaded.status} writable=${pairSpreadLoaded.writable} ` +
+        `pairs=${Object.keys(pairSpreadLoaded.state?.pairs ?? {}).length} ` +
+        `expiredPruned=${pairSpreadLoaded.expiredPruned}`;
+      logPairSpreadEvent({
+        event: "pair_spread_state",
+        level: pairSpreadLoaded.warning ? "warn" : "info",
+        status: pairSpreadLoaded.status,
+        writable: pairSpreadLoaded.writable,
+        expiredPruned: pairSpreadLoaded.expiredPruned,
+        warning: pairSpreadLoaded.warning,
+        message: pairSpreadLoaded.warning
+          ? `${stateMessage} warning=${pairSpreadLoaded.warning}`
+          : stateMessage,
+      });
+    } catch (err) {
+      logPairSpreadEvent({
+        event: "pair_spread_state",
+        level: "warn",
+        status: "error",
+        writable: false,
+        warning: err.message,
+        message: `[PAIR SPREAD] state=unavailable warning=${err.message}. Continuing with an empty history.`,
+      });
+    }
   }
 
   await reconcilePendingExecutions({
@@ -235,9 +327,83 @@ async function main({
   let opportunities = 0;
   let executed = 0;
   let rpcErrors = 0;
+  let filteredPairs = 0;
+  let wouldFilterPairs = 0;
+  let pairErrors = 0;
+  const pairSpreadSamples = new Map();
   const executionConfig = { ...cycleConfig, ethUsdPrice, aaveFlashLoanPremiumBps };
+  const configuredPairs = Array.isArray(cycleConfig.pairs) ? cycleConfig.pairs : [];
 
-  for (const pair of cycleConfig.pairs) {
+  for (const pair of configuredPairs) {
+    let pairKey = null;
+    let pairDecision = null;
+
+    if (pairSpread.mode !== "off") {
+      try {
+        pairKey = buildPairKey({ chainId, pair });
+        const samples = pairSpreadLoaded?.state?.pairs?.[pairKey]?.samples ?? [];
+        pairDecision = decidePairSpread({
+          pair,
+          samples,
+          mode: pairSpread.mode,
+          now: pairSpreadNow,
+          windowSize: pairSpread.windowSize,
+          minSamples: pairSpread.minSamples,
+          maxAgeMs: pairSpread.maxAgeMs,
+        });
+      } catch (err) {
+        logPairSpreadEvent({
+          event: "pair_spread_decision_error",
+          level: "warn",
+          pair: pair.label,
+          message: `[PAIR SPREAD] could not evaluate pair=${pair.label}: ${err.message}. Scanning anyway.`,
+        });
+        pairKey = null;
+        pairDecision = null;
+      }
+
+      if (pairDecision) {
+        const decisionLabel = pairDecision.skip
+          ? "filter"
+          : pairDecision.wouldFilter
+            ? "would-filter"
+            : "scan";
+        logPairSpreadEvent({
+          event: "pair_spread_decision",
+          level: "info",
+          pair: pair.label,
+          mode: pairDecision.mode,
+          skip: pairDecision.skip,
+          wouldFilter: pairDecision.wouldFilter,
+          reason: pairDecision.reason,
+          sampleCount: pairDecision.sampleCount,
+          doubledMedian: pairDecision.doubledMedian,
+          floor: pairDecision.floor,
+          last: pairDecision.last,
+          message:
+            `[PAIR SPREAD] pair=${pair.label} decision=${decisionLabel} reason=${pairDecision.reason} ` +
+            `samples=${pairDecision.sampleCount} floor=${pairDecision.floor ?? "n/a"} ` +
+            `doubledMedian=${pairDecision.doubledMedian ?? "n/a"} last=${pairDecision.last ?? "n/a"}`,
+        });
+
+        if (pairSpread.mode === "shadow" && pairDecision.wouldFilter) {
+          wouldFilterPairs += 1;
+        }
+
+        if (pairDecision.skip) {
+          filteredPairs += 1;
+          logPairSpreadEvent({
+            event: "pair_spread_filtered",
+            level: "warn",
+            pair: pair.label,
+            reason: pairDecision.reason,
+            message: `[PAIR SPREAD] SKIP pair=${pair.label} reason=${pairDecision.reason}`,
+          });
+          continue;
+        }
+      }
+    }
+
     try {
       console.log(`\nScanning ${pair.label} ...`);
       const results = await scanPairImpl({
@@ -248,6 +414,20 @@ async function main({
         ethUsdPrice,
         blockTag,
       });
+
+      if (pairKey !== null) {
+        const sampleBps = bestNetProfitBps(results);
+        if (sampleBps !== null) {
+          const existing = pairSpreadSamples.get(pairKey);
+          if (!existing || sampleBps > existing.netProfitBps) {
+            pairSpreadSamples.set(pairKey, {
+              key: pairKey,
+              netProfitBps: sampleBps,
+              at: pairSpreadNow,
+            });
+          }
+        }
+      }
 
       for (const result of results) {
         scanned += 1;
@@ -329,19 +509,82 @@ async function main({
         }
       }
     } catch (err) {
+      pairErrors += 1;
       console.warn(`[PAIR ERROR] ${pair.label}: ${err.message} - continuing to next pair.`);
     }
+  }
+
+  if (pairSpread.mode !== "off" && pairSpreadStateAvailable && pairSpreadLoaded) {
+    try {
+      const recordResult = await recordPairSpreadSamples({
+        filePath: pairSpread.filePath,
+        loaded: pairSpreadLoaded,
+        samples: Array.from(pairSpreadSamples.values()),
+        now: pairSpreadNow,
+        windowSize: pairSpread.windowSize,
+        maxAgeMs: pairSpread.maxAgeMs,
+      });
+      const warningIsNew =
+        typeof recordResult.warning === "string" &&
+        recordResult.warning !== pairSpreadLoaded.warning;
+      logPairSpreadEvent({
+        event: "pair_spread_persist",
+        level: recordResult.ok ? "info" : "warn",
+        status: recordResult.status,
+        writable: recordResult.writable,
+        written: recordResult.written,
+        added: recordResult.added,
+        expiredPruned: recordResult.expiredPruned,
+        warning: warningIsNew ? recordResult.warning : null,
+        message:
+          `[PAIR SPREAD] persist status=${recordResult.status} written=${recordResult.written} ` +
+          `added=${recordResult.added} expiredPruned=${recordResult.expiredPruned}` +
+          (warningIsNew ? ` warning=${recordResult.warning}` : ""),
+      });
+    } catch (err) {
+      logPairSpreadEvent({
+        event: "pair_spread_persist",
+        level: "warn",
+        status: "error",
+        written: false,
+        message: `[PAIR SPREAD] could not persist state: ${err.message}`,
+      });
+    }
+  }
+
+  if (pairSpread.mode !== "off") {
+    logPairSpreadEvent({
+      event: "pair_spread_summary",
+      level: "info",
+      mode: pairSpread.mode,
+      configuredPairs: configuredPairs.length,
+      filteredPairs,
+      wouldFilterPairs,
+      message:
+        `[PAIR SPREAD] summary mode=${pairSpread.mode} configured=${configuredPairs.length} ` +
+        `filtered=${filteredPairs} wouldFilter=${wouldFilterPairs}`,
+    });
   }
 
   if (rpcErrors > config.maxRpcErrorsPerScan) {
     console.warn(`[RPC ERRORS] ${rpcErrors} erreurs sur ce cycle.`);
   }
 
-  const exitCode = rpcErrors > config.maxRpcErrorsPerScan || scanned === 0 ? 1 : 0;
+  // D13: a cycle where every configured pair was deliberately filtered by enforce is a
+  // successful no-op, not a failed scan. Any independent pair error keeps exit code 1.
+  const allPairsFiltered =
+    pairSpread.mode === "enforce" &&
+    configuredPairs.length > 0 &&
+    filteredPairs === configuredPairs.length &&
+    pairErrors === 0;
+  const exitCode =
+    rpcErrors > config.maxRpcErrorsPerScan || (scanned === 0 && !allPairsFiltered) ? 1 : 0;
 
+  const filteredSuffix =
+    pairSpread.mode !== "off" ? `, ${filteredPairs} pair(s) filtered by pair spread` : "";
   console.log(
     `\nDone: ${scanned} quotes checked, ${opportunities} opportunit${opportunities === 1 ? "y" : "ies"} found, ` +
-      `${executed} transaction attempt(s).`
+      `${executed} transaction attempt(s)${filteredSuffix}.`
   );
 
   try {
@@ -368,7 +611,16 @@ async function main({
     console.warn(`[GAS ANOMALY] could not persist gas sample: ${err.message}`);
   }
 
-  return { ethUsdPrice, aaveFlashLoanPremiumBps, scanned, opportunities, executed, exitCode };
+  return {
+    ethUsdPrice,
+    aaveFlashLoanPremiumBps,
+    scanned,
+    opportunities,
+    executed,
+    filteredPairs,
+    wouldFilterPairs,
+    exitCode,
+  };
 }
 
 if (require.main === module) {

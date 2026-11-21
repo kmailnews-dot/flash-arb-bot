@@ -1,10 +1,12 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const fs = require("fs");
+const fsp = require("fs/promises");
 const os = require("os");
 const path = require("path");
 const { main, readAaveFlashLoanPremium } = require("../bot/index");
 const { NETWORKS } = require("../bot/networks");
+const { buildPairKey } = require("../bot/pairSpread");
 const { reconcilePendingExecutions } = require("../bot/execute");
 const { readExecutionJournal, writeExecutionJournal } = require("../bot/persist");
 
@@ -43,6 +45,105 @@ describe("bot/index main", function () {
       executionJournalPath: path.join(tmpDir, "executions.json"),
       ...overrides,
     };
+  }
+
+  const spreadTmpDirs = [];
+
+  function makeSpreadTmpDir(prefix) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+    spreadTmpDirs.push(dir);
+    return dir;
+  }
+
+  afterEach(function () {
+    while (spreadTmpDirs.length > 0) {
+      fs.rmSync(spreadTmpDirs.pop(), { recursive: true, force: true });
+    }
+  });
+
+  function addressFromByte(byte) {
+    return `0x${byte.toString(16).padStart(2, "0").repeat(20)}`;
+  }
+
+  function makePairSpreadPair(byte, overrides = {}) {
+    const borrowed = addressFromByte(byte);
+    const intermediate = addressFromByte(byte + 1);
+    return {
+      label: `SPREAD pair ${byte}`,
+      profile: "majors",
+      minProfitBps: 30,
+      borrowedToken: { address: borrowed, decimals: 18, symbol: "BOR" },
+      intermediateToken: { address: intermediate, decimals: 18, symbol: "MID" },
+      legOut: {
+        kind: "V2",
+        router: addressFromByte(byte + 2),
+        tokenOut: intermediate,
+      },
+      legBack: {
+        kind: "V2",
+        router: addressFromByte(byte + 3),
+        tokenOut: borrowed,
+      },
+      tradeSizes: ["1000"],
+      ...overrides,
+    };
+  }
+
+  function makePairSpreadConfig(tmpDir, overrides = {}) {
+    return makeMinimalConfig(tmpDir, {
+      expectedChainId: 31337,
+      pairSpreadMode: "enforce",
+      pairSpreadPath: path.join(tmpDir, "pair_spreads.json"),
+      ...overrides,
+    });
+  }
+
+  function pairSpreadSamples(values, { now = Date.now(), stepMs = 60_000 } = {}) {
+    return values.map((value, index) => ({
+      netProfitBps: String(value),
+      at: now - (values.length - 1 - index) * stepMs,
+    }));
+  }
+
+  function writePairSpreadFile(filePath, pairs) {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(
+      filePath,
+      `${JSON.stringify({ version: 1, pairs }, null, 2)}\n`,
+      "utf8"
+    );
+  }
+
+  function readPairSpreadFile(filePath) {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  }
+
+  function scanResult(overrides = {}) {
+    return {
+      tradeSizeHuman: "1000",
+      grossProfit: 1n,
+      netProfitUsd: null,
+      isOpportunity: false,
+      amountIn: 1_000_000n,
+      netProfitBps: 0n,
+      ...overrides,
+    };
+  }
+
+  async function captureConsole(fn) {
+    const logs = [];
+    const warnings = [];
+    const originalLog = console.log;
+    const originalWarn = console.warn;
+    console.log = (...args) => logs.push(args.map(String).join(" "));
+    console.warn = (...args) => warnings.push(args.map(String).join(" "));
+    try {
+      const result = await fn();
+      return { result, logs, warnings };
+    } finally {
+      console.log = originalLog;
+      console.warn = originalWarn;
+    }
   }
 
   it("refuses to scan when the raw eth_chainId differs from expectedChainId", async function () {
@@ -616,6 +717,394 @@ describe("bot/index main", function () {
     expect(state.cycles[0].errors).to.equal(1);
     expect(state.cycles[0].total).to.equal(2);
     fs.rmSync(scanDir, { recursive: true, force: true });
+  });
+
+  it("keeps mode off free of pair-spread state I/O", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-pair-spread-off-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const corrupt = "{not valid json";
+    fs.writeFileSync(pairSpreadPath, corrupt, "utf8");
+    const pair = makePairSpreadPair(10);
+    let scans = 0;
+
+    const { result: summary, warnings } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makeMinimalConfig(tmpDir, {
+          pairs: [pair],
+          pairSpreadMode: "off",
+          pairSpreadPath,
+        }),
+        scanPair: async () => {
+          scans += 1;
+          return [scanResult({ netProfitBps: 10n })];
+        },
+      })
+    );
+
+    expect(scans).to.equal(1);
+    expect(summary.scanned).to.equal(1);
+    expect(summary.filteredPairs).to.equal(0);
+    expect(summary.exitCode).to.equal(0);
+    expect(fs.readFileSync(pairSpreadPath, "utf8")).to.equal(corrupt);
+    expect(warnings.join("\n")).to.not.include("PAIR_SPREAD_STATE");
+  });
+
+  it("logs a would-filter decision in shadow mode and still scans", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-pair-spread-shadow-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(20);
+    const key = buildPairKey({ chainId: 31337, pair });
+    writePairSpreadFile(pairSpreadPath, {
+      [key]: { samples: pairSpreadSamples([-80, -60, -40, -20, -10]) },
+    });
+    let scans = 0;
+
+    const { result: summary, logs } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, {
+          pairs: [pair],
+          pairSpreadMode: "shadow",
+          pairSpreadPath,
+        }),
+        scanPair: async () => {
+          scans += 1;
+          return [scanResult({ netProfitBps: 10n })];
+        },
+      })
+    );
+
+    expect(scans).to.equal(1);
+    expect(summary.scanned).to.equal(1);
+    expect(summary.filteredPairs).to.equal(0);
+    expect(summary.wouldFilterPairs).to.equal(1);
+    expect(summary.exitCode).to.equal(0);
+    expect(logs.join("\n")).to.include("decision=would-filter");
+    expect(logs.join("\n")).to.include("PAIR_SPREAD_BELOW_FLOOR");
+  });
+
+  it("filters a pair before scanPair in enforce mode", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-pair-spread-enforce-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(30);
+    const key = buildPairKey({ chainId: 31337, pair });
+    writePairSpreadFile(pairSpreadPath, {
+      [key]: { samples: pairSpreadSamples([-80, -60, -40, -20, -10]) },
+    });
+    let scans = 0;
+
+    const { result: summary, logs, warnings } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [pair] }),
+        scanPair: async () => {
+          scans += 1;
+          return [scanResult()];
+        },
+      })
+    );
+
+    const output = [...logs, ...warnings].join("\n");
+    expect(scans).to.equal(0);
+    expect(summary.scanned).to.equal(0);
+    expect(summary.filteredPairs).to.equal(1);
+    expect(summary.exitCode).to.equal(0);
+    expect(output).to.include(`SKIP pair=${pair.label}`);
+    expect(output).to.include("PAIR_SPREAD_BELOW_FLOOR");
+  });
+
+  it("scans a pair with insufficient samples in enforce mode", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-pair-spread-insufficient-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(40);
+    const key = buildPairKey({ chainId: 31337, pair });
+    writePairSpreadFile(pairSpreadPath, {
+      [key]: { samples: pairSpreadSamples([-80, -10]) },
+    });
+    let scans = 0;
+
+    const { result: summary, logs } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [pair] }),
+        scanPair: async () => {
+          scans += 1;
+          return [scanResult({ netProfitBps: 10n })];
+        },
+      })
+    );
+
+    expect(scans).to.equal(1);
+    expect(summary.scanned).to.equal(1);
+    expect(summary.filteredPairs).to.equal(0);
+    expect(logs.join("\n")).to.include("INSUFFICIENT_SAMPLES");
+  });
+
+  it("fails open and creates the state when the history is absent", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-pair-spread-absent-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(50);
+    const key = buildPairKey({ chainId: 31337, pair });
+    let scans = 0;
+
+    const { result: summary } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [pair] }),
+        scanPair: async () => {
+          scans += 1;
+          return [scanResult({ netProfitBps: 12n })];
+        },
+      })
+    );
+
+    expect(scans).to.equal(1);
+    expect(summary.scanned).to.equal(1);
+    expect(summary.filteredPairs).to.equal(0);
+    expect(fs.existsSync(pairSpreadPath)).to.equal(true);
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(stored.pairs[key].samples).to.have.length(1);
+    expect(stored.pairs[key].samples[0].netProfitBps).to.equal("12");
+  });
+
+  it("fails open on a corrupt state and preserves the file", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-pair-spread-corrupt-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const corrupt = "{not valid json";
+    fs.writeFileSync(pairSpreadPath, corrupt, "utf8");
+    const pair = makePairSpreadPair(60);
+    let scans = 0;
+
+    const { result: summary, warnings } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [pair] }),
+        scanPair: async () => {
+          scans += 1;
+          return [scanResult({ netProfitBps: 12n })];
+        },
+      })
+    );
+
+    expect(scans).to.equal(1);
+    expect(summary.scanned).to.equal(1);
+    expect(summary.filteredPairs).to.equal(0);
+    expect(fs.readFileSync(pairSpreadPath, "utf8")).to.equal(corrupt);
+    expect(warnings.join("\n")).to.include("PAIR_SPREAD_STATE_CORRUPT");
+  });
+
+  it("collects the best valid netProfitBps once after a scan", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-pair-spread-sample-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(70);
+    const key = buildPairKey({ chainId: 31337, pair });
+
+    const { result: summary } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [pair] }),
+        scanPair: async () => [
+          scanResult({ netProfitBps: -10n }),
+          scanResult({ netProfitBps: 25n, amountIn: 2_000_000n }),
+          scanResult({ netProfitBps: 100n, error: "DEPTH_EXCEEDED" }),
+          scanResult({ netProfitBps: null }),
+        ],
+      })
+    );
+
+    expect(summary.scanned).to.equal(4);
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(stored.pairs[key].samples).to.have.length(1);
+    expect(stored.pairs[key].samples[0].netProfitBps).to.equal("25");
+  });
+
+  it("records no sample when netProfitBps is null", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-pair-spread-null-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(80);
+
+    const { result: summary } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [pair] }),
+        scanPair: async () => [scanResult({ netProfitBps: null })],
+      })
+    );
+
+    expect(summary.scanned).to.equal(1);
+    expect(fs.existsSync(pairSpreadPath)).to.equal(false);
+  });
+
+  it("records one sample per route and cycle, keeping the best value", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-pair-spread-dedupe-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(90);
+    const duplicate = { ...pair, label: "SPREAD duplicate" };
+    const key = buildPairKey({ chainId: 31337, pair });
+    let scans = 0;
+
+    const { result: summary } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [pair, duplicate] }),
+        scanPair: async () => {
+          scans += 1;
+          return [scanResult({ netProfitBps: scans === 1 ? 10n : 20n })];
+        },
+      })
+    );
+
+    expect(scans).to.equal(2);
+    expect(summary.scanned).to.equal(2);
+    expect(summary.filteredPairs).to.equal(0);
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(stored.pairs[key].samples).to.have.length(1);
+    expect(stored.pairs[key].samples[0].netProfitBps).to.equal("20");
+  });
+
+  it("persists the pair-spread state at most once after the loop", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-pair-spread-persist-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pairA = makePairSpreadPair(100);
+    const pairB = makePairSpreadPair(110);
+    const originalRename = fsp.rename;
+    let pairSpreadWrites = 0;
+    fsp.rename = async (from, to) => {
+      if (path.resolve(to) === path.resolve(pairSpreadPath)) pairSpreadWrites += 1;
+      return originalRename.call(fsp, from, to);
+    };
+
+    let summary;
+    try {
+      ({ result: summary } = await captureConsole(() =>
+        main({
+          provider: makeMinimalProvider(),
+          config: makePairSpreadConfig(tmpDir, { pairs: [pairA, pairB] }),
+          scanPair: async ({ pair }) => [
+            scanResult({ netProfitBps: pair.label === pairA.label ? 10n : 20n }),
+          ],
+        })
+      ));
+    } finally {
+      fsp.rename = originalRename;
+    }
+
+    expect(summary.scanned).to.equal(2);
+    expect(pairSpreadWrites).to.equal(1);
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(Object.keys(stored.pairs)).to.have.length(2);
+  });
+
+  it("returns exitCode 0 when enforce filters every configured pair", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-pair-spread-all-filtered-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pairA = makePairSpreadPair(120);
+    const pairB = makePairSpreadPair(130);
+    const keyA = buildPairKey({ chainId: 31337, pair: pairA });
+    const keyB = buildPairKey({ chainId: 31337, pair: pairB });
+    writePairSpreadFile(pairSpreadPath, {
+      [keyA]: { samples: pairSpreadSamples([-80, -60, -40, -20, -10]) },
+      [keyB]: { samples: pairSpreadSamples([-90, -70, -50, -30, -20]) },
+    });
+    let scans = 0;
+
+    const { result: summary } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [pairA, pairB] }),
+        scanPair: async () => {
+          scans += 1;
+          return [scanResult()];
+        },
+      })
+    );
+
+    expect(scans).to.equal(0);
+    expect(summary.scanned).to.equal(0);
+    expect(summary.filteredPairs).to.equal(2);
+    expect(summary.exitCode).to.equal(0);
+  });
+
+  it("keeps exitCode 1 when no pair is configured", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-pair-spread-no-pairs-");
+
+    const { result: summary } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [] }),
+        scanPair: async () => [],
+      })
+    );
+
+    expect(summary.scanned).to.equal(0);
+    expect(summary.filteredPairs).to.equal(0);
+    expect(summary.exitCode).to.equal(1);
+  });
+
+  it("does not treat an independent pair error as a voluntary filter", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-pair-spread-independent-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const filteredPair = makePairSpreadPair(140);
+    const failingPair = makePairSpreadPair(150);
+    const key = buildPairKey({ chainId: 31337, pair: filteredPair });
+    writePairSpreadFile(pairSpreadPath, {
+      [key]: { samples: pairSpreadSamples([-80, -60, -40, -20, -10]) },
+    });
+    let scans = 0;
+
+    const { result: summary, warnings } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [filteredPair, failingPair] }),
+        scanPair: async ({ pair }) => {
+          scans += 1;
+          throw new Error(`independent failure for ${pair.label}`);
+        },
+      })
+    );
+
+    expect(scans).to.equal(1);
+    expect(summary.scanned).to.equal(0);
+    expect(summary.filteredPairs).to.equal(1);
+    expect(summary.exitCode).to.equal(1);
+    expect(warnings.join("\n")).to.include("independent failure");
+  });
+
+  it("rejects an invalid pair-spread mode explicitly", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-pair-spread-mode-");
+    const provider = makeMinimalProvider();
+
+    await expect(
+      main({
+        provider,
+        config: makeMinimalConfig(tmpDir, { pairSpreadMode: "bogus" }),
+        scanPair: async () => [],
+      })
+    ).to.be.rejectedWith(/PAIR_SPREAD_MODE/);
+
+    expect(provider.calls).to.deep.equal([]);
+  });
+
+  it("does not create the pair-spread state file in mode off", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-pair-spread-off-create-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(160);
+
+    const { result: summary } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makeMinimalConfig(tmpDir, {
+          pairs: [pair],
+          pairSpreadMode: "off",
+          pairSpreadPath,
+        }),
+        scanPair: async () => [scanResult({ netProfitBps: 10n })],
+      })
+    );
+
+    expect(summary.scanned).to.equal(1);
+    expect(fs.existsSync(pairSpreadPath)).to.equal(false);
   });
 });
 
