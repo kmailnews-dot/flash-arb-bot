@@ -876,4 +876,4 @@ async function reconcilePendingExecutions({ provider, config, walletAddress = nu
   return { reconciled, skipped };
 }
 
-module.exports = { execute, buildLeg, errorMessage, reconcilePendingExecutions };
+module.exports = { execute, buildLeg, errorMessage, reconcilePendingExecutions, getNonceManager };

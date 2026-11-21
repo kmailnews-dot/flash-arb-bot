@@ -4,6 +4,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { maybeExecute, gasCostInBorrowedToken, buildFeeOverrides } = require("../bot/executor");
+const { getNonceManager } = require("../bot/execute");
 const { FLASH_ARB_EXECUTOR_ABI } = require("../bot/abis");
 const { writeExecutionJournal } = require("../bot/persist");
 
@@ -592,6 +593,64 @@ describe("bot/executor maybeExecute", function () {
     }
 
     expect(fs.existsSync(breakerPath)).to.equal(false);
+  });
+
+  it("resynchronizes the nonce manager when estimateGas fails with NONCE_EXPIRED (F-05-C-bis)", async function () {
+    const { botWallet, opportunity, makeConfig } = await deployFixture();
+    let pendingCount = 5;
+    const fakeProvider = { getTransactionCount: async () => pendingCount };
+
+    // Empoisonne le cache : next() lit 5 puis le cache passe à 6.
+    const manager = await getNonceManager({ provider: fakeProvider, address: botWallet.address });
+    const reserved = await manager.next();
+    expect(reserved).to.equal(5);
+
+    // La chaîne a avancé : le pending réel est désormais 7.
+    pendingCount = 7;
+
+    const nonceExpiredError = new Error("nonce has expired");
+    nonceExpiredError.code = "NONCE_EXPIRED";
+    const { contract } = makeSpyContract({ estimateGasError: nonceExpiredError });
+
+    const result = await maybeExecute({
+      opportunity,
+      provider: fakeProvider,
+      config: makeConfig(),
+      contract,
+    });
+
+    expect(result.submitted).to.equal(false);
+    expect(result.error).to.include("nonce has expired");
+    // F-05-C-bis : le cache a été resynchronisé depuis le RPC (7), pas laissé à 6.
+    expect(manager.peek()).to.equal(7);
+  });
+
+  it("does not resynchronize the nonce manager for other estimateGas failures", async function () {
+    const { botWallet, opportunity, makeConfig } = await deployFixture();
+    let pendingCount = 5;
+    const fakeProvider = { getTransactionCount: async () => pendingCount };
+
+    const manager = await getNonceManager({ provider: fakeProvider, address: botWallet.address });
+    const reserved = await manager.next();
+    expect(reserved).to.equal(5);
+
+    pendingCount = 7;
+
+    const { contract } = makeSpyContract({
+      estimateGasError: new Error("execution reverted: NOT_PROFITABLE"),
+    });
+
+    const result = await maybeExecute({
+      opportunity,
+      provider: fakeProvider,
+      config: makeConfig(),
+      contract,
+    });
+
+    expect(result.submitted).to.equal(false);
+    expect(result.error).to.include("NOT_PROFITABLE");
+    // Sans NONCE_EXPIRED, aucun reset : le cache reste à 6.
+    expect(manager.peek()).to.equal(6);
   });
 
   it("does not send a transaction when estimateGas exceeds MAX_GAS_LIMIT", async function () {

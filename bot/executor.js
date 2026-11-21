@@ -9,7 +9,7 @@ const {
   gasCostInBorrowedToken,
   buildFeeOverrides,
 } = require("./pricing");
-const { execute, buildLeg, errorMessage } = require("./execute");
+const { execute, buildLeg, errorMessage, getNonceManager } = require("./execute");
 const { decide } = require("./decide");
 const { createThrottle, withThrottle } = require("./throttle");
 const { withTimeout } = require("./timeout");
@@ -120,6 +120,16 @@ async function maybeExecute({
       ).result;
     } catch (err) {
       const message = errorMessage(err);
+      // F-05-C-bis : un NONCE_EXPIRED pendant estimateGas signale un cache de nonce
+      // périmé. Sans reset, le prochain next() de execute.js réutiliserait ce cache
+      // jusqu'à épuisement ou redémarrage du process.
+      if (err?.code === "NONCE_EXPIRED" && typeof provider.getTransactionCount === "function") {
+        await getNonceManager({ provider, address: wallet.address })
+          .then((manager) => manager.reset())
+          .catch((resetErr) => {
+            console.warn(`  [NONCE WARNING] could not reset nonce manager: ${resetErr.message}`);
+          });
+      }
       console.log(`  [SKIP FREE] gas estimation failed: ${message} - transaction not sent.`);
       return { submitted: false, simulated: false, error: message };
     }
