@@ -112,7 +112,7 @@ historique de la matrice initiale.
 | P1-18 | À FAIRE | — | multi-hop |
 | P1-10-bis | FERMÉ | 2d2f34a | adaptive par profil : effectiveMaxTradeSize {majors,longtail}, applyAdaptive conscient du profil, gestion logSweep |
 | P1-10-bis-logSweep | FERMÉ | 2d2f34a | applyAdaptive traite désormais pair.logSweep (facteur appliqué, clamp au cap du profil) |
-| P1-16-bis | NON PLANIFIÉ | — | écart médian dynamique |
+| P1-16-bis | FERMÉ | — | écart médian dynamique : `bot/pairSpread.js` + `bot/pairSpreadStore.js` intégrés dans `bot/index.js` et `bot/config.js` (`PAIR_SPREAD_*`) ; tests ciblés verts, non commité |
 | P1-10-ter | FERMÉ | bc182c4 | cap maxTradeSizeUsd (500 majors, 2000 longtail) + fallback token units. Validé en réel : tailles 10/50/100/500 USDC passent validatePairs et applyAdaptive sans écrasement. |
 
 ## Suivi D0–D12 (issus de l'audit)
@@ -205,21 +205,11 @@ strictement inchangé.
 
 ### Dette F-05-C-bis — resynchronisation sur `NONCE_EXPIRED`
 
-**Statut** : ouverte.
-
-**Cas réel** : catch d'envoi `execute.js:402` (branche
-`REJECTED_BEFORE_ACCEPTANCE`) et catch `estimateGas`
-`executor.js:110-124`.
-
-**Impact** : en cas de nonce désynchronisé (rare), le prochain
-`next()` utilise l'ancien cache jusqu'à épuisement ou
-redémarrage. Fail-closed : `startArbitrage` échoue avec
-`NONCE_EXPIRED`, réservation libérée, breaker non incrémenté.
-Le prochain démarrage du process resynchronise.
-
-**Correctif futur** : ajouter `manager.reset()` dans le catch
-`REJECTED_BEFORE_ACCEPTANCE` quand `err.code === "NONCE_EXPIRED"`,
-avec un test discriminant.
+**Statut** : fermée. Le catch d'envoi (`bot/execute.js`) appelle
+`manager.reset()` sur `NONCE_EXPIRED`/`REPLACEMENT_UNDERPRICED` ;
+le catch `estimateGas` (`bot/executor.js`) appelle `manager.reset()`
+sur `NONCE_EXPIRED` (fail-soft, log `[NONCE WARNING]`). Test
+discriminant dans `test/BotExecutor.test.js`.
 
 ### Dette F-05-C-ter — réconciliation du nonce managé avec le journal
 
@@ -283,11 +273,11 @@ Mise à jour P1-10-ter (3 novembre 2026) : le cap maxTradeSizeUsd est validé en
 
 Statut : audité, sain. 0 critique, 0 majeur, 4 mineurs, 5 risques potentiels.
 
-### Défauts mineurs (acceptés, non corrigés)
+### Défauts mineurs (M2–M4 acceptés ; M1 corrigé par M1-bis)
 
 | # | Fichier | Problème | Décision |
 |---|---|---|---|
-| M1 | bot/guards.js:218,278,302,328 | Sous-conditions du breaker en fail-open partiel (catch → warn → continue) si les fichiers d'état sont illisibles. readState lève sur corruption, ce qui fail-closed via runGuard. | Accepté : le trou est théorique, la corruption est rare (écriture atomique tmp+rename). |
+| M1 | bot/guards.js (checkCircuitBreaker) | Sous-conditions du breaker en fail-open partiel (catch → warn → continue) si les fichiers d'état sont illisibles. readState lève sur corruption, ce qui fail-closed via runGuard. | Corrigé par M1-bis (voir ci-dessous) : les erreurs de lecture remontent à runGuard ; le fail-open est limité aux schémas invalides explicitement documentés de rpc_errors.json / gas_history.json. |
 | M2 | bot/scanner.js:347-366 | Le re-quote de la taille interpolée contourne QUOTE_STALE et quoteEntryDepth. Stalence théorique (re-quote immédiat), profondeur bornée par la monotonie des AMM standards. | Accepté : risque borné, re-quote immédiat. |
 | M3 | bot/pricing.js:34-41 | gasCostInBorrowedToken (branche isWeth) exige ethUsdPrice valide alors qu'il n'est pas utilisé. Fail-closed, réduit la disponibilité. | Accepté : sans effet en pratique (MIN_PROFIT_USD exige déjà ethUsdPrice). |
 | M4 | bot/nonce.js:58-78 | bump() est du code mort (jamais appelé). | Accepté : préparé pour un futur mécanisme de replacement de transaction. |
@@ -308,6 +298,63 @@ Contrat (onlyOwner + nonReentrant + whenNotPaused, CALLER_NOT_POOL, UNTRUSTED_IN
 
 ### Décision
 
-Le refactor DeepSeek est sain. Les 4 défauts mineurs (M1–M4) et les 5 risques (R1–R5) sont acceptés et documentés. Aucune correction n'est appliquée : ils sont théoriques, bornés, ou sans effet en pratique. Le bot est stable, testé, documenté.
+Le refactor DeepSeek est sain. M1 a été corrigé par M1-bis (voir ci-dessous). Les défauts M2–M4 et les 5 risques (R1–R5) restent acceptés et documentés : ils sont théoriques, bornés, ou sans effet en pratique. Le bot est stable, testé, documenté.
 
 G1 économique : non concluant. Les paires testées (WETH/USDC, WETH/ARB, WETH/WBTC, USDT0, DAI) ont des spreads négatifs. Le marché est efficace. Aucune opportunité nette positive capturable avec l'infrastructure actuelle (GitHub Actions, RPC public, pas de mempool privé).
+
+---
+
+## M1-bis — fail-closed du breaker sur état corrompu ou illisible
+
+**Statut** : corrigé, en attente de validation (non commité).
+
+**Défaut confirmé (M1)** : `checkCircuitBreaker`
+(`bot/guards.js`) avalait les erreurs de lecture :
+
+- journal d'exécution : `listRecentTerminalExecutions(...).catch(() => [])` ;
+- gas drawdown, RPC error rate et gas anomaly : `catch → console.warn → continue`.
+
+Un `rpc_errors.json`, `gas_history.json` ou `executions.json`
+corrompu ou illisible laissait donc le breaker fermé (fail-open),
+contrairement aux ADR 0004/0005 et à `bot/ARCHITECTURE.md`.
+`gas_spent.json` était déjà protégé en fail-closed par
+`checkDailyGas` (appelé sous `runGuard` avant l'envoi) ; seul le
+sous-contrôle gas-drawdown du breaker avalait l'erreur, sans effet
+pratique sur l'envoi puisque le guard daily gas bloquait déjà.
+Avant correction, le test discriminant
+`test/BotExecutor.test.js` (« blocks the send when a breaker state
+file is corrupt (M1-bis) ») observait un envoi réel.
+
+**Correction** :
+
+- suppression des catch qui convertissaient une erreur de lecture en
+  « ok » ; les erreurs de lecture et les erreurs internes inattendues
+  remontent à `runGuard` et bloquent l'envoi ;
+- `STATE_FILE_UNREADABLE` ajouté pour les erreurs d'E/S, avec code et
+  chemin du fichier ;
+- `STATE_FILE_SCHEMA_INVALID` explicite pour les entrées malformées de
+  `rpc_errors.json` / `gas_history.json` ; ce cas seul reste fail-open,
+  comme documenté dans les ADR 0004/0005 ;
+- validation de schéma renforcée et fail-closed pour
+  `circuit_breaker.json` (`openUntil` fini, non négatif et dans la plage
+  `Date`) et `gas_spent.json` (date UTC calendaire réelle) ;
+- fail-open documenté conservé pour fichier absent (ENOENT) ; un
+  fichier vide est un JSON invalide, donc `STATE_FILE_CORRUPT` et
+  fail-closed ;
+- `executions.json` reste fail-closed sur schéma invalide
+  (`bot/persist.js`) ;
+- seuils RPC et gaz inchangés.
+
+**Tests** : 18 tests guards M1-bis (corruption des 4 fichiers, EACCES,
+EISDIR, fichiers absents, schémas invalides documentés ou non,
+entrées malformées, `openUntil` hors plage `Date`, date `gas_spent`
+impossible, erreurs internes non masquées) + 1 test executor de
+blocage effectif de l'envoi. `npx hardhat test test/BotGuards.test.js
+test/BotExecutor.test.js` : 119 passing, 0 failing.
+
+**Limites** : les entrées malformées à l'intérieur de
+`rpc_errors.json` / `gas_history.json` restent tolérées (fail-open
+documenté sur schéma invalide) et ne bloquent pas le breaker ; les
+erreurs de lecture et les erreurs internes inattendues de ces mêmes
+fichiers, elles, bloquent. Un `openUntil` hors plage ou une date
+`gas_spent.json` impossible sont traités comme corruption d'état.

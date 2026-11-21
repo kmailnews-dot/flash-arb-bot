@@ -13,14 +13,22 @@ d'environnement est `bot/config.js`. Les références sont volontairement des po
 2. `main()` (`bot/index.js`) charge la config et crée le provider (réseau statique quand
    `EXPECTED_CHAIN_ID` est défini). Il lit d'abord le chainId réel via un seul `eth_chainId` brut
    et refuse le cycle s'il diffère de `EXPECTED_CHAIN_ID`, **avant** la réconciliation du journal
-   et tout scan. Il lit ensuite en parallèle `feeData`, le prix ETH/USD et le numéro de bloc du
+   et tout scan. Si `PAIR_SPREAD_MODE` vaut `shadow` ou `enforce`, il charge ensuite une seule
+   fois `logs/pair_spreads.json` avec un `now` de cycle ; en `off`, aucun I/O d'état n'est effectué.
+   Il lit ensuite en parallèle `feeData`, le prix ETH/USD et le numéro de bloc du
    cycle. Le premium Aave est relu on-chain.
-3. Pour chaque paire, `scanPair()` (`bot/scanner.js`) quote les tailles sur un `blockTag` unique
+3. Avant chaque paire, `decidePairSpread()` (`bot/pairSpread.js`) évalue l'historique avec
+   `pair.minProfitBps` uniquement. En `shadow`, la décision est journalisée et la paire est
+   scannée ; en `enforce`, une décision `skip` journalise `PAIR_SPREAD_BELOW_FLOOR`, incrémente
+   `filteredPairs` et passe à la paire suivante sans `scanPair` ni entrée `scans.jsonl`. Sinon,
+   `scanPair()` (`bot/scanner.js`) quote les tailles sur un `blockTag` unique
    fourni par le cycle. La quote d'entrée complète sert à la fois au contrôle de profondeur et à
    `scanTradeSize()` : 3 appels RPC pour une taille retenue (entrée pleine, entrée moitié, sortie)
    au lieu de 4. Les tailles sont scannées par ordre croissant ; dès qu'une taille dépasse la
    profondeur, toutes les tailles supérieures sont marquées `DEPTH_EXCEEDED` sans RPC. Chaque
-   résultat est persisté dans `scans.jsonl` avant de choisir le meilleur.
+   résultat est persisté dans `scans.jsonl` avant de choisir le meilleur. En `shadow`/`enforce`,
+   un seul échantillon par clé et par cycle est ensuite retenu via `bestNetProfitBps(results)` ;
+   une paire filtrée, une erreur ou un `netProfitBps` `null` ne produit aucun échantillon.
 4. Le scanner calcule un `netProfit` exact en unités du token emprunté (BigInt) : profit brut
    moins le gaz, lui-même converti avec le multiplicateur L1 (`l1CostMultiplierBps`). Une
    opportunité doit passer le plancher `effectiveMinProfitBps` sur le net, le plancher USD
@@ -28,21 +36,21 @@ d'environnement est `bot/config.js`. Les références sont volontairement des po
    `isOpportunity`, `main()` appelle `maybeExecute()`. En `DRY_RUN`, `maybeExecute()` logge et
    s'arrête. Sinon il vérifie les secrets, estime le gaz, re-quote, appelle `decide()` puis
    `execute()`.
-5. `execute()` (`bot/execute.js:129`) applique les guards, fait le `staticCall`, réserve le gaz,
-   revérifie le breaker, envoie, attend le receipt et réconcilie le gaz (`bot/execute.js:182-336`).
+5. `execute()` (`bot/execute.js:236`) applique les guards, fait le `staticCall`, réserve le gaz,
+   revérifie le breaker, envoie, attend le receipt et réconcilie le gaz (`bot/execute.js:236-798`).
    L'état d'exécution (gaz, breaker) est persisté par `guards.js`, pas par `persist.js`.
 
 Le flux nominal « `scanPair()` → `decide()` → `execute()` → `persist()` » est donc réparti :
 `decide()` est appelé dans `maybeExecute()`, `persist.js` journalise les scans avant l'exécution,
-et l'état d'exécution est persisté par `guards.js` (`bot/guards.js:123-181`).
+et l'état d'exécution est persisté par `guards.js` (`bot/guards.js:159-235`).
 
 ### Processus persistant
 
-`run()` (`bot/run.js:57-157`) crée le provider (WebSocket si URL `ws(s)`, sinon JSON-RPC polling,
-`bot/run.js:22-42`), démarre immédiatement un cycle (`bot/run.js:146`), puis replanifie un
-`setTimeout` à la fin de chaque cycle (`bot/run.js:88-104`). Chaque cycle appelle
-`main({ provider, config })` (`bot/run.js:92`). `SIGTERM`/`SIGINT` attendent le cycle en cours puis
-ferment le provider (`bot/run.js:112-144`).
+`run()` (`bot/run.js:75-185`) crée le provider (WebSocket si URL `ws(s)`, sinon JSON-RPC polling,
+`bot/run.js:24-60`), démarre immédiatement un cycle (`bot/run.js:169-174`), puis replanifie un
+`setTimeout` à la fin de chaque cycle (`bot/run.js:103-127`). Chaque cycle appelle
+`main({ provider, config })` (`bot/run.js:115`). `SIGTERM`/`SIGINT` attendent le cycle en cours puis
+ferment le provider (`bot/run.js:135-167`).
 
 ```
 scan.yml (cron */5 min, DRY_RUN=true)
@@ -70,9 +78,11 @@ bot/run.js run() (process persistant)
 | `bot/prices.js` | Quotes DEX V2 (`getAmountsOut`) et V3 (QuoterV2) | `quoteLeg` | `ethers`, `abis` |
 | `bot/persist.js` | Journal JSONL des scans + formatage des logs | `appendScanResult`, `logEvent` | `fs/promises`, `path`, `sanitizeError` |
 | `bot/scanner.js` | Scan des paires/tailles, profondeur, profit net exact (BigInt), prix ETH/USD | `scanPair`, `scanTradeSize`, `getEthUsdPrice` | `ethers`, `prices`, `pricing`, `sanitizeError`, `minProfitUsd` |
-| `bot/index.js` | Un cycle complet (`main`) | `main` | `ethers`, `scanner`, `executor`, `persist`, `networks`, `guards`, `config` (lazy) |
+| `bot/index.js` | Un cycle complet (`main`) | `main` | `ethers`, `scanner`, `executor`, `persist`, `networks`, `guards`, `config` (lazy), `pairSpread`, `pairSpreadStore` |
 | `bot/run.js` | Boucle persistante et gestion provider/signaux | `run` | `ethers`, `index` |
 | `bot/adaptive.js` | Seuils adaptatifs bornés (MIN_PROFIT_BPS, taille de trade), historique | `loadAdaptive`, `recordOutcome`, `applyAdaptive` | `fs/promises`, `path` |
+| `bot/pairSpread.js` | Décision pure de viabilité d'une paire : clé stable, fenêtre, médiane BigInt, échantillon | `decidePairSpread`, `buildPairKey`, `bestNetProfitBps` | aucune |
+| `bot/pairSpreadStore.js` | État `logs/pair_spreads.json` : chargement, validation, écriture atomique | `loadPairSpreadState`, `recordPairSpreadSamples` | `fs/promises`, `path`, `crypto`, `pairSpread` |
 | `bot/resilient.js` | Classification d'erreur + retry borné + backoff | `classifyError`, `shouldRetry`, `backoffMs` | aucune |
 | `bot/throttle.js` | Sérialisation RPC + intervalle minimum + stats | `createThrottle`, `withThrottle`, `getStats` | aucune |
 | `bot/netproxy.js` | Proxy SOCKS5 minimal (sans dépendance) + fabrique provider JSON-RPC ; réseau statique si `chainId` fourni, proxy si `RPC_PROXY_URL` défini | `createJsonRpcProvider` | `ethers`, `net`, `tls` |
@@ -86,36 +96,45 @@ bot/run.js run() (process persistant)
 
 - **Un SKIP ne modifie jamais le breaker.** Les sorties sans envoi (owner, breaker initial,
   chaîne, balance, `staticCall`, daily gas, réservation, breaker final) retournent directement,
-  sans `recordFailure` : `bot/execute.js:188-191`, `196-199`, `204-207`, `216-219`, `231-238`,
-  `247-250`, `257-259`, `264-267`. `recordFailure` n'apparaît qu'après une tentative d'envoi :
-  `bot/execute.js:280-292`, `303-335`.
+  sans `recordFailure` : `bot/execute.js:307-310`, `333-336`, `341-344`, `353-356`, `377-382`,
+  `391-394`, `401-403`, `426-431`. `recordFailure` n'apparaît qu'après une tentative d'envoi :
+  `bot/execute.js:455-543`, `654-690`.
 - **Un SEND ambigu incrémente le breaker.** Envoi dont l'issue est inconnue :
-  `bot/execute.js:290-292`. Timeout ou receipt absent : `timeoutWaitReceiptError`
-  (`bot/execute.js:93-112`), catch de confirmation (`bot/execute.js:313-335`) et `recordFailureSafely`
-  avant la recherche tardive (`bot/execute.js:323-332`).
+  `bot/execute.js:522-543`. Timeout ou receipt absent : `timeoutWaitReceiptError`
+  (`bot/execute.js:165-173`), catch de confirmation (`bot/execute.js:654-688`) et `recordFailureSafely`
+  avant la recherche tardive (`bot/execute.js:690-774`).
 - **La réservation de gaz utilise `maxFeePerGas` si présent, sinon `gasPrice`.**
   `buildFeeOverrides` privilégie `maxFeePerGas` + `maxPriorityFeePerGas`
-  (`bot/pricing.js:36-46`), sinon `gasPrice` (`bot/pricing.js:48-51`). `decide()` retient
-  `maxFeePerGas ?? gasPrice` et calcule `gasCostWei` (`bot/decide.js:70-72`) ; `execute()` réserve
-  ce montant avant l'envoi (`bot/execute.js:252-256`).
+  (`bot/pricing.js:46-56`), sinon `gasPrice` (`bot/pricing.js:58-61`). `decide()` retient
+  `maxFeePerGas ?? gasPrice` et calcule `gasCostWei` (`bot/decide.js:72-74`) ; `execute()` réserve
+  ce montant avant l'envoi (`bot/execute.js:396-400`).
 - **Le breaker est revérifié juste avant `startArbitrage`.** Check final
-  `bot/execute.js:261-267`, puis envoi `bot/execute.js:274-279`.
+  `bot/execute.js:405-431`, puis envoi `bot/execute.js:444-454`.
 - **`execute` ne décide pas, il exécute une `Decision` déjà prise.** Il reçoit `decision`
-  (`bot/execute.js:129-137`) et consomme `decision.gasFloor`, `decision.gasCostWei`,
-  `decision.gasPriceWei`, `decision.feeOverrides` (`bot/execute.js:221-227`, `269-272`) ; la
-  décision est prise en amont (`bot/executor.js:153-179`).
+  (`bot/execute.js:236-244`) et consomme `decision.gasFloor`, `decision.gasCostWei`,
+  `decision.gasPriceWei`, `decision.feeOverrides` (`bot/execute.js:358-366`, `387-399`,
+  `433-436`) ; la décision est prise en amont (`bot/executor.js:215-220`).
 - **`decide` ne fait aucun I/O.** Imports limités à `minProfitUsd` et `pricing`
-  (`bot/decide.js:1-8`) ; fonction pure (`bot/decide.js:273-281`), aucun provider ni accès disque.
-- **`pricing` ne fait aucun I/O.** Aucun import ; uniquement de l'arithmétique `bigint`
-  (`bot/pricing.js:1-64`).
+  (`bot/decide.js:1-8`) ; fonction pure (`bot/decide.js:285-293`), aucun provider ni accès disque.
+- **`pricing` ne fait aucun I/O.** Aucun import ; uniquement de l'arithmétique pure
+  (`bot/pricing.js:1-162`).
 - **Les guards fail-closed retournent `{ ok: false }` et bloquent l'envoi.** Contrat documenté
-  `{ ok: true }` / `{ ok: false, error }` (`bot/guards.js:28-29`) ; `runGuard` convertit toute
-  exception en `{ ok: false }` (`bot/execute.js:44-51`) et chaque échec retourne avant l'envoi
-  (ex. `bot/execute.js:188-191`, `204-207`, `216-219`).
+  `{ ok: true }` / `{ ok: false, error }` (`bot/guards.js`) ; `runGuard` convertit toute
+  exception en `{ ok: false }` (`bot/execute.js:116-124`) et chaque échec retourne avant l'envoi
+  (ex. `bot/execute.js:307-310`, `333-336`, `341-344`).
+- **Le breaker propage les erreurs de lecture (M1-bis).** `checkCircuitBreaker` n'avale plus
+  les erreurs du journal d'exécution (`listRecentTerminalExecutions`) ni des sous-contrôles
+  gas-drawdown, RPC error rate et gas anomaly : un JSON corrompu (`STATE_FILE_CORRUPT`) ou un
+  fichier illisible (`STATE_FILE_UNREADABLE`, avec code et chemin) remonte jusqu'à `runGuard`,
+  qui retourne `{ ok: false }` et bloque l'envoi. Un fichier absent garde le fallback documenté
+  (ENOENT → état neutre). Un schéma invalide de `rpc_errors.json` / `gas_history.json` reste
+  fail-open (`STATE_FILE_SCHEMA_INVALID`, ADR 0004/0005) ; les autres erreurs, y compris
+  internes, remontent. `circuit_breaker.json` et `gas_spent.json` sont validés et fail-closed,
+  comme `executions.json` (`bot/persist.js`).
 - **L'adaptive est borné.** `effectiveMinProfitBps` reste dans
   `[minProfitBps, min(minProfitBps * 2, 10000)]`, et `effectiveMaxTradeSize` dans
   `[0.10, 1.00]`. Un `logs/adaptive.json` corrompu ne peut pas sortir de ces bornes :
-  `bot/adaptive.js:4-11`, `20-40`, `84-98`, `154-182`.
+  `bot/adaptive.js:4-12`, `19-43`, `84-97`, `139-178`, `203-264`.
 - **Le plafond de profondeur (0,5 %) est vérifié par quote d'impact dans `scanPair`
   (`bot/scanner.js`). Aucune quote au-delà du plafond n'est émise.**
 - **Profils par paire (P1-10).** Chaque paire doit déclarer
@@ -155,126 +174,155 @@ bot/run.js run() (process persistant)
   `next()` de chaque manager. Réf. : `bot/nonce.js`,
   `bot/execute.js` (`getNonceManager`, `nonceOverride`),
   `docs/adr/0001-nonce-manager.md`.
-- **La resynchronisation sur `NONCE_EXPIRED` n'est pas faite en
-  3c (F-05-C-bis).** Le catch d'envoi
-  (`REJECTED_BEFORE_ACCEPTANCE`, `bot/execute.js:402`) libère la
-  réservation et n'incrémente pas le breaker, mais n'appelle pas
-  `manager.reset()`. Le catch `estimateGas`
-  (`bot/executor.js:110-124`) est hors périmètre. Impact :
-  fail-closed (le prochain `startArbitrage` échoue avec
-  `NONCE_EXPIRED`, réservation libérée), et le prochain
-  démarrage du process resynchronise. Ticket `F-05-C-bis`.
+- **La resynchronisation sur `NONCE_EXPIRED` est faite (F-05-C-bis).**
+  Le catch d'envoi (`bot/execute.js`) appelle `manager.reset()` sur
+  `NONCE_EXPIRED` ou `REPLACEMENT_UNDERPRICED` avant tout autre
+  traitement. Le catch `estimateGas` (`bot/executor.js`) appelle
+  aussi `manager.reset()` sur `NONCE_EXPIRED` (fail-soft : un
+  échec de reset ne masque pas l'erreur initiale, log
+  `[NONCE WARNING]`). Test discriminant : `test/BotExecutor.test.js`
+  (« resynchronizes the nonce manager when estimateGas fails with
+  NONCE_EXPIRED »). Le cache reste périmé entre les deux si le
+  reset lui-même échoue ; le prochain démarrage du process
+  resynchronise.
 - **Le retry est borné.** `shouldRetry` ne retente que les erreurs `TRANSIENT`, strictement sous
   `maxAttempts` (défaut 3), avec un backoff exponentiel plafonné à 4 s :
-  `bot/resilient.js:1-3`, `19-30`, `84-104`.
+  `bot/resilient.js:1-3`, `119-139`.
 - **Le throttle est par instance.** Deux `createThrottle` distincts n'interfèrent pas. Les appels
   sur le même throttle sont strictement sérialisés et espacés d'au moins `minIntervalMs`
   (défaut 250 ms) : `bot/throttle.js:1-2`, `4`, `20-42`, `44-78`.
 - **`resilient` est intégré dans `waitForReceipt`.** Les erreurs `TRANSIENT`
   (ETIMEDOUT, ECONNRESET, RATE_LIMITED, ...) sont retentées avec un backoff borné (1 s puis 2 s)
   avant de propager la dernière erreur. `TIMEOUT_WAIT_RECEIPT` reste court-circuité. Réf. :
-  `bot/execute.js:126-145`, `bot/resilient.js:1-3`, `:84-113`.
+  `bot/execute.js:179-198`, `bot/resilient.js:1-3`, `:119-139`.
 - **`throttle` est intégré par module.** Un throttle dédié par module (`scanner`, `execute`,
   `executor`, `main`), créé paresseusement à la première utilisation avec
   `THROTTLE_MIN_INTERVAL_MS` (défaut 250 ms). Deux throttles distincts restent indépendants. Réf. :
-  `bot/scanner.js:7-17`, `bot/execute.js:27-37`, `bot/executor.js:16-26`, `bot/index.js:17-27`.
+  `bot/scanner.js:17-27`, `bot/execute.js:57-67`, `bot/executor.js:19-29`, `bot/index.js:19-29`.
 - **`adaptive` ajuste la config par cycle.** `loadAdaptive` lit `logs/adaptive.json`,
   `applyAdaptive` produit un `cycleConfig` distinct, `recordOutcome` n'est appelé qu'hors
-  `DRY_RUN`. Réf. : `bot/index.js:109-140`, `:256-275`.
+  `DRY_RUN`. Réf. : `bot/index.js:123-151`, `:309-328`.
+- **Le filtre pair-spread est fail-open et borné (P1-16-bis).** En mode `off`, aucun I/O sur
+  `logs/pair_spreads.json`. En `shadow`/`enforce`, l'état est chargé une seule fois après la
+  vérification du chainId, avec un `now` unique ; une erreur de chargement laisse le cycle
+  continuer avec un historique vide. `decidePairSpread()` ne compare que `pair.minProfitBps`
+  (jamais `effectiveMinProfitBps`) et ne saute une paire qu'en `enforce`. Après un scan réussi,
+  `bestNetProfitBps()` retient au plus un échantillon par clé et par cycle. L'état est écrit au
+  plus une fois après la boucle, jamais s'il est corrompu, illisible ou d'une version inconnue.
+  Réf. : `bot/pairSpread.js`, `bot/pairSpreadStore.js`, `bot/index.js` (`resolvePairSpreadSettings`,
+  `pairSpreadNow`, boucle des paires, persistance finale), ADR 0006 D6–D14.
+- **Exit code D13 : un cycle entièrement filtré est un succès volontaire.** Si `enforce` filtre
+  toutes les paires configurées sans erreur indépendante, `exitCode` vaut `0` ; sinon le
+  comportement `scanned === 0 → 1` est conservé (aucune paire, zéro scan non volontaire, refus
+  chainId, erreur de paire ou seuil RPC). Une paire filtrée n'écrit pas dans `scans.jsonl` et
+  n'incrémente pas `scanned`. Réf. : `bot/index.js` (`allPairsFiltered`, `filteredPairs`),
+  ADR 0006 D13.
 - **Les chemins d'état sont absolus et ancrés sur le module.** `gasSpentPath`,
   `circuitBreakerPath`, `DEFAULT_SCAN_LOG_PATH` et `DEFAULT_ADAPTIVE_PATH` dérivent de
-  `path.resolve(__dirname, "..", "logs")` (`bot/guards.js:5-7`, `bot/persist.js:5-6`,
-  `bot/adaptive.js:11-12`). `writeState` écrit un temporaire, appelle `fh.sync()` puis `rename`
-  (`bot/guards.js:25-34`). `readState` renvoie le fallback sur `ENOENT` et convertit une
-  `SyntaxError` en `STATE_FILE_CORRUPT` (`bot/guards.js:13-22`).
+  `path.resolve(__dirname, "..", "logs")` (`bot/guards.js:9-13`, `bot/persist.js:5-6`,
+  `bot/adaptive.js:13-14`). `writeState` écrit un temporaire, appelle `fh.sync()` puis `rename`
+  (`bot/guards.js:78-89`). `readState` renvoie le fallback sur `ENOENT`, convertit une
+  `SyntaxError` en `STATE_FILE_CORRUPT` et enveloppe les autres erreurs d'E/S en
+  `STATE_FILE_UNREADABLE` avec le chemin du fichier (`bot/guards.js:66-76`).
 - **Un rejet certain avant broadcast est non ambigu.** Dans le catch de `startArbitrage`
-  (`bot/execute.js:326-347`), `REJECTED_BEFORE_ACCEPTANCE` (`INSUFFICIENT_FUNDS`, `NONCE_EXPIRED`,
-  `REPLACEMENT_UNDERPRICED`, `INVALID_ARGUMENT` ; `bot/execute.js:24-37`) libère la réservation
-  (`bot/execute.js:337-342`) et n'incrémente pas le breaker. Toute autre erreur reste ambiguë :
-  réservation conservée, `recordFailureSafely` appelé, `submitted: true` (`bot/execute.js:344-346`).
-  La libération s'applique aussi au breaker final après réservation (`bot/execute.js:306-313`).
+  (`bot/execute.js:455-543`), `REJECTED_BEFORE_ACCEPTANCE` (`INSUFFICIENT_FUNDS`, `NONCE_EXPIRED`,
+  `REPLACEMENT_UNDERPRICED`, `INVALID_ARGUMENT` ; `bot/execute.js:47-52`) libère la réservation
+  (`bot/execute.js:512-520`) et n'incrémente pas le breaker. Toute autre erreur reste ambiguë :
+  réservation conservée, `recordFailureSafely` appelé, `submitted: true` (`bot/execute.js:522-543`).
+  La libération s'applique aussi au breaker final après réservation (`bot/execute.js:426-431`).
   La branche `if (err.receipt)` est défensive : mocks uniquement, pas de receipt sur
-  `sendTransaction` en ethers v6 (`bot/execute.js:329-335`).
+  `sendTransaction` en ethers v6 (`bot/execute.js:467-510`).
 
 ## Les typedefs
 
-Contrat de types : `bot/domain.js` (aucun export runtime, `bot/domain.js:172`).
+Contrat de types : `bot/domain.js` (aucun export runtime, `bot/domain.js:215`).
 
-- `Token` — `bot/domain.js:1`
-- `Leg` — `bot/domain.js:11`
-- `Pair` — `bot/domain.js:21`
-- `Opportunity` — `bot/domain.js:32`
-- `FeeData` — `bot/domain.js:53`
-- `ReQuote` — `bot/domain.js:61`
-- `Pricing` — `bot/domain.js:71`
-- `Decision` — `bot/domain.js:79`
-- `ExecutionResult` — `bot/domain.js:102`
-- `ScanResult` — `bot/domain.js:115`
-- `Config` — `bot/domain.js:120`
-- `AdaptiveState` — `bot/domain.js:151`
-- `ErrorClass` — `bot/domain.js:159`
-- `ThrottleStats` — `bot/domain.js:164`
+- `Token` — `bot/domain.js:3`
+- `Leg` — `bot/domain.js:13`
+- `Pair` — `bot/domain.js:23`
+- `Opportunity` — `bot/domain.js:35`
+- `FeeData` — `bot/domain.js:63`
+- `ReQuote` — `bot/domain.js:71`
+- `Pricing` — `bot/domain.js:81`
+- `Decision` — `bot/domain.js:89`
+- `ExecutionResult` — `bot/domain.js:131`
+- `ScanResult` — `bot/domain.js:160`
+- `Config` — `bot/domain.js:165`
+- `AdaptiveState` — `bot/domain.js:196`
+- `ErrorClass` — `bot/domain.js:204`
+- `ThrottleStats` — `bot/domain.js:209`
 
 ## Les points d'entrée
 
-- `bot/index.js` : un cycle (`main`, `bot/index.js:84`), CLI avec code de sortie
-  (`bot/index.js:230-237`).
-- `bot/run.js` : process persistant (`run`, `bot/run.js:57`), CLI et arrêt propre
-  (`bot/run.js:161-178`).
+- `bot/index.js` : un cycle (`main`, `bot/index.js:116`), CLI avec code de sortie
+  (`bot/index.js:374-380`).
+- `bot/run.js` : process persistant (`run`, `bot/run.js:75`), CLI et arrêt propre
+  (`bot/run.js:189-207`).
 - `bot/adaptive.js` : `loadAdaptive`, `recordOutcome`, `applyAdaptive`.
+- `bot/pairSpread.js` : `decidePairSpread`, `buildPairKey`, `bestNetProfitBps`.
+- `bot/pairSpreadStore.js` : `loadPairSpreadState`, `recordPairSpreadSamples`.
 - `bot/resilient.js` : `classifyError`, `shouldRetry`, `backoffMs`.
 - `bot/throttle.js` : `createThrottle`, `withThrottle`, `getStats`.
 - `bot/scanner.js` : `getScannerThrottle`.
 - `bot/execute.js` : `getExecuteThrottle`.
 - `bot/executor.js` : `getExecutorThrottle`.
 - `bot/index.js` : `getMainThrottle`.
-- `bot/executor.js` : façade `maybeExecute` (`bot/executor.js:19`) ; verrou mono-transaction
-  `txInFlight` (`bot/executor.js:14`, `26-30`, `180-182`).
+- `bot/executor.js` : façade `maybeExecute` (`bot/executor.js:34`) ; verrou mono-transaction
+  `txInFlight` (`bot/executor.js:17`, `41-59`, `242-245`).
 - npm scripts : `scan` → `node bot/index.js`, `start:run` → `node bot/run.js`
   (`package.json:13-14`).
 
 ## Les pièges
 
-- **Ordre des guards dans `execute`.** Re-quote d'abord (`bot/execute.js:142-180`), puis owner
-  (`182-191`), breaker initial (`193-199`), `chainId` (`201-207`), balance (`209-219`),
-  `staticCall` (`231-238`), daily gas (`240-250`), réservation (`252-259`), breaker revérifié
-  (`261-267`), envoi (`274-279`). Cet ordre a changé à l'étape 3 : ne pas se fier à l'ancien ordre
+- **Ordre des guards dans `execute`.** Re-quote d'abord (`bot/execute.js:267-299`), puis owner
+  (`301-310`), breaker initial (`312-336`), `chainId` (`338-344`), balance (`346-356`),
+  `staticCall` (`369-382`), daily gas (`384-394`), réservation (`396-403`), breaker revérifié
+  (`405-431`), envoi (`444-454`). Cet ordre a changé à l'étape 3 : ne pas se fier à l'ancien ordre
   documenté ailleurs.
 - **`opportunity.grossProfitFresh` est un champ non standard.** Il est lu par `decide()`
-  (`bot/decide.js:53`) mais absent du typedef `Opportunity` (`bot/domain.js:32-51`). Il est injecté
-  par `maybeExecute()` juste avant `decide()` (`bot/executor.js:154`), et `execute()` le recalcule
-  quand aucun `reQuoted` n'est fourni (`bot/execute.js:142-170`). Il préserve la sémantique
-  caché/frais entre `decide` et `execute` (notamment pour `minProfit`, `bot/execute.js:221-227`).
+  (`bot/decide.js:53`) mais absent du typedef `Opportunity` (`bot/domain.js:35-59`). Il est injecté
+  par `maybeExecute()` juste avant `decide()` (`bot/executor.js:215-220`), et `execute()` le recalcule
+  quand aucun `reQuoted` n'est fourni (`bot/execute.js:267-289`). Il préserve la sémantique
+  caché/frais entre `decide` et `execute` (notamment pour `minProfit`, `bot/execute.js:358-366`).
 - **Fallback sur échec de re-quote dans `maybeExecute`.** Si le re-quote échoue, une `decide()` sur
   les données cachées est retentée ; si elle refuse, sa raison remplace « re-quote failed »
-  (`bot/executor.js:130-151`). C'est volontaire pour préserver les raisons et tests existants. Dans
-  `execute()`, un échec de re-quote retourne bien « re-quote failed » (`bot/execute.js:171-179`).
+  (`bot/executor.js:192-213`). C'est volontaire pour préserver les raisons et tests existants. Dans
+  `execute()`, un échec de re-quote retourne bien « re-quote failed » (`bot/execute.js:290-298`).
 - **`executor.js` réexporte des symboles de `pricing`.** `buildFeeOverrides`,
   `gasCostInBorrowedToken`, `BPS_DENOMINATOR`, `GAS_COST_MARGIN_BPS`, `GAS_LIMIT_MARGIN_BPS`
-  (`bot/executor.js:4-10`, `185-192`) pour compatibilité des tests. À terme, les tests pourront
+  (`bot/executor.js:4-11`, `248-255`) pour compatibilité des tests. À terme, les tests pourront
   importer directement depuis `pricing.js`.
 - **Divergence breaker / adaptive.** Un timeout ambigu avec receipt tardif `status=1` est classé
   `SUCCESS` par `index.js` (l'issue adaptative reflète le résultat on-chain), alors que
-  `execute.js` a déjà compté un échec breaker (`bot/execute.js:323-335`). C'est voulu : l'adaptive
-  et le breaker mesurent des choses différentes (`bot/index.js:245-252`).
+  `execute.js` a déjà compté un échec breaker (`bot/execute.js:654-690`). C'est voulu : l'adaptive
+  et le breaker mesurent des choses différentes (`bot/index.js:313-328`).
 - **`resilient.js` ne traverse pas `error.error` / `error.cause` / `error.info.error`.** Un
   `NOT_PROFITABLE` uniquement présent dans ces champs imbriqués serait classé `UNKNOWN`.
   `isNotProfitableError` dans `execute.js` traverse ces chaînes pour la logique de skip
-  (`bot/execute.js:114-127`). À noter si un test d'intégration révèle un mauvais classement
-  (`bot/resilient.js:64-70`).
+  (`bot/execute.js:200-213`). À noter si un test d'intégration révèle un mauvais classement
+  (`bot/resilient.js:67-80`).
 - **`throttle.js` ne borne pas la chaîne de promesses.** Si `fn` reste bloqué, les appels suivants
   s'accumulent en mémoire sans limite ni timeout ni annulation. À noter pour une future limite
   `maxQueueSize` ou timeout par appel (`bot/throttle.js:44-78`).
 - **Écart de timing sur `waitForReceipt`.** Le message de commit `f66804f` mentionne
   « 500 ms, 1 s, 2 s », mais `attempt` est incrémenté avant le sleep, donc l'implémentation réelle
   applique 1 s puis 2 s (soit 3 s de backoff cumulé). Le comportement reste borné et sûr ; c'est la
-  doc qui doit être lue avec cette correction. Réf. : `bot/execute.js:127-144`.
+  doc qui doit être lue avec cette correction. Réf. : `bot/execute.js:179-198`.
 - **Création paresseuse du throttle.** Le premier appel fixe `throttleMinIntervalMs` pour tout le
   process. Si la config change à chaud, le nouvel intervalle est ignoré. Réf. :
-  `bot/scanner.js:7-17`, `bot/execute.js:27-37`, `bot/executor.js:16-26`, `bot/index.js:17-27`.
+  `bot/scanner.js:17-27`, `bot/execute.js:57-67`, `bot/executor.js:19-29`, `bot/index.js:19-29`.
 - **Sur-sérialisation de `main`.** `getNetwork` et `getFeeData` partagent `mainThrottle` et sont
   donc espacés de 250 ms au lieu d'être réellement parallèles. Acceptable (2 appels par cycle), à
-  noter si le cycle devient sensible à la latence. Réf. : `bot/index.js:147-153`.
+  noter si le cycle devient sensible à la latence. Réf. : `bot/index.js:188-196`.
+- **Pair filtrée : warning, pas de quote fantôme.** En `enforce`, le log `SKIP` est émis en
+  `warn` (console) et la paire n'écrit ni `scans.jsonl` ni échantillon. Ne pas compter ce warning
+  comme une erreur RPC ou de paire : il ne doit pas modifier `rpcErrors`, `pairErrors` ni
+  l'`exitCode` au-delà de la règle D13. Réf. : `bot/index.js` (`logPairSpreadEvent`,
+  `pair_spread_filtered`).
+- **Le filtre ne remplace ni P1-16 ni `decide()`.** P1-16 reste fail-closed au chargement,
+  `decide()` reste fail-closed avant exécution ; P1-16-bis est la seule couche fail-open et ne
+  protège pas le capital (ADR 0006 D11–D12). Ne pas déplacer la comparaison de spread dans
+  `decide()` ni dans les guards.
 - **Test `throttle` non flaky.** L'ancien test `respects minIntervalMs and measures the actual
   wait` mesurait une durée réelle et pouvait échouer si l'event loop était bloqué. Il a été
   remplacé par `accumulates wait time in stats when the min interval has not elapsed`, qui vérifie
@@ -283,7 +331,7 @@ Contrat de types : `bot/domain.js` (aucun export runtime, `bot/domain.js:172`).
 ## Ce que le bot ne fait PAS
 
 - **Pas de Timeboost.** L'envoi est un appel `contract.startArbitrage` via le provider ethers
-  standard (`bot/execute.js:274-279`) ; aucun chemin Express Lane ni transaction privée. Rappel
+  standard (`bot/execute.js:444-454`) ; aucun chemin Express Lane ni transaction privée. Rappel
   MEV point 2 : environ 200 ms de délai pour les transactions non-Express-Lane.
 - **Pas de RPC privé par défaut.** Une seule URL `ARBITRUM_RPC_URL` (`bot/config.js`) ; `run.js`
   choisit WebSocket ou HTTP. Un RPC public ajoute typiquement 100–500 ms par appel.
@@ -300,13 +348,13 @@ Contrat de types : `bot/domain.js` (aucun export runtime, `bot/domain.js:172`).
   Tor tunnel keep-alive = 217/598 ms. Fail-closed : `ws://` rejeté au chargement de config quand le
   proxy est défini (`bot/config.js`, `validateProxyConfig`).
 - **Pas de live sans `DRY_RUN=false` + `PRIVATE_KEY` + `CONTRACT_ADDRESS`.** `dryRun` vaut `true`
-  par défaut (`bot/config.js:197`), et `maybeExecute()` refuse d'envoyer sans les deux secrets
-  (`bot/executor.js:51-64`). Le live exige aussi un prix ETH/USD (`bot/index.js:121-126`).
+  par défaut (`bot/config.js:324`), et `maybeExecute()` refuse d'envoyer sans les deux secrets
+  (`bot/executor.js:90-93`). Le live exige aussi un prix ETH/USD (`bot/index.js:212-217`).
 - **Pas d'apprentissage de code.** L'adaptive ajuste deux paramètres dans des bornes fixes
   (`logs/adaptive.json`), sans jamais modifier la logique. `resilient` et `throttle` bornent
   respectivement le retry et la pression RPC. Aucun de ces modules ne réécrit de code source.
-- **Pas de garantie de profit.** Les filtres de `decide()` (`bot/decide.js:93-253`), le `staticCall`
-  (`bot/execute.js:231-238`) et les guards réduisent le risque mais ne garantissent rien. Rappel
+- **Pas de garantie de profit.** Les filtres de `decide()` (`bot/decide.js:95-265`), le `staticCall`
+  (`bot/execute.js:369-382`) et les guards réduisent le risque mais ne garantissent rien. Rappel
   MEV point 7 : la configuration actuelle est jugée économiquement défavorable.
 
 ## Dettes documentées
@@ -370,7 +418,8 @@ assumés, pas à des bugs.
   appelle `checkRpcErrorRate` comme 5e condition, après le
   gas-drawdown. Fail-open sur fichier absent ou schéma
   invalide ; fail-closed sur JSON corrompu (via
-  `STATE_FILE_CORRUPT`). Config : `RPC_ERROR_RATE_WINDOW_SIZE`,
+  `STATE_FILE_CORRUPT`) et sur erreur d'E/S (`STATE_FILE_UNREADABLE`,
+  M1-bis). Config : `RPC_ERROR_RATE_WINDOW_SIZE`,
   `RPC_ERROR_RATE_THRESHOLD`, `RPC_ERRORS_PATH`. Réf. :
   `docs/adr/0004-rpc-error-rate-breaker.md`,
   `bot/guards.js` (`recordRpcCycle`, `checkRpcErrorRate`),
@@ -386,7 +435,8 @@ assumés, pas à des bugs.
   `checkCircuitBreaker` appelle `checkGasAnomaly` comme 6e
   condition, après le RPC error rate. Fail-open sur fichier
   absent, échantillons insuffisants (< `gasAnomalyMinSamples`,
-  défaut 5) ou schéma invalide ; fail-closed sur JSON corrompu.
+  défaut 5) ou schéma invalide ; fail-closed sur JSON corrompu
+  et sur erreur d'E/S (`STATE_FILE_UNREADABLE`, M1-bis).
   Config : `GAS_ANOMALY_WINDOW_SIZE`, `GAS_ANOMALY_MULTIPLIER`,
   `GAS_ANOMALY_MIN_SAMPLES`, `GAS_HISTORY_PATH`. Réf. :
   `docs/adr/0005-gas-anomaly-breaker.md`,
