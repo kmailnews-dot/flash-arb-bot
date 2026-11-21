@@ -55,6 +55,8 @@ Nouveau fichier `logs/rpc_errors.json` au format suivant :
 
 - Lit le fichier, ajoute le cycle, tronque à `windowSize`
   (défaut 10).
+- Refuse `errors > total` et un `at` non fini (timestamp
+  epoch ms).
 - Écrit atomiquement (tmp + fsync + rename).
 
 `checkRpcErrorRate({ filePath, windowSize, threshold, now })`
@@ -62,6 +64,8 @@ Nouveau fichier `logs/rpc_errors.json` au format suivant :
 
 - Lit le fichier, calcule `sum(errors) / sum(total)` sur la
   fenêtre.
+- Rejette un cycle persistant avec `errors > total` en
+  `STATE_FILE_SCHEMA_INVALID`.
 - Si `sum(total) === 0`, retourne `{ ok: true, rate: 0, samples: 0 }`.
 - Si `rate > threshold`, retourne `{ ok: false, rate, samples }`.
 - Sinon `{ ok: true, rate, samples }`.
@@ -86,8 +90,10 @@ Option B.
 - Positives :
   - Détecte un RPC dégradé sur une fenêtre glissante.
   - Survit au redémarrage du process (persistance).
-  - Fail-open sur fichier absent ou vide (pas de faux positif
-    au démarrage).
+  - Fail-open sur fichier absent (ENOENT) et sur schéma invalide
+    (pas de faux positif au démarrage). Un fichier vide ou un JSON
+    invalide est traité comme corrompu (`STATE_FILE_CORRUPT`) et
+    fail-closed.
   - Configurable (windowSize, threshold).
   - Aligné sur le pattern existant de `circuit_breaker.json`.
 
@@ -101,8 +107,10 @@ Option B.
 - Neutres :
   - Le warning `[RPC ERRORS]` existant reste inchangé.
   - L'`exitCode` existant reste inchangé.
-  - Le breaker reste fail-closed : si `checkRpcErrorRate` throw
-    (fichier corrompu), le breaker s'ouvre.
+  - Le breaker reste fail-closed sur une erreur d'état non-schéma
+    (`STATE_FILE_CORRUPT`, `STATE_FILE_UNREADABLE`) : elle remonte
+    et ouvre le breaker. Un schéma invalide
+    (`STATE_FILE_SCHEMA_INVALID`) reste explicitement fail-open.
 
 ## Conditions de réexamen
 

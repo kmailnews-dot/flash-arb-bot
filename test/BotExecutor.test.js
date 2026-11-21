@@ -2382,4 +2382,48 @@ describe("bot/executor maybeExecute", function () {
       });
     });
   });
+
+  it("blocks the send when a breaker state file is corrupt (M1-bis)", async function () {
+    const { opportunity, makeConfig } = await deployFixture();
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-breaker-corrupt-"));
+    const statePaths = {
+      rpcErrorsPath: path.join(stateDir, "rpc_errors.json"),
+      gasHistoryPath: path.join(stateDir, "gas_history.json"),
+      gasSpentPath: path.join(stateDir, "gas_spent.json"),
+      executionJournalPath: path.join(stateDir, "executions.json"),
+      circuitBreakerPath: path.join(stateDir, "circuit_breaker.json"),
+    };
+    const corruptFiles = [
+      statePaths.rpcErrorsPath,
+      statePaths.gasHistoryPath,
+      statePaths.gasSpentPath,
+      statePaths.executionJournalPath,
+    ];
+
+    try {
+      for (const corruptPath of corruptFiles) {
+        for (const statePath of Object.values(statePaths)) {
+          fs.rmSync(statePath, { force: true });
+        }
+        fs.writeFileSync(corruptPath, "{not valid json", "utf8");
+        const config = makeConfig(statePaths);
+        const { contract, calls } = makeSpyContract();
+
+        const result = await maybeExecute({
+          opportunity,
+          provider: ethers.provider,
+          config,
+          contract,
+        });
+
+        expect(result.submitted, `${path.basename(corruptPath)} should block`).to.equal(false);
+        expect(result.guard).to.equal("circuitBreaker");
+        expect(result.error).to.include("STATE_FILE_CORRUPT");
+        expect(result.error).to.include(corruptPath);
+        expect(calls.map((entry) => entry.method)).to.deep.equal(["estimateGas"]);
+      }
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
 });

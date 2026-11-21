@@ -11,6 +11,7 @@ const {
   addGasSpent,
   checkDailyGas,
   checkCircuitBreaker,
+  readCircuitBreaker,
   recordFailure,
   recordSuccess,
   readRpcErrors,
@@ -424,6 +425,15 @@ describe("bot/guards rpcErrors", function () {
     fs.rmSync(guardDir, { recursive: true, force: true });
   });
 
+  async function rejection(promise) {
+    try {
+      await promise;
+      return null;
+    } catch (err) {
+      return err;
+    }
+  }
+
   it("records an RPC cycle and truncates to windowSize", async function () {
     const filePath = path.join(guardDir, "rpc_errors.json");
     for (let i = 0; i < 5; i += 1) {
@@ -433,6 +443,38 @@ describe("bot/guards rpcErrors", function () {
     expect(state.version).to.equal(1);
     expect(state.cycles).to.have.length(3);
     expect(state.cycles.map((c) => c.errors)).to.deep.equal([2, 3, 4]);
+  });
+
+  it("rejects errors greater than total without writing state", async function () {
+    const filePath = path.join(guardDir, "rpc_errors.json");
+
+    const err = await rejection(recordRpcCycle({ filePath, errors: 11, total: 10, at: 1000 }));
+
+    expect(err).to.be.instanceOf(Error);
+    expect(err.message).to.include("errors must not exceed total");
+    expect(fs.existsSync(filePath)).to.equal(false);
+  });
+
+  it("accepts errors equal to total", async function () {
+    const filePath = path.join(guardDir, "rpc_errors.json");
+
+    const state = await recordRpcCycle({ filePath, errors: 10, total: 10, at: 1000 });
+
+    expect(state.cycles).to.deep.equal([{ errors: 10, total: 10, at: 1000 }]);
+  });
+
+  it("rejects a non-finite at timestamp without writing state", async function () {
+    const invalidTimestamps = [NaN, Infinity, -Infinity, "1000", null];
+
+    for (const [index, at] of invalidTimestamps.entries()) {
+      const filePath = path.join(guardDir, `invalid-at-${index}.json`);
+
+      const err = await rejection(recordRpcCycle({ filePath, errors: 1, total: 10, at }));
+
+      expect(err, `at=${String(at)}`).to.be.instanceOf(Error);
+      expect(err.message).to.include("at must be a finite timestamp");
+      expect(fs.existsSync(filePath), `at=${String(at)}`).to.equal(false);
+    }
   });
 
   it("returns ok when the RPC error rate is below threshold", async function () {
@@ -454,6 +496,37 @@ describe("bot/guards rpcErrors", function () {
     expect(result.rate).to.equal(0.85);
     expect(result.error).to.include("RPC error rate");
     expect(result.error).to.include("85%");
+  });
+
+  it("rejects errors greater than total as STATE_FILE_SCHEMA_INVALID", async function () {
+    const filePath = path.join(guardDir, "rpc_errors.json");
+    fs.writeFileSync(
+      filePath,
+      `${JSON.stringify({ version: 1, cycles: [{ errors: 11, total: 10, at: 1000 }] })}\n`,
+      "utf8"
+    );
+
+    const err = await rejection(checkRpcErrorRate({ filePath, threshold: 0.5, now: 2000 }));
+
+    expect(err).to.be.instanceOf(Error);
+    expect(err.code).to.equal("STATE_FILE_SCHEMA_INVALID");
+    expect(err.message).to.include(`STATE_FILE_SCHEMA_INVALID: ${filePath}`);
+    expect(err.message).to.include("errors must not exceed total");
+  });
+
+  it("accepts errors equal to total from persisted state", async function () {
+    const filePath = path.join(guardDir, "rpc_errors.json");
+    fs.writeFileSync(
+      filePath,
+      `${JSON.stringify({ version: 1, cycles: [{ errors: 10, total: 10, at: 1000 }] })}\n`,
+      "utf8"
+    );
+
+    const result = await checkRpcErrorRate({ filePath, threshold: 0.5, now: 2000 });
+
+    expect(result.ok).to.equal(false);
+    expect(result.rate).to.equal(1);
+    expect(result.samples).to.equal(1);
   });
 
   it("returns ok on missing file (fail-open)", async function () {
@@ -607,5 +680,271 @@ describe("bot/guards gasHistory", function () {
       now: 3000,
     });
     expect(result.ok).to.equal(true);
+  });
+});
+
+describe("bot/guards circuit breaker fail-closed (M1-bis)", function () {
+  let guardDir;
+  let paths;
+
+  beforeEach(function () {
+    guardDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-arb-guards-m1-bis-"));
+    paths = {
+      breaker: path.join(guardDir, "circuit_breaker.json"),
+      gasSpent: path.join(guardDir, "gas_spent.json"),
+      rpcErrors: path.join(guardDir, "rpc_errors.json"),
+      gasHistory: path.join(guardDir, "gas_history.json"),
+      journal: path.join(guardDir, "executions.json"),
+    };
+  });
+
+  afterEach(function () {
+    fs.rmSync(guardDir, { recursive: true, force: true });
+  });
+
+  function breakerOptions(overrides = {}) {
+    return {
+      filePath: paths.breaker,
+      gasSpentPath: paths.gasSpent,
+      rpcErrorsPath: paths.rpcErrors,
+      gasHistoryPath: paths.gasHistory,
+      executionJournalPath: paths.journal,
+      now: Date.parse("2026-11-02T12:00:00.000Z"),
+      ...overrides,
+    };
+  }
+
+  async function rejection(promise) {
+    try {
+      await promise;
+      return null;
+    } catch (err) {
+      return err;
+    }
+  }
+
+  const corruptFiles = [
+    ["rpc_errors.json", "rpcErrors"],
+    ["gas_history.json", "gasHistory"],
+    ["gas_spent.json", "gasSpent"],
+    ["executions.json", "journal"],
+  ];
+
+  for (const [label, key] of corruptFiles) {
+    it(`fails closed when ${label} contains corrupt JSON`, async function () {
+      fs.writeFileSync(paths[key], "{not valid json", "utf8");
+
+      const err = await rejection(checkCircuitBreaker(breakerOptions()));
+
+      expect(err, `${label} should block the breaker`).to.be.instanceOf(Error);
+      expect(err.message).to.include("STATE_FILE_CORRUPT");
+      expect(err.message).to.include(paths[key]);
+    });
+  }
+
+  it("fails closed on an unreadable state file (EACCES)", async function () {
+    if (typeof process.getuid === "function" && process.getuid() === 0) {
+      this.skip();
+    }
+    fs.writeFileSync(paths.rpcErrors, `${JSON.stringify({ version: 1, cycles: [] })}\n`, "utf8");
+    fs.chmodSync(paths.rpcErrors, 0o000);
+
+    const err = await rejection(checkCircuitBreaker(breakerOptions()));
+
+    expect(err).to.be.instanceOf(Error);
+    expect(err.code).to.equal("EACCES");
+    expect(err.message).to.include("STATE_FILE_UNREADABLE");
+    expect(err.message).to.include(paths.rpcErrors);
+  });
+
+  it("fails closed when the execution journal cannot be read (EISDIR)", async function () {
+    fs.mkdirSync(paths.journal);
+
+    const err = await rejection(checkCircuitBreaker(breakerOptions()));
+
+    expect(err).to.be.instanceOf(Error);
+    expect(err.code).to.equal("EISDIR");
+    expect(err.message).to.include("STATE_FILE_UNREADABLE");
+    expect(err.message).to.include(paths.journal);
+  });
+
+  it("keeps the fallback when every state file is missing", async function () {
+    const result = await checkCircuitBreaker(breakerOptions());
+
+    expect(result.ok).to.equal(true);
+    expect(result.consecutiveFailures).to.equal(0);
+    expect(result.openUntil).to.equal(null);
+  });
+
+  it("normalizes a missing openUntil to null for legacy state files", async function () {
+    fs.writeFileSync(paths.breaker, `${JSON.stringify({ consecutiveFailures: 2 })}\n`, "utf8");
+
+    const state = await readCircuitBreaker({ filePath: paths.breaker });
+
+    expect(state).to.deep.equal({ consecutiveFailures: 2, openUntil: null });
+  });
+
+  it("keeps the documented fail-open for an invalid rpc_errors schema", async function () {
+    fs.writeFileSync(
+      paths.rpcErrors,
+      `${JSON.stringify({ version: 1, cycles: "not-an-array" })}\n`,
+      "utf8"
+    );
+
+    const result = await checkCircuitBreaker(breakerOptions());
+
+    expect(result.ok).to.equal(true);
+  });
+
+  it("keeps the documented fail-open for an invalid gas_history schema", async function () {
+    fs.writeFileSync(
+      paths.gasHistory,
+      `${JSON.stringify({ version: 1, samples: "not-an-array" })}\n`,
+      "utf8"
+    );
+
+    const result = await checkCircuitBreaker(breakerOptions());
+
+    expect(result.ok).to.equal(true);
+  });
+
+  it("keeps the documented fail-open for malformed rpc_errors entries", async function () {
+    fs.writeFileSync(
+      paths.rpcErrors,
+      `${JSON.stringify({ version: 1, cycles: [null] })}\n`,
+      "utf8"
+    );
+
+    const result = await checkCircuitBreaker(breakerOptions());
+
+    expect(result.ok).to.equal(true);
+  });
+
+  it("keeps the documented fail-open for rpc_errors cycles with errors greater than total", async function () {
+    fs.writeFileSync(
+      paths.rpcErrors,
+      `${JSON.stringify({ version: 1, cycles: [{ errors: 2, total: 1, at: 1000 }] })}\n`,
+      "utf8"
+    );
+
+    const result = await checkCircuitBreaker(breakerOptions());
+
+    expect(result.ok).to.equal(true);
+  });
+
+  it("keeps the documented fail-open for malformed gas_history samples", async function () {
+    const samples = Array.from({ length: 5 }, (_, index) => ({
+      gasPriceWei: "not-a-number",
+      at: 1000 + index,
+    }));
+    fs.writeFileSync(
+      paths.gasHistory,
+      `${JSON.stringify({ version: 1, samples })}\n`,
+      "utf8"
+    );
+
+    const result = await checkCircuitBreaker(breakerOptions());
+
+    expect(result.ok).to.equal(true);
+  });
+
+  it("fails closed on an invalid executions journal schema", async function () {
+    fs.writeFileSync(
+      paths.journal,
+      `${JSON.stringify({ version: 1, records: [] })}\n`,
+      "utf8"
+    );
+
+    const err = await rejection(checkCircuitBreaker(breakerOptions()));
+
+    expect(err).to.be.instanceOf(Error);
+    expect(err.message).to.include(`STATE_FILE_CORRUPT: ${paths.journal}`);
+  });
+
+  it("fails closed on an invalid circuit_breaker schema", async function () {
+    fs.writeFileSync(
+      paths.breaker,
+      `${JSON.stringify({ consecutiveFailures: "five", openUntil: null })}\n`,
+      "utf8"
+    );
+
+    const err = await rejection(checkCircuitBreaker(breakerOptions()));
+
+    expect(err).to.be.instanceOf(Error);
+    expect(err.message).to.include(`STATE_FILE_CORRUPT: ${paths.breaker}`);
+  });
+
+  it("fails closed on an invalid gas_spent schema", async function () {
+    fs.writeFileSync(
+      paths.gasSpent,
+      `${JSON.stringify({ date: "not-a-date", gasSpentWei: "1" })}\n`,
+      "utf8"
+    );
+
+    const err = await rejection(checkCircuitBreaker(breakerOptions()));
+
+    expect(err).to.be.instanceOf(Error);
+    expect(err.message).to.include(`STATE_FILE_CORRUPT: ${paths.gasSpent}`);
+  });
+
+  it("fails closed with STATE_FILE_CORRUPT when openUntil is outside the Date range", async function () {
+    fs.writeFileSync(
+      paths.breaker,
+      `${JSON.stringify({ consecutiveFailures: 0, openUntil: 1e20 })}\n`,
+      "utf8"
+    );
+
+    const err = await rejection(checkCircuitBreaker(breakerOptions()));
+
+    expect(err).to.be.instanceOf(Error);
+    expect(err.message).to.include(`STATE_FILE_CORRUPT: ${paths.breaker}`);
+    expect(err.message).to.not.include("Invalid time value");
+  });
+
+  it("fails closed when gas_spent contains an impossible calendar date", async function () {
+    fs.writeFileSync(
+      paths.gasSpent,
+      `${JSON.stringify({ date: "2026-02-31", gasSpentWei: "1" })}\n`,
+      "utf8"
+    );
+
+    const err = await rejection(checkCircuitBreaker(breakerOptions()));
+
+    expect(err).to.be.instanceOf(Error);
+    expect(err.message).to.include(`STATE_FILE_CORRUPT: ${paths.gasSpent}`);
+  });
+
+  it("does not mask an unexpected RPC error-rate failure", async function () {
+    fs.writeFileSync(
+      paths.rpcErrors,
+      `${JSON.stringify({ version: 1, cycles: [{ errors: 0, total: 1, at: 1000 }] })}\n`,
+      "utf8"
+    );
+
+    const err = await rejection(
+      checkCircuitBreaker(breakerOptions({ rpcErrorRateWindowSize: 1n }))
+    );
+
+    expect(err, "non-schema failure should propagate").to.be.instanceOf(Error);
+    expect(err.message).to.not.include("STATE_FILE_SCHEMA_INVALID");
+  });
+
+  it("does not mask an unexpected gas-anomaly failure", async function () {
+    const samples = Array.from({ length: 5 }, (_, index) => ({
+      gasPriceWei: "1000000000",
+      at: 1000 + index,
+    }));
+    fs.writeFileSync(
+      paths.gasHistory,
+      `${JSON.stringify({ version: 1, samples })}\n`,
+      "utf8"
+    );
+
+    const err = await rejection(
+      checkCircuitBreaker(breakerOptions({ gasAnomalyMultiplier: 1.5 }))
+    );
+
+    expect(err, "non-schema failure should propagate").to.be.instanceOf(Error);
+    expect(err.message).to.not.include("STATE_FILE_SCHEMA_INVALID");
   });
 });

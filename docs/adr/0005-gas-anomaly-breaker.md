@@ -84,8 +84,10 @@ Option B.
 - Positives :
   - Détecte un gaz anormal sur une fenêtre glissante.
   - Survit au redémarrage du process (persistance).
-  - Fail-open sur fichier absent, échantillons insuffisants ou
-    schéma invalide (pas de faux positif au démarrage).
+  - Fail-open sur fichier absent (ENOENT), échantillons
+    insuffisants ou schéma invalide (pas de faux positif au
+    démarrage). Un fichier vide ou un JSON invalide est traité
+    comme corrompu (`STATE_FILE_CORRUPT`) et fail-closed.
   - Configurable (windowSize, multiplier, minSamples).
   - Aligné sur le pattern existant de `rpc_errors.json` (ADR
     0004).
@@ -98,8 +100,10 @@ Option B.
     échantillons par défaut).
 
 - Neutres :
-  - Le breaker reste fail-closed : si `checkGasAnomaly` throw
-    (fichier corrompu), le breaker s'ouvre.
+  - Le breaker reste fail-closed sur une erreur d'état non-schéma
+    (`STATE_FILE_CORRUPT`, `STATE_FILE_UNREADABLE`) : elle remonte
+    et ouvre le breaker. Un schéma invalide
+    (`STATE_FILE_SCHEMA_INVALID`) reste explicitement fail-open.
   - Le warning `[GAS ANOMALY]` existant (s'il est ajouté) reste
     inchangé.
 

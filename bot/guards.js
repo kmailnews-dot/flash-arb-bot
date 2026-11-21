@@ -11,9 +11,56 @@ const DEFAULT_GAS_SPENT_PATH = path.join(LOG_DIR, "gas_spent.json");
 const DEFAULT_CIRCUIT_BREAKER_PATH = path.join(LOG_DIR, "circuit_breaker.json");
 const DEFAULT_RPC_ERRORS_PATH = path.join(LOG_DIR, "rpc_errors.json");
 const DEFAULT_GAS_HISTORY_PATH = path.join(LOG_DIR, "gas_history.json");
+const MISSING_STATE = Symbol("STATE_FILE_MISSING");
+const MAX_DATE_MS = 8.64e15;
 
 function utcDay(now = Date.now()) {
   return new Date(now).toISOString().slice(0, 10);
+}
+
+function isValidUtcDay(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function corruptStateError(filePath) {
+  return new Error(`STATE_FILE_CORRUPT: ${filePath}`);
+}
+
+class StateSchemaError extends Error {
+  constructor(filePath, detail) {
+    super(`STATE_FILE_SCHEMA_INVALID: ${filePath}: ${detail}`);
+    this.name = "StateSchemaError";
+    this.code = "STATE_FILE_SCHEMA_INVALID";
+    this.path = filePath;
+  }
+}
+
+function schemaStateError(filePath, detail) {
+  return new StateSchemaError(filePath, detail);
+}
+
+function isSchemaStateError(err) {
+  return err instanceof StateSchemaError || err?.code === "STATE_FILE_SCHEMA_INVALID";
+}
+
+function isLabeledStateError(err) {
+  const message = String(err?.message || err);
+  return message.startsWith("STATE_FILE_CORRUPT:") || message.startsWith("STATE_FILE_UNREADABLE");
+}
+
+/// Wraps an I/O or schema failure with the state file path so the blocking cause stays traceable
+/// in logs. Already-labelled state errors are returned unchanged.
+function unreadableStateError(filePath, err, label = null) {
+  if (isLabeledStateError(err)) return err;
+  const message = String(err?.message || err);
+  const context = label ? ` (${label})` : "";
+  const wrapped = new Error(`STATE_FILE_UNREADABLE${context}: ${filePath}: ${message}`);
+  wrapped.code = err?.code;
+  wrapped.path = filePath;
+  wrapped.cause = err;
+  return wrapped;
 }
 
 async function readState(filePath, fallback) {
@@ -22,9 +69,9 @@ async function readState(filePath, fallback) {
   } catch (err) {
     if (err.code === "ENOENT") return fallback;
     if (err instanceof SyntaxError) {
-      throw new Error(`STATE_FILE_CORRUPT: ${filePath}`);
+      throw corruptStateError(filePath);
     }
-    throw err;
+    throw unreadableStateError(filePath, err);
   }
 }
 
@@ -111,9 +158,21 @@ async function checkWalletBalanceLow({ provider, address, minWalletBalanceEth = 
 
 async function readGasSpent({ filePath = DEFAULT_GAS_SPENT_PATH, now = Date.now() } = {}) {
   const today = utcDay(now);
-  const state = await readState(filePath, null);
-  if (!state || state.date !== today) return { date: today, gasSpentWei: 0n };
-  return { date: today, gasSpentWei: BigInt(state.gasSpentWei || "0") };
+  const state = await readState(filePath, MISSING_STATE);
+  if (state === MISSING_STATE) return { date: today, gasSpentWei: 0n };
+  if (
+    !state ||
+    typeof state !== "object" ||
+    Array.isArray(state) ||
+    typeof state.date !== "string" ||
+    !isValidUtcDay(state.date) ||
+    typeof state.gasSpentWei !== "string" ||
+    !/^\d+$/.test(state.gasSpentWei)
+  ) {
+    throw corruptStateError(filePath);
+  }
+  if (state.date !== today) return { date: today, gasSpentWei: 0n };
+  return { date: today, gasSpentWei: BigInt(state.gasSpentWei) };
 }
 
 async function checkDailyGas({
@@ -151,10 +210,27 @@ async function addGasSpent({ filePath = DEFAULT_GAS_SPENT_PATH, deltaWei, now = 
 }
 
 async function readCircuitBreaker({ filePath = DEFAULT_CIRCUIT_BREAKER_PATH } = {}) {
-  const state = await readState(filePath, null);
+  const state = await readState(filePath, MISSING_STATE);
+  if (state === MISSING_STATE) {
+    return { consecutiveFailures: 0, openUntil: null };
+  }
+  if (
+    !state ||
+    typeof state !== "object" ||
+    Array.isArray(state) ||
+    !Number.isInteger(state.consecutiveFailures) ||
+    state.consecutiveFailures < 0 ||
+    (state.openUntil !== null &&
+      state.openUntil !== undefined &&
+      (!Number.isFinite(state.openUntil) ||
+        state.openUntil < 0 ||
+        state.openUntil > MAX_DATE_MS))
+  ) {
+    throw corruptStateError(filePath);
+  }
   return {
-    consecutiveFailures: Number(state?.consecutiveFailures || 0),
-    openUntil: state?.openUntil ?? null,
+    consecutiveFailures: state.consecutiveFailures,
+    openUntil: state.openUntil ?? null,
   };
 }
 
@@ -215,10 +291,15 @@ async function checkCircuitBreaker({
     );
   }
 
-  const windowRecords = await listRecentTerminalExecutions(
-    Math.max(revertRateWindowSize, unknownRateWindowSize),
-    executionJournalPath
-  ).catch(() => []);
+  let windowRecords;
+  try {
+    windowRecords = await listRecentTerminalExecutions(
+      Math.max(revertRateWindowSize, unknownRateWindowSize),
+      executionJournalPath
+    );
+  } catch (err) {
+    throw unreadableStateError(executionJournalPath, err, "execution journal");
+  }
   const revertRecords = windowRecords.slice(0, revertRateWindowSize);
   const unknownRecords = windowRecords.slice(0, unknownRateWindowSize);
   const revertWindowFull = revertRecords.length >= revertRateWindowSize;
@@ -258,75 +339,83 @@ async function checkCircuitBreaker({
     };
   }
   if (maxDailyGasEth > 0 && gasSpentPath) {
-    try {
-      const { gasSpentWei } = await readGasSpent({ filePath: gasSpentPath });
-      const drawdownLimitWei = ethers.parseEther(
-        String(maxDailyGasEth * gasDrawdownMultiplier)
-      );
-      if (gasSpentWei > drawdownLimitWei) {
-        const openUntil = now + cooldownMinutes * 60_000;
-        await writeState(filePath, { consecutiveFailures: state.consecutiveFailures, openUntil });
-        return {
-          ok: false,
-          ...state,
-          openUntil,
-          gasSpentWei: gasSpentWei.toString(),
-          gasDrawdownLimitWei: drawdownLimitWei.toString(),
-          error: `CIRCUIT_BREAKER_OPEN: gas drawdown ${ethers.formatEther(gasSpentWei)} ETH > ${ethers.formatEther(drawdownLimitWei)} ETH (maxDailyGasEth * gasDrawdownMultiplier)`,
-        };
-      }
-    } catch (err) {
-      console.warn(`[GUARD WARNING] gas drawdown check failed: ${err.message}`);
+    const { gasSpentWei } = await readGasSpent({ filePath: gasSpentPath });
+    const drawdownLimitWei = ethers.parseEther(
+      String(maxDailyGasEth * gasDrawdownMultiplier)
+    );
+    if (gasSpentWei > drawdownLimitWei) {
+      const openUntil = now + cooldownMinutes * 60_000;
+      await writeState(filePath, { consecutiveFailures: state.consecutiveFailures, openUntil });
+      return {
+        ok: false,
+        ...state,
+        openUntil,
+        gasSpentWei: gasSpentWei.toString(),
+        gasDrawdownLimitWei: drawdownLimitWei.toString(),
+        error: `CIRCUIT_BREAKER_OPEN: gas drawdown ${ethers.formatEther(gasSpentWei)} ETH > ${ethers.formatEther(drawdownLimitWei)} ETH (maxDailyGasEth * gasDrawdownMultiplier)`,
+      };
     }
   }
   if (rpcErrorsPath && rpcErrorRateWindowSize && rpcErrorRateThreshold) {
+    let rpcCheck = null;
     try {
-      const rpcCheck = await checkRpcErrorRate({
+      rpcCheck = await checkRpcErrorRate({
         filePath: rpcErrorsPath,
         windowSize: rpcErrorRateWindowSize,
         threshold: rpcErrorRateThreshold,
         now,
       });
-      if (!rpcCheck.ok) {
-        const openUntil = now + cooldownMinutes * 60_000;
-        await writeState(filePath, { consecutiveFailures: state.consecutiveFailures, openUntil });
-        return {
-          ok: false,
-          ...state,
-          openUntil,
-          rpcErrorRate: rpcCheck.rate,
-          rpcErrorSamples: rpcCheck.samples,
-          error: rpcCheck.error,
-        };
-      }
     } catch (err) {
-      console.warn(`[GUARD WARNING] rpc error rate check failed: ${err.message}`);
+      // M1-bis : une erreur de lecture bloque. Seul un schéma invalide explicitement
+      // documenté (ADR 0004) reste fail-open ; les erreurs internes inattendues remontent.
+      if (!isSchemaStateError(err)) throw err;
+      console.warn(
+        `[GUARD WARNING] rpc error rate check skipped on invalid schema (fail-open): ${err.message}`
+      );
+    }
+    if (rpcCheck && !rpcCheck.ok) {
+      const openUntil = now + cooldownMinutes * 60_000;
+      await writeState(filePath, { consecutiveFailures: state.consecutiveFailures, openUntil });
+      return {
+        ok: false,
+        ...state,
+        openUntil,
+        rpcErrorRate: rpcCheck.rate,
+        rpcErrorSamples: rpcCheck.samples,
+        error: rpcCheck.error,
+      };
     }
   }
   if (gasHistoryPath && gasAnomalyWindowSize && gasAnomalyMultiplier) {
+    let gasCheck = null;
     try {
-      const gasCheck = await checkGasAnomaly({
+      gasCheck = await checkGasAnomaly({
         filePath: gasHistoryPath,
         windowSize: gasAnomalyWindowSize,
         multiplier: gasAnomalyMultiplier,
         minSamples: gasAnomalyMinSamples ?? 5,
         now,
       });
-      if (!gasCheck.ok) {
-        const openUntil = now + cooldownMinutes * 60_000;
-        await writeState(filePath, { consecutiveFailures: state.consecutiveFailures, openUntil });
-        return {
-          ok: false,
-          ...state,
-          openUntil,
-          gasMedian: gasCheck.median,
-          gasLast: gasCheck.last,
-          gasRatio: gasCheck.ratio,
-          error: `CIRCUIT_BREAKER_OPEN: gas price anomaly ${gasCheck.last} wei > ${gasCheck.median} wei x ${gasAnomalyMultiplier} (median x multiplier)`,
-        };
-      }
     } catch (err) {
-      console.warn(`[GUARD WARNING] gas anomaly check failed: ${err.message}`);
+      // M1-bis : une erreur de lecture bloque. Seul un schéma invalide explicitement
+      // documenté (ADR 0005) reste fail-open ; les erreurs internes inattendues remontent.
+      if (!isSchemaStateError(err)) throw err;
+      console.warn(
+        `[GUARD WARNING] gas anomaly check skipped on invalid schema (fail-open): ${err.message}`
+      );
+    }
+    if (gasCheck && !gasCheck.ok) {
+      const openUntil = now + cooldownMinutes * 60_000;
+      await writeState(filePath, { consecutiveFailures: state.consecutiveFailures, openUntil });
+      return {
+        ok: false,
+        ...state,
+        openUntil,
+        gasMedian: gasCheck.median,
+        gasLast: gasCheck.last,
+        gasRatio: gasCheck.ratio,
+        error: `CIRCUIT_BREAKER_OPEN: gas price anomaly ${gasCheck.last} wei > ${gasCheck.median} wei x ${gasAnomalyMultiplier} (median x multiplier)`,
+      };
     }
   }
   return { ok: true, ...state, revertRate, unknownRate };
@@ -357,8 +446,8 @@ async function recordFailure({
 }
 
 async function readRpcErrors({ filePath = DEFAULT_RPC_ERRORS_PATH } = {}) {
-  const state = await readState(filePath, null);
-  if (!state || typeof state !== "object" || Array.isArray(state)) {
+  const state = await readState(filePath, MISSING_STATE);
+  if (state === MISSING_STATE || !state || typeof state !== "object" || Array.isArray(state)) {
     return { version: 1, cycles: [] };
   }
   if (state.version !== 1 || !Array.isArray(state.cycles)) {
@@ -396,6 +485,12 @@ async function recordRpcCycle({
   if (!Number.isInteger(windowSize) || windowSize < 1) {
     throw new Error("recordRpcCycle: windowSize must be a positive integer");
   }
+  if (errors > total) {
+    throw new Error("recordRpcCycle: errors must not exceed total");
+  }
+  if (!Number.isFinite(at)) {
+    throw new Error("recordRpcCycle: at must be a finite timestamp");
+  }
   const state = await readRpcErrors({ filePath });
   const cycles = [...state.cycles, { errors, total, at }].slice(-windowSize);
   await writeRpcErrors({ filePath, state: { version: 1, cycles } });
@@ -410,7 +505,24 @@ async function checkRpcErrorRate({
 } = {}) {
   const state = await readRpcErrors({ filePath });
   const recent = state.cycles
-    .filter((c) => typeof c.at === "number" && c.at <= now)
+    .filter((c) => {
+      if (!c || typeof c !== "object" || Array.isArray(c)) {
+        throw schemaStateError(filePath, "cycle entry is not an object");
+      }
+      if (!Number.isInteger(c.errors) || c.errors < 0) {
+        throw schemaStateError(filePath, "cycle errors must be a non-negative integer");
+      }
+      if (!Number.isInteger(c.total) || c.total < 0) {
+        throw schemaStateError(filePath, "cycle total must be a non-negative integer");
+      }
+      if (c.errors > c.total) {
+        throw schemaStateError(filePath, "cycle errors must not exceed total");
+      }
+      if (!Number.isFinite(c.at)) {
+        throw schemaStateError(filePath, "cycle at must be a finite timestamp");
+      }
+      return c.at <= now;
+    })
     .slice(-windowSize);
   if (recent.length === 0) {
     return { ok: true, rate: 0, samples: 0 };
@@ -433,8 +545,8 @@ async function checkRpcErrorRate({
 }
 
 async function readGasHistory({ filePath = DEFAULT_GAS_HISTORY_PATH } = {}) {
-  const state = await readState(filePath, null);
-  if (!state || typeof state !== "object" || Array.isArray(state)) {
+  const state = await readState(filePath, MISSING_STATE);
+  if (state === MISSING_STATE || !state || typeof state !== "object" || Array.isArray(state)) {
     return { version: 1, samples: [] };
   }
   if (state.version !== 1 || !Array.isArray(state.samples)) {
@@ -486,7 +598,18 @@ async function checkGasAnomaly({
 } = {}) {
   const state = await readGasHistory({ filePath });
   const recent = state.samples
-    .filter((s) => typeof s.at === "number" && s.at <= now)
+    .filter((s) => {
+      if (!s || typeof s !== "object" || Array.isArray(s)) {
+        throw schemaStateError(filePath, "sample entry is not an object");
+      }
+      if (typeof s.gasPriceWei !== "string" || !/^\d+$/.test(s.gasPriceWei)) {
+        throw schemaStateError(filePath, "sample gasPriceWei must be a decimal string");
+      }
+      if (!Number.isFinite(s.at)) {
+        throw schemaStateError(filePath, "sample at must be a finite timestamp");
+      }
+      return s.at <= now;
+    })
     .slice(-windowSize);
   if (recent.length < minSamples) {
     return { ok: true, reason: "insufficient samples", samples: recent.length };
