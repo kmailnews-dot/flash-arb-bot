@@ -29,6 +29,9 @@ d'environnement est `bot/config.js`. Les références sont volontairement des po
    résultat est persisté dans `scans.jsonl` avant de choisir le meilleur. En `shadow`/`enforce`,
    un seul échantillon par clé et par cycle est ensuite retenu via `bestNetProfitBps(results)` ;
    une paire filtrée, une erreur ou un `netProfitBps` `null` ne produit aucun échantillon.
+   Le store v2 sait aussi persister des attempts (`success`, `empty`, `failure`, sources
+   `scan`/`probe`), mais le câblage des probes n'est pas encore fait : `bot/index.js` continue
+   d'utiliser l'API samples-only.
 4. Le scanner calcule un `netProfit` exact en unités du token emprunté (BigInt) : profit brut
    moins le gaz, lui-même converti avec le multiplicateur L1 (`l1CostMultiplierBps`). Une
    opportunité doit passer le plancher `effectiveMinProfitBps` sur le net, le plancher USD
@@ -82,7 +85,7 @@ bot/run.js run() (process persistant)
 | `bot/run.js` | Boucle persistante et gestion provider/signaux | `run` | `ethers`, `index` |
 | `bot/adaptive.js` | Seuils adaptatifs bornés (MIN_PROFIT_BPS, taille de trade), historique | `loadAdaptive`, `recordOutcome`, `applyAdaptive` | `fs/promises`, `path` |
 | `bot/pairSpread.js` | Décision pure de viabilité d'une paire : clé stable, fenêtre, médiane BigInt, échantillon | `decidePairSpread`, `buildPairKey`, `bestNetProfitBps` | aucune |
-| `bot/pairSpreadStore.js` | État `logs/pair_spreads.json` : chargement, validation, écriture atomique | `loadPairSpreadState`, `recordPairSpreadSamples` | `fs/promises`, `path`, `crypto`, `pairSpread` |
+| `bot/pairSpreadStore.js` | État `logs/pair_spreads.json` v2 : samples + attempts, lecture v1, validation, écriture atomique | `loadPairSpreadState`, `recordPairSpreadCommit`, `recordPairSpreadSamples` | `fs/promises`, `path`, `crypto`, `pairSpread` |
 | `bot/resilient.js` | Classification d'erreur + retry borné + backoff | `classifyError`, `shouldRetry`, `backoffMs` | aucune |
 | `bot/throttle.js` | Sérialisation RPC + intervalle minimum + stats | `createThrottle`, `withThrottle`, `getStats` | aucune |
 | `bot/netproxy.js` | Proxy SOCKS5 minimal (sans dépendance) + fabrique provider JSON-RPC ; réseau statique si `chainId` fourni, proxy si `RPC_PROXY_URL` défini | `createJsonRpcProvider` | `ethers`, `net`, `tls` |
@@ -209,8 +212,14 @@ bot/run.js run() (process persistant)
   (jamais `effectiveMinProfitBps`) et ne saute une paire qu'en `enforce`. Après un scan réussi,
   `bestNetProfitBps()` retient au plus un échantillon par clé et par cycle. L'état est écrit au
   plus une fois après la boucle, jamais s'il est corrompu, illisible ou d'une version inconnue.
-  Réf. : `bot/pairSpread.js`, `bot/pairSpreadStore.js`, `bot/index.js` (`resolvePairSpreadSettings`,
-  `pairSpreadNow`, boucle des paires, persistance finale), ADR 0006 D6–D14.
+  Le schéma courant est v2 : chaque paire porte `samples` et `attempts` (obligatoire, même vide) ;
+  v1 reste lisible et migré en mémoire. Les attempts sont dédupliqués sur
+  `(at, outcome, source, reason)` avant le plafond de 20. Un attempt futur rend l'état
+  non inscriptible (fail-open) jusqu'à ce que l'horloge le dépasse, sans purge silencieuse. Une
+  lecture ne réécrit pas le fichier uniquement pour le normaliser ; la forme canonique v2 est
+  persistée à la prochaine écriture réelle. Réf. : `bot/pairSpread.js`, `bot/pairSpreadStore.js`,
+  `bot/index.js` (`resolvePairSpreadSettings`, `pairSpreadNow`, boucle des paires, persistance
+  finale), ADR 0006 D1, D6, D8, D14.
 - **Exit code D13 : un cycle entièrement filtré est un succès volontaire.** Si `enforce` filtre
   toutes les paires configurées sans erreur indépendante, `exitCode` vaut `0` ; sinon le
   comportement `scanned === 0 → 1` est conservé (aucune paire, zéro scan non volontaire, refus
@@ -260,7 +269,8 @@ Contrat de types : `bot/domain.js` (aucun export runtime, `bot/domain.js:215`).
   (`bot/run.js:189-207`).
 - `bot/adaptive.js` : `loadAdaptive`, `recordOutcome`, `applyAdaptive`.
 - `bot/pairSpread.js` : `decidePairSpread`, `buildPairKey`, `bestNetProfitBps`.
-- `bot/pairSpreadStore.js` : `loadPairSpreadState`, `recordPairSpreadSamples`.
+- `bot/pairSpreadStore.js` : `loadPairSpreadState`, `recordPairSpreadCommit`,
+  `recordPairSpreadSamples` (API samples-only compatible).
 - `bot/resilient.js` : `classifyError`, `shouldRetry`, `backoffMs`.
 - `bot/throttle.js` : `createThrottle`, `withThrottle`, `getStats`.
 - `bot/scanner.js` : `getScannerThrottle`.
@@ -323,6 +333,21 @@ Contrat de types : `bot/domain.js` (aucun export runtime, `bot/domain.js:215`).
   `decide()` reste fail-closed avant exécution ; P1-16-bis est la seule couche fail-open et ne
   protège pas le capital (ADR 0006 D11–D12). Ne pas déplacer la comparaison de spread dans
   `decide()` ni dans les guards.
+- **Attempt futur = état non inscriptible, pas de purge.** Un attempt stocké avec `at > now`
+  rend `loadPairSpreadState` non inscriptible (`schema_invalid`, fail-open) ; aucune écriture
+  n'écrase le fichier. Le comportement est temporaire : il se résout quand l'horloge dépasse
+  `at`. Ne pas « corriger » en purgeant l'attempt ou en le remplaçant par `now` : ce serait
+  fabriquer une observation. Réf. : `bot/pairSpreadStore.js` (`parseStoredAttempt`), ADR 0006 D6.
+- **Conflit sample/attempt non-success : uniquement sur un sample survivant.** Un sample expiré,
+  tronqué par la fenêtre ou éliminé comme doublon de moindre valeur ne doit pas faire échouer un
+  commit. Seuls un nouveau timestamp retenu ou une meilleure valeur à un timestamp existant
+  déclenchent le conflit. Ne pas élargir la règle à toutes les entrées brutes.
+  Réf. : `bot/pairSpreadStore.js` (`appendPairSpreadCommit`), ADR 0006 D6/D8.
+- **Normalisation sans réécriture.** Un chargement trie, déduplique et plafonne en mémoire, mais
+  un commit no-op ne réécrit pas le fichier uniquement pour le normaliser ; la forme canonique v2
+  est persistée à la prochaine écriture réelle. Ne pas ajouter de réécriture « de confort » :
+  elle n'apporte pas d'intégrité (chaque lecture normalise) et romprait la politique D14.
+  Réf. : `bot/pairSpreadStore.js` (`recordPairSpreadCommit`), ADR 0006 D14.
 - **Test `throttle` non flaky.** L'ancien test `respects minIntervalMs and measures the actual
   wait` mesurait une durée réelle et pouvait échouer si l'event loop était bloqué. Il a été
   remplacé par `accumulates wait time in stats when the min interval has not elapsed`, qui vérifie

@@ -13,12 +13,29 @@ const {
 
 const LOG_DIR = path.resolve(__dirname, "..", "logs");
 const DEFAULT_PAIR_SPREADS_PATH = path.join(LOG_DIR, "pair_spreads.json");
-const PAIR_SPREAD_STORE_VERSION = 1;
+const PAIR_SPREAD_STORE_VERSION = 2;
+const PAIR_SPREAD_STORE_V1_VERSION = 1;
+const PAIR_SPREAD_STORE_SUPPORTED_VERSIONS = new Set([
+  PAIR_SPREAD_STORE_V1_VERSION,
+  PAIR_SPREAD_STORE_VERSION,
+]);
+const MAX_ATTEMPTS_PER_PAIR = 20;
 
 const MIN_WINDOW_SIZE = 5;
 const MAX_WINDOW_SIZE = 100;
 const MAX_MAX_AGE_MS = 168 * 60 * 60 * 1000;
 const DECIMAL_BPS_PATTERN = /^-?\d+$/;
+// Attempt reasons are codes, never free-form text: this pattern rejects raw
+// error messages, stack traces, RPC URLs and secrets before they reach disk.
+const ATTEMPT_REASON_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+const PAIR_SPREAD_ATTEMPT_OUTCOMES = Object.freeze([
+  "success",
+  "empty",
+  "failure",
+]);
+const PAIR_SPREAD_ATTEMPT_SOURCES = Object.freeze(["scan", "probe"]);
+const ATTEMPT_OUTCOME_SET = new Set(PAIR_SPREAD_ATTEMPT_OUTCOMES);
+const ATTEMPT_SOURCE_SET = new Set(PAIR_SPREAD_ATTEMPT_SOURCES);
 
 const PAIR_SPREAD_STORE_CODES = Object.freeze({
   MISSING: "PAIR_SPREAD_STATE_MISSING",
@@ -210,19 +227,122 @@ function normalizeSamples(
   };
 }
 
+function parseStoredAttempt(entry, index, { filePath, label, now }) {
+  if (!isPlainObject(entry)) {
+    throw schemaError(filePath, `${label}[${index}] must be an object`);
+  }
+  if (!Number.isSafeInteger(entry.at) || entry.at <= 0) {
+    throw schemaError(
+      filePath,
+      `${label}[${index}].at must be a positive safe integer`
+    );
+  }
+  // A stored future attempt is not a valid operational record. Unlike
+  // statistical samples, it is not pruned silently: the state stays
+  // unwritable until the timestamp is no longer in the future.
+  if (entry.at > now) {
+    throw schemaError(
+      filePath,
+      `${label}[${index}].at must not be in the future`
+    );
+  }
+  if (!ATTEMPT_OUTCOME_SET.has(entry.outcome)) {
+    throw schemaError(
+      filePath,
+      `${label}[${index}].outcome must be one of ${PAIR_SPREAD_ATTEMPT_OUTCOMES.join(", ")}`
+    );
+  }
+  if (!ATTEMPT_SOURCE_SET.has(entry.source)) {
+    throw schemaError(
+      filePath,
+      `${label}[${index}].source must be one of ${PAIR_SPREAD_ATTEMPT_SOURCES.join(", ")}`
+    );
+  }
+
+  const attempt = {
+    at: entry.at,
+    outcome: entry.outcome,
+    source: entry.source,
+  };
+  if (entry.reason !== undefined && entry.reason !== null) {
+    if (
+      typeof entry.reason !== "string" ||
+      !ATTEMPT_REASON_PATTERN.test(entry.reason)
+    ) {
+      throw schemaError(
+        filePath,
+        `${label}[${index}].reason must be a short uppercase code`
+      );
+    }
+    attempt.reason = entry.reason;
+  }
+  return attempt;
+}
+
+/// Validates every stored attempt, removes exact duplicates (same `at`,
+/// `outcome`, `source` and `reason`), keeps the MAX_ATTEMPTS_PER_PAIR most
+/// recent by `at` (ties keep their stored order), and never invents an attempt.
+/// Deduplication runs before the cap so duplicates cannot evict distinct
+/// attempts. Two different attempts sharing only `at` are both kept.
+function normalizeAttempts(attempts, { filePath, now, label = "attempts" }) {
+  if (!Array.isArray(attempts)) {
+    throw schemaError(filePath, `${label} must be an array`);
+  }
+
+  const parsed = [];
+  for (let index = 0; index < attempts.length; index += 1) {
+    parsed.push({
+      index,
+      attempt: parseStoredAttempt(attempts[index], index, {
+        filePath,
+        label,
+        now,
+      }),
+    });
+  }
+  parsed.sort((a, b) => {
+    if (a.attempt.at !== b.attempt.at) return a.attempt.at - b.attempt.at;
+    return a.index - b.index;
+  });
+
+  const deduped = [];
+  for (const entry of parsed) {
+    if (
+      deduped.some(({ attempt }) =>
+        attemptEntriesEqual(attempt, entry.attempt)
+      )
+    ) {
+      continue;
+    }
+    deduped.push(entry);
+  }
+
+  const truncated = Math.max(0, deduped.length - MAX_ATTEMPTS_PER_PAIR);
+  return {
+    attempts: deduped
+      .slice(-MAX_ATTEMPTS_PER_PAIR)
+      .map(({ attempt }) => attempt),
+    truncated,
+  };
+}
+
 /// D1 schema validation. Unknown fields are ignored; any structural violation
 /// throws a PairSpreadStoreError so the caller can fail open without writing.
+/// v1 is accepted for migration: samples keep their meaning and attempts start
+/// empty. The returned in-memory state is always v2.
 function parsePairSpreadDocument(parsed, { filePath, now, windowSize, maxAgeMs }) {
   if (!isPlainObject(parsed)) {
     throw schemaError(filePath, "root must be an object");
   }
-  if (parsed.version !== PAIR_SPREAD_STORE_VERSION) {
+  if (!PAIR_SPREAD_STORE_SUPPORTED_VERSIONS.has(parsed.version)) {
     throw schemaError(
       filePath,
       `unsupported version: ${String(parsed.version)}`,
       "unsupported_version"
     );
   }
+  const sourceVersion = parsed.version;
+  const isV1 = sourceVersion === PAIR_SPREAD_STORE_V1_VERSION;
   if (!isPlainObject(parsed.pairs)) {
     throw schemaError(filePath, "pairs must be an object");
   }
@@ -234,6 +354,7 @@ function parsePairSpreadDocument(parsed, { filePath, now, windowSize, maxAgeMs }
     duplicatesRemoved: 0,
     truncated: 0,
     emptyEntries: 0,
+    attemptsTruncated: 0,
   };
 
   for (const key of Object.keys(parsed.pairs)) {
@@ -258,11 +379,32 @@ function parsePairSpreadDocument(parsed, { filePath, now, windowSize, maxAgeMs }
     counts.futurePruned += normalized.futurePruned;
     counts.duplicatesRemoved += normalized.duplicatesRemoved;
     counts.truncated += normalized.truncated;
-    if (normalized.samples.length === 0) {
+
+    // v1 has no attempts: they start empty and are never inferred from
+    // samples. A stray `attempts` field in a v1 entry is an unknown field and
+    // is ignored.
+    let attempts = [];
+    if (!isV1) {
+      if (!Array.isArray(entry.attempts)) {
+        throw schemaError(
+          filePath,
+          `pairs[${JSON.stringify(key)}].attempts must be an array`
+        );
+      }
+      const normalizedAttempts = normalizeAttempts(entry.attempts, {
+        filePath,
+        now,
+        label: `pairs[${JSON.stringify(key)}].attempts`,
+      });
+      attempts = normalizedAttempts.attempts;
+      counts.attemptsTruncated += normalizedAttempts.truncated;
+    }
+
+    if (normalized.samples.length === 0 && attempts.length === 0) {
       counts.emptyEntries += 1;
       continue;
     }
-    pairs.set(key, { samples: normalized.samples });
+    pairs.set(key, { samples: normalized.samples, attempts });
   }
 
   return {
@@ -270,6 +412,8 @@ function parsePairSpreadDocument(parsed, { filePath, now, windowSize, maxAgeMs }
       version: PAIR_SPREAD_STORE_VERSION,
       pairs: Object.fromEntries(pairs),
     },
+    sourceVersion,
+    migrated: isV1,
     ...counts,
   };
 }
@@ -285,6 +429,9 @@ function failedLoadResult(status, error) {
     duplicatesRemoved: 0,
     truncated: 0,
     emptyEntries: 0,
+    attemptsTruncated: 0,
+    sourceVersion: null,
+    migrated: false,
     warning: error.message,
     error,
   };
@@ -322,6 +469,9 @@ async function loadPairSpreadState({
         duplicatesRemoved: 0,
         truncated: 0,
         emptyEntries: 0,
+        attemptsTruncated: 0,
+        sourceVersion: null,
+        migrated: false,
         warning,
         error: null,
       };
@@ -367,6 +517,9 @@ async function loadPairSpreadState({
       duplicatesRemoved: normalized.duplicatesRemoved,
       truncated: normalized.truncated,
       emptyEntries: normalized.emptyEntries,
+      attemptsTruncated: normalized.attemptsTruncated,
+      sourceVersion: normalized.sourceVersion,
+      migrated: normalized.migrated,
       warning: null,
       error: null,
     };
@@ -387,13 +540,34 @@ function samplesEqual(a, b) {
   return true;
 }
 
+function attemptEntriesEqual(a, b) {
+  return (
+    a.at === b.at &&
+    a.outcome === b.outcome &&
+    a.source === b.source &&
+    a.reason === b.reason
+  );
+}
+
+function attemptsEqual(a, b) {
+  if (a.length !== b.length) return false;
+  for (let index = 0; index < a.length; index += 1) {
+    if (!attemptEntriesEqual(a[index], b[index])) return false;
+  }
+  return true;
+}
+
 function statesEqual(a, b) {
+  if (a.version !== b.version) return false;
   const aKeys = Object.keys(a.pairs);
   const bKeys = Object.keys(b.pairs);
   if (aKeys.length !== bKeys.length) return false;
   for (const key of aKeys) {
     if (!Object.prototype.hasOwnProperty.call(b.pairs, key)) return false;
-    if (!samplesEqual(a.pairs[key].samples, b.pairs[key].samples)) return false;
+    const aEntry = a.pairs[key];
+    const bEntry = b.pairs[key];
+    if (!samplesEqual(aEntry.samples ?? [], bEntry.samples ?? [])) return false;
+    if (!attemptsEqual(aEntry.attempts ?? [], bEntry.attempts ?? [])) return false;
   }
   return true;
 }
@@ -407,21 +581,21 @@ function parseIncomingSample(sample, index, now) {
   }
 
   let value;
-  let netProfitBps;
   if (typeof sample.netProfitBps === "bigint") {
     value = sample.netProfitBps;
-    netProfitBps = sample.netProfitBps.toString();
   } else if (
     typeof sample.netProfitBps === "string" &&
     DECIMAL_BPS_PATTERN.test(sample.netProfitBps)
   ) {
     value = BigInt(sample.netProfitBps);
-    netProfitBps = sample.netProfitBps;
   } else {
     throw new TypeError(
       `samples[${index}].netProfitBps must be a bigint or a signed decimal string`
     );
   }
+  // Canonical form (`"007"` -> `"7"`, `"-0"` -> `"0"`) so the conflict check
+  // below compares the same representation that normalization stores.
+  const netProfitBps = value.toString();
 
   const at = sample.at === undefined ? now : sample.at;
   if (!Number.isSafeInteger(at) || at < 0) {
@@ -434,12 +608,82 @@ function parseIncomingSample(sample, index, now) {
   return { key: sample.key, netProfitBps, at, value };
 }
 
-/// D8: one sample per stable key per cycle (`at`). Duplicate (key, at) pairs
-/// keep the best netProfitBps, while distinct timestamps for the same key are
-/// all retained. The input state is never mutated.
-function appendPairSpreadSamples({
+/// Attempt timestamps are explicit and validated against the commit time.
+/// There is no default: silently substituting `now` would record a time that
+/// was never observed.
+function parseIncomingAttempt(attempt, index, now) {
+  if (!isPlainObject(attempt)) {
+    throw new TypeError(`attempts[${index}] must be an object`);
+  }
+  if (typeof attempt.key !== "string" || attempt.key.length === 0) {
+    throw new TypeError(`attempts[${index}].key must be a non-empty string`);
+  }
+  if (attempt.at === undefined) {
+    throw new RangeError(`attempts[${index}].at is required`);
+  }
+  if (!Number.isSafeInteger(attempt.at) || attempt.at <= 0) {
+    throw new RangeError(
+      `attempts[${index}].at must be a positive safe integer`
+    );
+  }
+  if (attempt.at > now) {
+    throw new RangeError(`attempts[${index}].at must not be in the future`);
+  }
+  if (!ATTEMPT_OUTCOME_SET.has(attempt.outcome)) {
+    throw new TypeError(
+      `attempts[${index}].outcome must be one of ${PAIR_SPREAD_ATTEMPT_OUTCOMES.join(", ")}`
+    );
+  }
+  if (!ATTEMPT_SOURCE_SET.has(attempt.source)) {
+    throw new TypeError(
+      `attempts[${index}].source must be one of ${PAIR_SPREAD_ATTEMPT_SOURCES.join(", ")}`
+    );
+  }
+
+  const parsed = {
+    key: attempt.key,
+    at: attempt.at,
+    outcome: attempt.outcome,
+    source: attempt.source,
+  };
+  if (attempt.reason !== undefined && attempt.reason !== null) {
+    if (
+      typeof attempt.reason !== "string" ||
+      !ATTEMPT_REASON_PATTERN.test(attempt.reason)
+    ) {
+      throw new TypeError(
+        `attempts[${index}].reason must be a short uppercase code`
+      );
+    }
+    parsed.reason = attempt.reason;
+  }
+  return parsed;
+}
+
+function clonePairEntries(state) {
+  const pairs = new Map();
+  for (const key of Object.keys(state.pairs)) {
+    const entry = state.pairs[key];
+    pairs.set(key, {
+      samples: entry.samples.map((sample) => ({ ...sample })),
+      attempts: (entry.attempts ?? []).map((attempt) => ({ ...attempt })),
+    });
+  }
+  return pairs;
+}
+
+/// D8/D14: applies samples and attempts in one in-memory commit. Samples keep
+/// the existing window and dedupe rules. Attempts are append-only, deduped by
+/// exact tuple, capped to the MAX_ATTEMPTS_PER_PAIR most recent entries, and
+/// never converted into samples. A non-success attempt cannot be committed
+/// with a sample for the same key that survives normalization: that would turn
+/// a failed or empty probe into a statistical observation. Expired,
+/// window-truncated or lower-value duplicate samples do not trigger that
+/// conflict. The input state is never mutated.
+function appendPairSpreadCommit({
   state,
-  samples,
+  samples = [],
+  attempts = [],
   now = Date.now(),
   windowSize = DEFAULT_WINDOW_SIZE,
   maxAgeMs = DEFAULT_MAX_AGE_MS,
@@ -450,6 +694,9 @@ function appendPairSpreadSamples({
   if (!Array.isArray(samples)) {
     throw new TypeError("samples must be an array");
   }
+  if (!Array.isArray(attempts)) {
+    throw new TypeError("attempts must be an array");
+  }
 
   const before = parsePairSpreadDocument(state, {
     filePath: "<memory>",
@@ -457,20 +704,15 @@ function appendPairSpreadSamples({
     windowSize,
     maxAgeMs,
   }).state;
-  const pairs = new Map();
-  for (const key of Object.keys(before.pairs)) {
-    pairs.set(key, {
-      samples: before.pairs[key].samples.map((sample) => ({ ...sample })),
-    });
-  }
+  const pairs = clonePairEntries(before);
 
-  const incomingByKey = new Map();
+  const incomingSamplesByKey = new Map();
   for (let index = 0; index < samples.length; index += 1) {
     const parsed = parseIncomingSample(samples[index], index, now);
-    let byAt = incomingByKey.get(parsed.key);
+    let byAt = incomingSamplesByKey.get(parsed.key);
     if (!byAt) {
       byAt = new Map();
-      incomingByKey.set(parsed.key, byAt);
+      incomingSamplesByKey.set(parsed.key, byAt);
     }
     const existing = byAt.get(parsed.at);
     if (!existing || parsed.value > existing.value) {
@@ -478,10 +720,25 @@ function appendPairSpreadSamples({
     }
   }
 
+  const incomingAttemptsByKey = new Map();
+  for (let index = 0; index < attempts.length; index += 1) {
+    const parsed = parseIncomingAttempt(attempts[index], index, now);
+    let list = incomingAttemptsByKey.get(parsed.key);
+    if (!list) {
+      list = [];
+      incomingAttemptsByKey.set(parsed.key, list);
+    }
+    list.push(parsed);
+  }
+
   let added = 0;
-  for (const [key, byAt] of incomingByKey) {
-    const beforeSamples = pairs.get(key)?.samples ?? [];
-    const beforeAts = new Set(beforeSamples.map((entry) => entry.at));
+  const survivingSamplesByKey = new Map();
+  for (const [key, byAt] of incomingSamplesByKey) {
+    const current = pairs.get(key);
+    const beforeSamples = current?.samples ?? [];
+    const beforeByAt = new Map(
+      beforeSamples.map((entry) => [entry.at, entry.netProfitBps])
+    );
     const merged = [...beforeSamples];
     for (const sample of byAt.values()) {
       merged.push({ netProfitBps: sample.netProfitBps, at: sample.at });
@@ -497,12 +754,85 @@ function appendPairSpreadSamples({
     // window. A best-value replacement at an existing `at` is a change, not an
     // addition, and is reported by `changed` below.
     for (const entry of normalized.samples) {
-      if (byAt.has(entry.at) && !beforeAts.has(entry.at)) {
+      if (byAt.has(entry.at) && !beforeByAt.has(entry.at)) {
         added += 1;
       }
     }
-    if (normalized.samples.length > 0) {
-      pairs.set(key, { samples: normalized.samples });
+    // R5: a sample survives only when normalization keeps this exact value
+    // and the sample set actually changes. Expired, window-truncated,
+    // lower-value or identical duplicates are discarded by normalization and
+    // must not trigger the sample/non-success conflict below.
+    const normalizedByAt = new Map(
+      normalized.samples.map((entry) => [entry.at, entry.netProfitBps])
+    );
+    const surviving = [];
+    for (const sample of byAt.values()) {
+      if (normalizedByAt.get(sample.at) !== sample.netProfitBps) continue;
+      if (beforeByAt.get(sample.at) === sample.netProfitBps) continue;
+      surviving.push(sample);
+    }
+    if (surviving.length > 0) {
+      survivingSamplesByKey.set(key, surviving);
+    }
+    if (normalized.samples.length > 0 || (current?.attempts?.length ?? 0) > 0) {
+      pairs.set(key, {
+        samples: normalized.samples,
+        attempts: current?.attempts ?? [],
+      });
+    } else {
+      pairs.delete(key);
+    }
+  }
+
+  // R5: only a sample that survives normalization and windowing may conflict
+  // with a non-success attempt. Rejecting every incoming sample for the key
+  // would also reject commits whose only sample was expired, truncated or
+  // eliminated as a lower-value duplicate.
+  for (const [key, list] of incomingAttemptsByKey) {
+    if (!survivingSamplesByKey.has(key)) continue;
+    for (const attempt of list) {
+      if (attempt.outcome !== "success") {
+        throw new TypeError(
+          `attempts for ${JSON.stringify(key)} with outcome "${attempt.outcome}" ` +
+            "must not be committed with a sample"
+        );
+      }
+    }
+  }
+
+  let attemptsAdded = 0;
+  for (const [key, incoming] of incomingAttemptsByKey) {
+    const current = pairs.get(key);
+    const existingAttempts = current?.attempts ?? [];
+    const merged = [...existingAttempts];
+    for (const attempt of incoming) {
+      if (merged.some((entry) => attemptEntriesEqual(entry, attempt))) continue;
+      merged.push({
+        at: attempt.at,
+        outcome: attempt.outcome,
+        source: attempt.source,
+        ...(attempt.reason === undefined ? {} : { reason: attempt.reason }),
+      });
+    }
+    const normalized = normalizeAttempts(merged, {
+      filePath: "<memory>",
+      now,
+      label: `pairs[${JSON.stringify(key)}].attempts`,
+    });
+    // Mirror the samples `added` rule: count only new attempts that survive
+    // the 20-entry cap. An old attempt pushed out by the cap is a change, not
+    // an addition.
+    for (const attempt of normalized.attempts) {
+      if (!existingAttempts.some((entry) => attemptEntriesEqual(entry, attempt))) {
+        attemptsAdded += 1;
+      }
+    }
+    const currentSamples = current?.samples ?? [];
+    if (currentSamples.length > 0 || normalized.attempts.length > 0) {
+      pairs.set(key, {
+        samples: currentSamples,
+        attempts: normalized.attempts,
+      });
     } else {
       pairs.delete(key);
     }
@@ -515,16 +845,31 @@ function appendPairSpreadSamples({
   return {
     state: after,
     added,
+    attemptsAdded,
     // D4: compare with the caller's state, not with the already-normalized
     // `before` snapshot, so pruning an expired or empty pair is a change.
     changed: !statesEqual(state, after),
   };
 }
 
+/// Backward-compatible pure samples entry point.
+function appendPairSpreadSamples(options = {}) {
+  const result = appendPairSpreadCommit({ ...options, attempts: [] });
+  return {
+    state: result.state,
+    added: result.added,
+    changed: result.changed,
+  };
+}
+
 function sortPairs(state) {
   const pairs = new Map();
   for (const key of Object.keys(state.pairs).sort()) {
-    pairs.set(key, { samples: state.pairs[key].samples });
+    const entry = state.pairs[key];
+    pairs.set(key, {
+      samples: entry.samples,
+      attempts: entry.attempts ?? [],
+    });
   }
   return {
     version: PAIR_SPREAD_STORE_VERSION,
@@ -640,10 +985,13 @@ async function writePairSpreadState({
 /// Safe write path for a cycle. It loads once (or reuses a prior load), refuses
 /// to write when the state is corrupt/unreadable/unknown-version, and writes
 /// only when the appended state differs or an expired sample was pruned (D14).
-async function recordPairSpreadSamples({
+/// Samples and attempts are validated first, then committed in the same atomic
+/// write.
+async function recordPairSpreadCommit({
   filePath = resolvePairSpreadPath(),
   loaded = null,
   samples = [],
+  attempts = [],
   now = Date.now(),
   windowSize = DEFAULT_WINDOW_SIZE,
   maxAgeMs = DEFAULT_MAX_AGE_MS,
@@ -653,6 +1001,12 @@ async function recordPairSpreadSamples({
   validateNow(now);
   validateWindowSize(windowSize);
   validateMaxAgeMs(maxAgeMs);
+  if (!Array.isArray(samples)) {
+    throw new TypeError("samples must be an array");
+  }
+  if (!Array.isArray(attempts)) {
+    throw new TypeError("attempts must be an array");
+  }
 
   const ownsLoad = loaded === null;
   const loadResult =
@@ -668,15 +1022,17 @@ async function recordPairSpreadSamples({
       state: loadResult.state,
       written: false,
       added: 0,
+      attemptsAdded: 0,
       expiredPruned: loadResult.expiredPruned,
       warning: loadResult.warning,
       error: loadResult.error,
     };
   }
 
-  const appended = appendPairSpreadSamples({
+  const appended = appendPairSpreadCommit({
     state: loadResult.state,
     samples,
+    attempts,
     now,
     windowSize,
     maxAgeMs,
@@ -691,6 +1047,7 @@ async function recordPairSpreadSamples({
       state: appended.state,
       written: false,
       added: 0,
+      attemptsAdded: 0,
       expiredPruned: 0,
       warning: loadResult.warning,
       error: null,
@@ -717,22 +1074,35 @@ async function recordPairSpreadSamples({
     state: writeResult.state,
     written: writeResult.written,
     added: appended.added,
+    attemptsAdded: appended.attemptsAdded,
     expiredPruned: loadResult.expiredPruned,
     warning: writeResult.warning ?? loadResult.warning,
     error: writeResult.error,
   };
 }
 
+/// Backward-compatible samples-only entry point. It delegates to
+/// recordPairSpreadCommit so the file format, atomicity and failure handling
+/// stay identical.
+async function recordPairSpreadSamples(options = {}) {
+  return recordPairSpreadCommit({ ...options, attempts: [] });
+}
+
 module.exports = {
   DEFAULT_PAIR_SPREADS_PATH,
   PAIR_SPREAD_STORE_VERSION,
+  MAX_ATTEMPTS_PER_PAIR,
+  PAIR_SPREAD_ATTEMPT_OUTCOMES,
+  PAIR_SPREAD_ATTEMPT_SOURCES,
   PAIR_SPREAD_STORE_CODES,
   PairSpreadStoreError,
   isPairSpreadStoreError,
   resolvePairSpreadPath,
   createEmptyPairSpreadState,
   loadPairSpreadState,
+  appendPairSpreadCommit,
   appendPairSpreadSamples,
   writePairSpreadState,
+  recordPairSpreadCommit,
   recordPairSpreadSamples,
 };

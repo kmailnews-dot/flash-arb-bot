@@ -7,14 +7,19 @@ const path = require("path");
 const {
   DEFAULT_PAIR_SPREADS_PATH,
   PAIR_SPREAD_STORE_VERSION,
+  MAX_ATTEMPTS_PER_PAIR,
+  PAIR_SPREAD_ATTEMPT_OUTCOMES,
+  PAIR_SPREAD_ATTEMPT_SOURCES,
   PAIR_SPREAD_STORE_CODES,
   PairSpreadStoreError,
   isPairSpreadStoreError,
   resolvePairSpreadPath,
   createEmptyPairSpreadState,
   loadPairSpreadState,
+  appendPairSpreadCommit,
   appendPairSpreadSamples,
   writePairSpreadState,
+  recordPairSpreadCommit,
   recordPairSpreadSamples,
 } = require("../bot/pairSpreadStore");
 
@@ -27,6 +32,7 @@ const KEY_A =
   "v1|42161|0xaf88d065e77c8cc2239327c5edb3a432268e5831|0x82af49447d8a07e3bd95bd0d56f35241523fbab1|V3|0xe592427a0aece92de3edee1f18e0157c05861564|500|0xb27308f9f90d607463bb33ea1bebb41c27ce5ab6|V2|0x1b02da8cb0d097eb8d57a175b88c7d8b47997506||";
 const KEY_B =
   "v1|42161|0xaf88d065e77c8cc2239327c5edb3a432268e5831|0x82af49447d8a07e3bd95bd0d56f35241523fbab1|V3|0xe592427a0aece92de3edee1f18e0157c05861564|3000|0xb27308f9f90d607463bb33ea1bebb41c27ce5ab6|V2|0x1b02da8cb0d097eb8d57a175b88c7d8b47997506||";
+const KEY_C = KEY_B.replace("|3000|", "|10000|");
 
 function sample(value, at = NOW) {
   return { netProfitBps: String(value), at };
@@ -36,8 +42,31 @@ function documentWith(pairs) {
   return { version: PAIR_SPREAD_STORE_VERSION, pairs };
 }
 
-function pairEntry(samples) {
+function v1DocumentWith(pairs) {
+  return { version: 1, pairs };
+}
+
+function v1PairEntry(samples) {
   return { samples };
+}
+
+function pairEntry(samples, attempts = []) {
+  return { samples, attempts };
+}
+
+function attempt({
+  at = NOW,
+  outcome = "success",
+  source = "scan",
+  reason,
+} = {}) {
+  const entry = { at, outcome, source };
+  if (reason !== undefined) entry.reason = reason;
+  return entry;
+}
+
+function incomingAttempt(key, overrides = {}) {
+  return { key, at: NOW, outcome: "success", source: "scan", ...overrides };
 }
 
 function writeRaw(filePath, content) {
@@ -157,13 +186,24 @@ describe("bot/pairSpreadStore", function () {
       }
     });
 
-    it("creates a fresh empty state", function () {
+    it("creates a fresh empty v2 state", function () {
       const first = createEmptyPairSpreadState();
       const second = createEmptyPairSpreadState();
-      expect(first).to.deep.equal({ version: 1, pairs: {} });
-      expect(second).to.deep.equal({ version: 1, pairs: {} });
+      expect(PAIR_SPREAD_STORE_VERSION).to.equal(2);
+      expect(first).to.deep.equal({ version: 2, pairs: {} });
+      expect(second).to.deep.equal({ version: 2, pairs: {} });
       expect(first).to.not.equal(second);
       expect(first.pairs).to.not.equal(second.pairs);
+    });
+
+    it("exposes the v2 attempt vocabulary and cap", function () {
+      expect(PAIR_SPREAD_ATTEMPT_OUTCOMES).to.deep.equal([
+        "success",
+        "empty",
+        "failure",
+      ]);
+      expect(PAIR_SPREAD_ATTEMPT_SOURCES).to.deep.equal(["scan", "probe"]);
+      expect(MAX_ATTEMPTS_PER_PAIR).to.equal(20);
     });
 
     it("uses prefixed store codes", function () {
@@ -185,7 +225,9 @@ describe("bot/pairSpreadStore", function () {
       expect(result.ok).to.equal(true);
       expect(result.status).to.equal("absent");
       expect(result.writable).to.equal(true);
-      expect(result.state).to.deep.equal({ version: 1, pairs: {} });
+      expect(result.state).to.deep.equal({ version: 2, pairs: {} });
+      expect(result.sourceVersion).to.equal(null);
+      expect(result.migrated).to.equal(false);
       expect(result.warning).to.include(PAIR_SPREAD_STORE_CODES.MISSING);
       expect(result.warning).to.include(filePath);
       expect(warnings).to.deep.equal([result.warning]);
@@ -217,10 +259,11 @@ describe("bot/pairSpreadStore", function () {
       expect(fs.existsSync(filePath)).to.equal(true);
 
       const stored = readJson(filePath);
-      expect(stored.version).to.equal(1);
-      expect(stored.pairs[KEY_A].samples).to.deep.equal([
-        { netProfitBps: "-42", at: NOW },
-      ]);
+      expect(stored.version).to.equal(2);
+      expect(stored.pairs[KEY_A]).to.deep.equal({
+        samples: [{ netProfitBps: "-42", at: NOW }],
+        attempts: [],
+      });
     });
   });
 
@@ -479,7 +522,7 @@ describe("bot/pairSpreadStore", function () {
   });
 
   describe("load: unknown version", function () {
-    for (const version of [0, 2, "1", null, undefined]) {
+    for (const version of [0, 3, "2", null, undefined]) {
       it(`fails open without writing for version ${String(version)}`, async function () {
         const payload = { version, pairs: {} };
         if (version === undefined) delete payload.version;
@@ -521,7 +564,7 @@ describe("bot/pairSpreadStore", function () {
       ],
       [
         "an unknown version",
-        `${JSON.stringify({ version: 2, pairs: {} })}\n`,
+        `${JSON.stringify({ version: 3, pairs: {} })}\n`,
         "unsupported_version",
         PAIR_SPREAD_STORE_CODES.SCHEMA_INVALID,
       ],
@@ -1292,6 +1335,1102 @@ describe("bot/pairSpreadStore", function () {
     });
   });
 
+  describe("v2 attempts and v1 migration", function () {
+    it("reads a v1 state as v2 in memory without writing it", async function () {
+      writeJson(
+        filePath,
+        v1DocumentWith({
+          [KEY_A]: v1PairEntry([
+            sample(-80, NOW - 2 * MINUTE_MS),
+            sample(-10, NOW - MINUTE_MS),
+          ]),
+        })
+      );
+      const before = readRaw(filePath);
+
+      const loaded = await loadPairSpreadState({ filePath, now: NOW });
+
+      expect(loaded.ok).to.equal(true);
+      expect(loaded.status).to.equal("ok");
+      expect(loaded.writable).to.equal(true);
+      expect(loaded.sourceVersion).to.equal(1);
+      expect(loaded.migrated).to.equal(true);
+      expect(loaded.state).to.deep.equal({
+        version: 2,
+        pairs: {
+          [KEY_A]: {
+            samples: [
+              { netProfitBps: "-80", at: NOW - 2 * MINUTE_MS },
+              { netProfitBps: "-10", at: NOW - MINUTE_MS },
+            ],
+            attempts: [],
+          },
+        },
+      });
+      expect(readRaw(filePath)).to.equal(before);
+    });
+
+    it("migrates v1 samples unchanged and never invents attempts", async function () {
+      const oldSamples = [
+        sample(-80, NOW - 2 * MINUTE_MS),
+        sample(-10, NOW - MINUTE_MS),
+      ];
+      writeJson(filePath, v1DocumentWith({ [KEY_A]: v1PairEntry(oldSamples) }));
+
+      const loaded = await loadPairSpreadState({ filePath, now: NOW });
+      expect(loaded.state.pairs[KEY_A].samples).to.deep.equal(oldSamples);
+      expect(loaded.state.pairs[KEY_A].attempts).to.deep.equal([]);
+
+      const recorded = await recordPairSpreadCommit({
+        filePath,
+        samples: [{ key: KEY_B, netProfitBps: 5n, at: NOW }],
+        now: NOW,
+      });
+
+      expect(recorded.ok).to.equal(true);
+      expect(recorded.written).to.equal(true);
+      const stored = readJson(filePath);
+      expect(stored.version).to.equal(2);
+      expect(stored.pairs[KEY_A]).to.deep.equal({
+        samples: oldSamples,
+        attempts: [],
+      });
+      expect(stored.pairs[KEY_B]).to.deep.equal({
+        samples: [{ netProfitBps: "5", at: NOW }],
+        attempts: [],
+      });
+    });
+
+    it("writes v2 only on the next commit", async function () {
+      writeJson(
+        filePath,
+        v1DocumentWith({ [KEY_A]: v1PairEntry([sample(10, NOW - MINUTE_MS)]) })
+      );
+      expect(readJson(filePath).version).to.equal(1);
+
+      const loaded = await loadPairSpreadState({ filePath, now: NOW });
+      expect(readJson(filePath).version).to.equal(1);
+
+      const result = await recordPairSpreadCommit({
+        filePath,
+        loaded,
+        attempts: [
+          incomingAttempt(KEY_A, {
+            at: NOW,
+            outcome: "success",
+            source: "scan",
+            reason: "SCAN_OK",
+          }),
+        ],
+        now: NOW,
+      });
+
+      expect(result.ok).to.equal(true);
+      expect(result.written).to.equal(true);
+      expect(result.attemptsAdded).to.equal(1);
+      const stored = readJson(filePath);
+      expect(stored.version).to.equal(2);
+      expect(stored.pairs[KEY_A].samples).to.deep.equal([
+        { netProfitBps: "10", at: NOW - MINUTE_MS },
+      ]);
+      expect(stored.pairs[KEY_A].attempts).to.deep.equal([
+        { at: NOW, outcome: "success", source: "scan", reason: "SCAN_OK" },
+      ]);
+    });
+
+    it("round-trips a sample and a success attempt in one commit", async function () {
+      const result = await recordPairSpreadCommit({
+        filePath,
+        samples: [{ key: KEY_A, netProfitBps: 12n, at: NOW - MINUTE_MS }],
+        attempts: [
+          incomingAttempt(KEY_A, {
+            at: NOW - MINUTE_MS,
+            outcome: "success",
+            source: "scan",
+            reason: "SCAN_OK",
+          }),
+        ],
+        now: NOW,
+      });
+
+      expect(result.ok).to.equal(true);
+      expect(result.written).to.equal(true);
+      expect(result.added).to.equal(1);
+      expect(result.attemptsAdded).to.equal(1);
+
+      const expected = {
+        samples: [{ netProfitBps: "12", at: NOW - MINUTE_MS }],
+        attempts: [
+          {
+            at: NOW - MINUTE_MS,
+            outcome: "success",
+            source: "scan",
+            reason: "SCAN_OK",
+          },
+        ],
+      };
+      expect(readJson(filePath).pairs[KEY_A]).to.deep.equal(expected);
+
+      const loaded = await loadPairSpreadState({ filePath, now: NOW });
+      expect(loaded.state.pairs[KEY_A]).to.deep.equal(expected);
+    });
+
+    it("retains a pair with attempts but no samples", async function () {
+      const result = await recordPairSpreadCommit({
+        filePath,
+        attempts: [
+          incomingAttempt(KEY_A, {
+            at: NOW,
+            outcome: "empty",
+            source: "probe",
+          }),
+        ],
+        now: NOW,
+      });
+
+      expect(result.ok).to.equal(true);
+      expect(result.written).to.equal(true);
+      expect(result.added).to.equal(0);
+      expect(result.attemptsAdded).to.equal(1);
+
+      const expected = {
+        samples: [],
+        attempts: [{ at: NOW, outcome: "empty", source: "probe" }],
+      };
+      expect(readJson(filePath).pairs[KEY_A]).to.deep.equal(expected);
+
+      const loaded = await loadPairSpreadState({ filePath, now: NOW });
+      expect(loaded.state.pairs[KEY_A]).to.deep.equal(expected);
+      expect(loaded.emptyEntries).to.equal(0);
+    });
+
+    it("keeps the 20 most recent attempts per pair", async function () {
+      const attempts = [];
+      for (let index = 0; index < 25; index += 1) {
+        attempts.push(
+          incomingAttempt(KEY_A, {
+            at: NOW - (24 - index) * 1000,
+            outcome: "success",
+            source: "probe",
+          })
+        );
+      }
+
+      const result = await recordPairSpreadCommit({
+        filePath,
+        attempts,
+        now: NOW,
+      });
+
+      expect(result.ok).to.equal(true);
+      expect(result.written).to.equal(true);
+      expect(result.attemptsAdded).to.equal(MAX_ATTEMPTS_PER_PAIR);
+
+      const stored = readJson(filePath);
+      expect(stored.pairs[KEY_A].attempts).to.have.length(20);
+      expect(stored.pairs[KEY_A].attempts[0].at).to.equal(NOW - 19 * 1000);
+      expect(stored.pairs[KEY_A].attempts[19].at).to.equal(NOW);
+    });
+
+    it("truncates an oversized stored attempts array on read", async function () {
+      const attempts = [];
+      for (let index = 0; index < 25; index += 1) {
+        attempts.push(
+          attempt({
+            at: NOW - (24 - index) * 1000,
+            outcome: "failure",
+            source: "scan",
+          })
+        );
+      }
+      writeJson(filePath, documentWith({ [KEY_A]: pairEntry([], attempts) }));
+
+      const loaded = await loadPairSpreadState({ filePath, now: NOW });
+
+      expect(loaded.ok).to.equal(true);
+      expect(loaded.attemptsTruncated).to.equal(5);
+      expect(loaded.state.pairs[KEY_A].attempts).to.have.length(20);
+      expect(loaded.state.pairs[KEY_A].attempts[0].at).to.equal(NOW - 19 * 1000);
+    });
+
+    it("records success, empty and failure attempts", async function () {
+      const result = await recordPairSpreadCommit({
+        filePath,
+        samples: [{ key: KEY_A, netProfitBps: 5n, at: NOW - 2000 }],
+        attempts: [
+          incomingAttempt(KEY_A, {
+            at: NOW - 2000,
+            outcome: "success",
+            source: "scan",
+          }),
+          incomingAttempt(KEY_B, {
+            at: NOW - 1000,
+            outcome: "empty",
+            source: "probe",
+          }),
+          incomingAttempt(KEY_C, {
+            at: NOW,
+            outcome: "failure",
+            source: "probe",
+            reason: "PROBE_FAILED",
+          }),
+        ],
+        now: NOW,
+      });
+
+      expect(result.ok).to.equal(true);
+      expect(result.written).to.equal(true);
+      expect(result.attemptsAdded).to.equal(3);
+
+      const stored = readJson(filePath);
+      expect(stored.pairs[KEY_A].attempts).to.deep.equal([
+        { at: NOW - 2000, outcome: "success", source: "scan" },
+      ]);
+      expect(stored.pairs[KEY_B].attempts).to.deep.equal([
+        { at: NOW - 1000, outcome: "empty", source: "probe" },
+      ]);
+      expect(stored.pairs[KEY_C].attempts).to.deep.equal([
+        {
+          at: NOW,
+          outcome: "failure",
+          source: "probe",
+          reason: "PROBE_FAILED",
+        },
+      ]);
+    });
+
+    it("never creates a sample from an empty or failure attempt", async function () {
+      const result = await recordPairSpreadCommit({
+        filePath,
+        attempts: [
+          incomingAttempt(KEY_A, {
+            at: NOW - 1000,
+            outcome: "empty",
+            source: "scan",
+          }),
+          incomingAttempt(KEY_B, {
+            at: NOW,
+            outcome: "failure",
+            source: "probe",
+            reason: "QUOTE_FAILED",
+          }),
+        ],
+        now: NOW,
+      });
+
+      expect(result.ok).to.equal(true);
+      expect(result.added).to.equal(0);
+      const stored = readJson(filePath);
+      expect(stored.pairs[KEY_A].samples).to.deep.equal([]);
+      expect(stored.pairs[KEY_B].samples).to.deep.equal([]);
+    });
+
+    it("rejects a sample committed with a non-success attempt for the same key", async function () {
+      for (const outcome of ["empty", "failure"]) {
+        const err = await rejection(
+          recordPairSpreadCommit({
+            filePath,
+            samples: [{ key: KEY_A, netProfitBps: 10n, at: NOW }],
+            attempts: [
+              incomingAttempt(KEY_A, {
+                at: NOW,
+                outcome,
+                source: "scan",
+              }),
+            ],
+            now: NOW,
+          })
+        );
+
+        expect(err).to.be.instanceOf(TypeError);
+        expect(err.message).to.include("must not be committed with a sample");
+        expect(fs.existsSync(filePath)).to.equal(false);
+      }
+    });
+
+    it("uses the explicit attempt timestamp, not the commit time", async function () {
+      const attemptAt = NOW - 5 * MINUTE_MS;
+      const result = await recordPairSpreadCommit({
+        filePath,
+        attempts: [
+          incomingAttempt(KEY_A, {
+            at: attemptAt,
+            outcome: "success",
+            source: "probe",
+          }),
+        ],
+        now: NOW,
+      });
+
+      expect(result.ok).to.equal(true);
+      expect(readJson(filePath).pairs[KEY_A].attempts).to.deep.equal([
+        { at: attemptAt, outcome: "success", source: "probe" },
+      ]);
+    });
+
+    it("rejects invalid or future attempt timestamps without writing", async function () {
+      const invalidAts = [
+        ["missing", undefined, RangeError],
+        ["zero", 0, RangeError],
+        ["negative", -1, RangeError],
+        ["float", 1.5, RangeError],
+        ["string", "1", RangeError],
+        ["future", NOW + 1, RangeError],
+        ["unsafe", Number.MAX_SAFE_INTEGER + 1, RangeError],
+      ];
+
+      for (const [label, at, ErrorType] of invalidAts) {
+        const entry = {
+          key: KEY_A,
+          outcome: "success",
+          source: "scan",
+        };
+        if (at !== undefined) entry.at = at;
+
+        const err = await rejection(
+          recordPairSpreadCommit({
+            filePath,
+            attempts: [entry],
+            now: NOW,
+          })
+        );
+
+        expect(err, label).to.be.instanceOf(ErrorType);
+        expect(fs.existsSync(filePath), label).to.equal(false);
+      }
+    });
+
+    it("rejects invalid outcomes, sources and reasons without writing", async function () {
+      const invalidAttempts = [
+        [{ outcome: "bogus" }, TypeError],
+        [{ source: "cron" }, TypeError],
+        [{ reason: "lowercase" }, TypeError],
+        [{ reason: "has space" }, TypeError],
+        [{ reason: "A".repeat(65) }, TypeError],
+        [{ reason: "Error: RPC https://rpc.example failed" }, TypeError],
+        [{ reason: "at Object.<anonymous>" }, TypeError],
+      ];
+
+      for (const [overrides, ErrorType] of invalidAttempts) {
+        const err = await rejection(
+          recordPairSpreadCommit({
+            filePath,
+            attempts: [incomingAttempt(KEY_A, overrides)],
+            now: NOW,
+          })
+        );
+
+        expect(err).to.be.instanceOf(ErrorType);
+        expect(fs.existsSync(filePath)).to.equal(false);
+      }
+    });
+
+    it("does not rewrite for an identical attempt", async function () {
+      const entry = incomingAttempt(KEY_A, {
+        at: NOW,
+        outcome: "failure",
+        source: "scan",
+        reason: "SCAN_FAILED",
+      });
+
+      const first = await recordPairSpreadCommit({
+        filePath,
+        attempts: [entry],
+        now: NOW,
+      });
+      expect(first.written).to.equal(true);
+      expect(first.attemptsAdded).to.equal(1);
+
+      const second = await recordPairSpreadCommit({
+        filePath,
+        attempts: [entry],
+        now: NOW,
+      });
+      expect(second.ok).to.equal(true);
+      expect(second.written).to.equal(false);
+      expect(second.attemptsAdded).to.equal(0);
+      expect(readJson(filePath).pairs[KEY_A].attempts).to.have.length(1);
+    });
+
+    it("fails open and refuses to write a v2 state with invalid attempts", async function () {
+      const invalidPairs = [
+        { samples: [], attempts: {} },
+        { samples: [], attempts: [{ at: NOW, outcome: "bogus", source: "scan" }] },
+        { samples: [], attempts: [{ at: NOW, outcome: "success", source: "cron" }] },
+        {
+          samples: [],
+          attempts: [
+            { at: NOW, outcome: "success", source: "scan", reason: "raw message" },
+          ],
+        },
+        {
+          samples: [],
+          attempts: [{ at: NOW + 1, outcome: "success", source: "scan" }],
+        },
+        { samples: [], attempts: [{ at: 0, outcome: "success", source: "scan" }] },
+      ];
+
+      for (const entry of invalidPairs) {
+        writeJson(filePath, documentWith({ [KEY_A]: entry }));
+        const before = readRaw(filePath);
+
+        const loaded = await loadPairSpreadState({ filePath, now: NOW });
+        expect(loaded.ok).to.equal(false);
+        expect(loaded.status).to.equal("schema_invalid");
+        expect(loaded.writable).to.equal(false);
+        expect(loaded.error.code).to.equal(PAIR_SPREAD_STORE_CODES.SCHEMA_INVALID);
+
+        const recorded = await recordPairSpreadCommit({
+          filePath,
+          attempts: [incomingAttempt(KEY_A, { at: NOW })],
+          now: NOW,
+        });
+        expect(recorded.ok).to.equal(false);
+        expect(recorded.written).to.equal(false);
+        expect(readRaw(filePath)).to.equal(before);
+        expect(tmpFilesFor(filePath)).to.deep.equal([]);
+      }
+    });
+
+    it("keeps the previous v2 file intact when a commit write fails", async function () {
+      const seeded = await recordPairSpreadCommit({
+        filePath,
+        samples: [{ key: KEY_A, netProfitBps: 10n, at: NOW - MINUTE_MS }],
+        attempts: [
+          incomingAttempt(KEY_A, {
+            at: NOW - MINUTE_MS,
+            outcome: "success",
+            source: "scan",
+          }),
+        ],
+        now: NOW,
+      });
+      expect(seeded.ok).to.equal(true);
+      const before = readRaw(filePath);
+      const originalRename = fsp.rename;
+      const warnings = [];
+
+      fsp.rename = async () => {
+        const err = new Error("simulated rename failure");
+        err.code = "EIO";
+        throw err;
+      };
+
+      try {
+        const result = await recordPairSpreadCommit({
+          filePath,
+          samples: [{ key: KEY_A, netProfitBps: 20n, at: NOW }],
+          attempts: [
+            incomingAttempt(KEY_A, {
+              at: NOW,
+              outcome: "success",
+              source: "scan",
+            }),
+          ],
+          now: NOW,
+          warn: (message) => warnings.push(message),
+        });
+
+        expect(result.ok).to.equal(false);
+        expect(result.written).to.equal(false);
+        expect(result.error.code).to.equal(PAIR_SPREAD_STORE_CODES.WRITE_FAILED);
+        expect(warnings).to.deep.equal([result.warning]);
+        expect(readRaw(filePath)).to.equal(before);
+        expect(tmpFilesFor(filePath)).to.deep.equal([]);
+      } finally {
+        fsp.rename = originalRename;
+      }
+    });
+  });
+
+  describe("v2 attempts deduplication", function () {
+    it("dedupes identical attempts already stored in a v2 file", async function () {
+      const first = attempt({
+        at: NOW - 2 * MINUTE_MS,
+        outcome: "success",
+        source: "scan",
+      });
+      const second = attempt({
+        at: NOW - MINUTE_MS,
+        outcome: "failure",
+        source: "probe",
+        reason: "PROBE_FAILED",
+      });
+      writeJson(
+        filePath,
+        documentWith({
+          [KEY_A]: pairEntry([], [first, first, second, first, second]),
+        })
+      );
+
+      const loaded = await loadPairSpreadState({ filePath, now: NOW });
+
+      expect(loaded.ok).to.equal(true);
+      expect(loaded.attemptsTruncated).to.equal(0);
+      expect(loaded.state.pairs[KEY_A].attempts).to.deep.equal([first, second]);
+    });
+
+    it("dedupes identical incoming attempts and counts one addition", async function () {
+      const entry = incomingAttempt(KEY_A, {
+        at: NOW,
+        outcome: "failure",
+        source: "probe",
+        reason: "PROBE_FAILED",
+      });
+
+      const result = await recordPairSpreadCommit({
+        filePath,
+        attempts: [entry, entry, { ...entry }],
+        now: NOW,
+      });
+
+      expect(result.ok).to.equal(true);
+      expect(result.written).to.equal(true);
+      expect(result.attemptsAdded).to.equal(1);
+      expect(readJson(filePath).pairs[KEY_A].attempts).to.deep.equal([
+        {
+          at: NOW,
+          outcome: "failure",
+          source: "probe",
+          reason: "PROBE_FAILED",
+        },
+      ]);
+    });
+
+    it("does not add an attempt already stored, even when the file contains duplicates", async function () {
+      const stored = attempt({
+        at: NOW,
+        outcome: "failure",
+        source: "scan",
+        reason: "SCAN_FAILED",
+      });
+      writeJson(
+        filePath,
+        documentWith({ [KEY_A]: pairEntry([], [stored, stored]) })
+      );
+      const before = readRaw(filePath);
+
+      const result = await recordPairSpreadCommit({
+        filePath,
+        attempts: [
+          incomingAttempt(KEY_A, {
+            at: NOW,
+            outcome: "failure",
+            source: "scan",
+            reason: "SCAN_FAILED",
+          }),
+        ],
+        now: NOW,
+      });
+
+      expect(result.ok).to.equal(true);
+      expect(result.written).to.equal(false);
+      expect(result.attemptsAdded).to.equal(0);
+      expect(readRaw(filePath)).to.equal(before);
+    });
+
+    it("dedupes stored attempts before applying the 20-entry cap", async function () {
+      const unique = [];
+      for (let index = 0; index < 15; index += 1) {
+        unique.push(
+          attempt({
+            at: NOW - (14 - index) * 1000,
+            outcome: "success",
+            source: "probe",
+          })
+        );
+      }
+      const duplicate = unique[unique.length - 1];
+      const stored = [
+        ...unique,
+        ...Array.from({ length: 10 }, () => ({ ...duplicate })),
+      ];
+      writeJson(filePath, documentWith({ [KEY_A]: pairEntry([], stored) }));
+
+      const loaded = await loadPairSpreadState({ filePath, now: NOW });
+
+      expect(loaded.ok).to.equal(true);
+      expect(loaded.attemptsTruncated).to.equal(0);
+      expect(loaded.state.pairs[KEY_A].attempts).to.deep.equal(unique);
+    });
+
+    it("keeps attemptsAdded exact when deduplication feeds the 20-entry cap", async function () {
+      const existing = [];
+      for (let index = 0; index < 19; index += 1) {
+        existing.push(
+          attempt({
+            at: NOW - (20 - index) * 1000,
+            outcome: "success",
+            source: "scan",
+          })
+        );
+      }
+      writeJson(filePath, documentWith({ [KEY_A]: pairEntry([], existing) }));
+
+      const incoming = incomingAttempt(KEY_A, {
+        at: NOW,
+        outcome: "success",
+        source: "probe",
+      });
+      const result = await recordPairSpreadCommit({
+        filePath,
+        attempts: [incoming, { ...incoming }],
+        now: NOW,
+      });
+
+      expect(result.ok).to.equal(true);
+      expect(result.written).to.equal(true);
+      expect(result.attemptsAdded).to.equal(1);
+      const stored = readJson(filePath).pairs[KEY_A].attempts;
+      expect(stored).to.have.length(MAX_ATTEMPTS_PER_PAIR);
+      expect(
+        stored.filter((entry) => entry.at === NOW && entry.source === "probe")
+      ).to.have.length(1);
+    });
+
+    it("keeps two different attempts sharing the same timestamp", async function () {
+      const success = attempt({ at: NOW, outcome: "success", source: "scan" });
+      const failure = attempt({
+        at: NOW,
+        outcome: "failure",
+        source: "probe",
+        reason: "PROBE_FAILED",
+      });
+      writeJson(
+        filePath,
+        documentWith({
+          [KEY_A]: pairEntry([], [success, failure, success]),
+        })
+      );
+
+      const loaded = await loadPairSpreadState({ filePath, now: NOW });
+
+      expect(loaded.state.pairs[KEY_A].attempts).to.deep.equal([
+        success,
+        failure,
+      ]);
+    });
+
+    it("does not merge different incoming attempts sharing a timestamp", async function () {
+      const success = incomingAttempt(KEY_A, {
+        at: NOW,
+        outcome: "success",
+        source: "scan",
+      });
+      const failure = incomingAttempt(KEY_A, {
+        at: NOW,
+        outcome: "failure",
+        source: "probe",
+        reason: "PROBE_FAILED",
+      });
+
+      const result = await recordPairSpreadCommit({
+        filePath,
+        attempts: [success, failure],
+        now: NOW,
+      });
+
+      expect(result.ok).to.equal(true);
+      expect(result.attemptsAdded).to.equal(2);
+      expect(readJson(filePath).pairs[KEY_A].attempts).to.deep.equal([
+        { at: NOW, outcome: "success", source: "scan" },
+        {
+          at: NOW,
+          outcome: "failure",
+          source: "probe",
+          reason: "PROBE_FAILED",
+        },
+      ]);
+    });
+  });
+
+  describe("v2 compatibility and schema", function () {
+    it("preserves existing attempts when recordPairSpreadSamples adds a sample", async function () {
+      const attempts = [
+        attempt({
+          at: NOW - 3 * MINUTE_MS,
+          outcome: "empty",
+          source: "probe",
+        }),
+        attempt({
+          at: NOW - 2 * MINUTE_MS,
+          outcome: "failure",
+          source: "scan",
+          reason: "SCAN_FAILED",
+        }),
+        attempt({
+          at: NOW - MINUTE_MS,
+          outcome: "success",
+          source: "scan",
+        }),
+      ];
+      writeJson(
+        filePath,
+        documentWith({
+          [KEY_A]: pairEntry([sample(5, NOW - 3 * MINUTE_MS)], attempts),
+        })
+      );
+
+      const result = await recordPairSpreadSamples({
+        filePath,
+        samples: [{ key: KEY_A, netProfitBps: 12n, at: NOW }],
+        now: NOW,
+      });
+
+      expect(result.ok).to.equal(true);
+      expect(result.status).to.equal("ok");
+      expect(result.writable).to.equal(true);
+      expect(result.written).to.equal(true);
+      expect(result.added).to.equal(1);
+      expect(result.attemptsAdded).to.equal(0);
+      expect(result.expiredPruned).to.equal(0);
+      expect(result.warning).to.equal(null);
+      expect(result.error).to.equal(null);
+      expect(result.state).to.be.an("object");
+
+      const stored = readJson(filePath).pairs[KEY_A];
+      expect(stored.attempts).to.deep.equal(attempts);
+      expect(stored.samples).to.deep.equal([
+        { netProfitBps: "5", at: NOW - 3 * MINUTE_MS },
+        { netProfitBps: "12", at: NOW },
+      ]);
+    });
+
+    it("fails open when a v2 pair omits attempts", async function () {
+      writeJson(
+        filePath,
+        documentWith({
+          [KEY_A]: { samples: [sample(10, NOW - MINUTE_MS)] },
+        })
+      );
+      const before = readRaw(filePath);
+
+      const loaded = await loadPairSpreadState({ filePath, now: NOW });
+
+      expect(loaded.ok).to.equal(false);
+      expect(loaded.status).to.equal("schema_invalid");
+      expect(loaded.writable).to.equal(false);
+      expect(loaded.error.code).to.equal(PAIR_SPREAD_STORE_CODES.SCHEMA_INVALID);
+      expect(loaded.warning).to.include("attempts must be an array");
+
+      const recorded = await recordPairSpreadSamples({
+        filePath,
+        samples: [{ key: KEY_A, netProfitBps: 20n, at: NOW }],
+        now: NOW,
+      });
+      expect(recorded.ok).to.equal(false);
+      expect(recorded.written).to.equal(false);
+      expect(recorded.writable).to.equal(false);
+      expect(readRaw(filePath)).to.equal(before);
+      expect(tmpFilesFor(filePath)).to.deep.equal([]);
+    });
+
+    it("treats states with different versions as different", function () {
+      const pairs = { [KEY_A]: pairEntry([sample(10, NOW)]) };
+
+      const fromV1 = appendPairSpreadCommit({
+        state: v1DocumentWith(pairs),
+        now: NOW,
+      });
+      const fromV2 = appendPairSpreadCommit({
+        state: documentWith(pairs),
+        now: NOW,
+      });
+
+      expect(fromV1.state.version).to.equal(PAIR_SPREAD_STORE_VERSION);
+      expect(fromV1.changed).to.equal(true);
+      expect(fromV2.changed).to.equal(false);
+    });
+
+    it("keeps the state unwritable while a stored attempt is in the future", async function () {
+      const futureAt = NOW + MINUTE_MS;
+      writeJson(
+        filePath,
+        documentWith({
+          [KEY_A]: pairEntry(
+            [sample(10, NOW)],
+            [attempt({ at: futureAt, outcome: "success", source: "scan" })]
+          ),
+        })
+      );
+      const before = readRaw(filePath);
+
+      const loaded = await loadPairSpreadState({ filePath, now: NOW });
+      expect(loaded.ok).to.equal(false);
+      expect(loaded.status).to.equal("schema_invalid");
+      expect(loaded.writable).to.equal(false);
+      expect(loaded.error.code).to.equal(PAIR_SPREAD_STORE_CODES.SCHEMA_INVALID);
+      expect(loaded.warning).to.include("must not be in the future");
+
+      const recorded = await recordPairSpreadCommit({
+        filePath,
+        attempts: [incomingAttempt(KEY_A, { at: NOW })],
+        now: NOW,
+      });
+      expect(recorded.ok).to.equal(false);
+      expect(recorded.written).to.equal(false);
+      expect(readRaw(filePath)).to.equal(before);
+      expect(tmpFilesFor(filePath)).to.deep.equal([]);
+
+      const later = await loadPairSpreadState({ filePath, now: futureAt });
+      expect(later.ok).to.equal(true);
+      expect(later.writable).to.equal(true);
+      expect(later.state.pairs[KEY_A].attempts).to.deep.equal([
+        { at: futureAt, outcome: "success", source: "scan" },
+      ]);
+    });
+  });
+
+  describe("sample and non-success conflict", function () {
+    it("does not reject a non-success attempt when the only sample is expired", async function () {
+      const result = await recordPairSpreadCommit({
+        filePath,
+        samples: [{ key: KEY_A, netProfitBps: 10n, at: NOW - DAY_MS - 1 }],
+        attempts: [
+          incomingAttempt(KEY_A, {
+            at: NOW,
+            outcome: "empty",
+            source: "probe",
+          }),
+        ],
+        now: NOW,
+      });
+
+      expect(result.ok).to.equal(true);
+      expect(result.written).to.equal(true);
+      expect(result.added).to.equal(0);
+      expect(result.attemptsAdded).to.equal(1);
+      expect(readJson(filePath).pairs[KEY_A]).to.deep.equal({
+        samples: [],
+        attempts: [{ at: NOW, outcome: "empty", source: "probe" }],
+      });
+    });
+
+    it("does not reject a non-success attempt when the sample is a lower-value duplicate", async function () {
+      writeJson(
+        filePath,
+        documentWith({ [KEY_A]: pairEntry([sample(20, NOW)]) })
+      );
+
+      const result = await recordPairSpreadCommit({
+        filePath,
+        samples: [{ key: KEY_A, netProfitBps: 10n, at: NOW }],
+        attempts: [
+          incomingAttempt(KEY_A, {
+            at: NOW,
+            outcome: "failure",
+            source: "scan",
+            reason: "SCAN_FAILED",
+          }),
+        ],
+        now: NOW,
+      });
+
+      expect(result.ok).to.equal(true);
+      expect(result.written).to.equal(true);
+      expect(result.added).to.equal(0);
+      expect(result.attemptsAdded).to.equal(1);
+      const stored = readJson(filePath).pairs[KEY_A];
+      expect(stored.samples).to.deep.equal([
+        { netProfitBps: "20", at: NOW },
+      ]);
+      expect(stored.attempts).to.deep.equal([
+        {
+          at: NOW,
+          outcome: "failure",
+          source: "scan",
+          reason: "SCAN_FAILED",
+        },
+      ]);
+    });
+
+    it("does not reject a non-success attempt when the sample is truncated by the window", async function () {
+      const existingSamples = [];
+      for (let index = 0; index < 5; index += 1) {
+        existingSamples.push(sample(index, NOW - (5 - index) * MINUTE_MS));
+      }
+      writeJson(
+        filePath,
+        documentWith({ [KEY_A]: pairEntry(existingSamples) })
+      );
+
+      const result = await recordPairSpreadCommit({
+        filePath,
+        samples: [{ key: KEY_A, netProfitBps: 99n, at: NOW - 6 * MINUTE_MS }],
+        attempts: [
+          incomingAttempt(KEY_A, {
+            at: NOW,
+            outcome: "failure",
+            source: "probe",
+            reason: "PROBE_FAILED",
+          }),
+        ],
+        now: NOW,
+        windowSize: 5,
+      });
+
+      expect(result.ok).to.equal(true);
+      expect(result.written).to.equal(true);
+      expect(result.added).to.equal(0);
+      expect(result.attemptsAdded).to.equal(1);
+      expect(readJson(filePath).pairs[KEY_A].samples).to.deep.equal(
+        existingSamples
+      );
+    });
+
+    it("does not reject a non-success attempt when the sample is an identical duplicate", async function () {
+      writeJson(
+        filePath,
+        documentWith({ [KEY_A]: pairEntry([sample(20, NOW)]) })
+      );
+
+      const result = await recordPairSpreadCommit({
+        filePath,
+        samples: [{ key: KEY_A, netProfitBps: 20n, at: NOW }],
+        attempts: [
+          incomingAttempt(KEY_A, {
+            at: NOW,
+            outcome: "empty",
+            source: "probe",
+          }),
+        ],
+        now: NOW,
+      });
+
+      expect(result.ok).to.equal(true);
+      expect(result.written).to.equal(true);
+      expect(result.added).to.equal(0);
+      expect(result.attemptsAdded).to.equal(1);
+      expect(readJson(filePath).pairs[KEY_A].samples).to.deep.equal([
+        { netProfitBps: "20", at: NOW },
+      ]);
+    });
+
+    it("still rejects a non-success attempt when the sample improves an existing timestamp", async function () {
+      writeJson(
+        filePath,
+        documentWith({ [KEY_A]: pairEntry([sample(10, NOW)]) })
+      );
+      const before = readRaw(filePath);
+
+      const err = await rejection(
+        recordPairSpreadCommit({
+          filePath,
+          samples: [{ key: KEY_A, netProfitBps: 20n, at: NOW }],
+          attempts: [
+            incomingAttempt(KEY_A, {
+              at: NOW,
+              outcome: "empty",
+              source: "probe",
+            }),
+          ],
+          now: NOW,
+        })
+      );
+
+      expect(err).to.be.instanceOf(TypeError);
+      expect(err.message).to.include("must not be committed with a sample");
+      expect(readRaw(filePath)).to.equal(before);
+      expect(tmpFilesFor(filePath)).to.deep.equal([]);
+    });
+
+    it("still rejects a non-success attempt with a new surviving sample", async function () {
+      const err = await rejection(
+        recordPairSpreadCommit({
+          filePath,
+          samples: [{ key: KEY_A, netProfitBps: 10n, at: NOW - MINUTE_MS }],
+          attempts: [
+            incomingAttempt(KEY_A, {
+              at: NOW,
+              outcome: "failure",
+              source: "scan",
+              reason: "SCAN_FAILED",
+            }),
+          ],
+          now: NOW,
+        })
+      );
+
+      expect(err).to.be.instanceOf(TypeError);
+      expect(err.message).to.include("must not be committed with a sample");
+      expect(fs.existsSync(filePath)).to.equal(false);
+    });
+  });
+
+  describe("normalization without rewrite", function () {
+    it("does not rewrite a v2 file only to deduplicate stored attempts", async function () {
+      const stored = attempt({ at: NOW, outcome: "success", source: "scan" });
+      writeJson(
+        filePath,
+        documentWith({ [KEY_A]: pairEntry([], [stored, stored, stored]) })
+      );
+      const before = readRaw(filePath);
+
+      const result = await recordPairSpreadCommit({
+        filePath,
+        attempts: [],
+        now: NOW,
+      });
+
+      expect(result.ok).to.equal(true);
+      expect(result.written).to.equal(false);
+      expect(readRaw(filePath)).to.equal(before);
+    });
+
+    it("does not rewrite a v2 file only to truncate stored attempts", async function () {
+      const stored = [];
+      for (let index = 0; index < 25; index += 1) {
+        stored.push(
+          attempt({
+            at: NOW - (24 - index) * 1000,
+            outcome: "success",
+            source: "scan",
+          })
+        );
+      }
+      writeJson(filePath, documentWith({ [KEY_A]: pairEntry([], stored) }));
+      const before = readRaw(filePath);
+
+      const loaded = await loadPairSpreadState({ filePath, now: NOW });
+      expect(loaded.attemptsTruncated).to.equal(5);
+
+      const result = await recordPairSpreadCommit({
+        filePath,
+        loaded,
+        attempts: [],
+        now: NOW,
+      });
+
+      expect(result.ok).to.equal(true);
+      expect(result.written).to.equal(false);
+      expect(readRaw(filePath)).to.equal(before);
+    });
+
+    it("does not rewrite a v1 file on a no-op commit", async function () {
+      writeJson(
+        filePath,
+        v1DocumentWith({ [KEY_A]: v1PairEntry([sample(10, NOW)]) })
+      );
+      const before = readRaw(filePath);
+
+      const loaded = await loadPairSpreadState({ filePath, now: NOW });
+      expect(loaded.migrated).to.equal(true);
+      expect(loaded.state.version).to.equal(PAIR_SPREAD_STORE_VERSION);
+
+      const result = await recordPairSpreadSamples({
+        filePath,
+        loaded,
+        samples: [],
+        now: NOW,
+      });
+
+      expect(result.ok).to.equal(true);
+      expect(result.written).to.equal(false);
+      expect(readRaw(filePath)).to.equal(before);
+      expect(readJson(filePath).version).to.equal(1);
+    });
+  });
+
   describe("atomic write", function () {
     it("writes a complete indented JSON file with a trailing newline", async function () {
       const result = await writePairSpreadState({
@@ -1306,8 +2445,9 @@ describe("bot/pairSpreadStore", function () {
       expect(result.written).to.equal(true);
       const raw = readRaw(filePath);
       expect(raw.endsWith("\n")).to.equal(true);
-      expect(raw).to.include('\n  "version": 1');
+      expect(raw).to.include('\n  "version": 2');
       expect(raw).to.include('\n      "samples": [');
+      expect(raw).to.include('\n      "attempts": [');
       expect(JSON.parse(raw).pairs[KEY_A].samples).to.deep.equal([
         { netProfitBps: "10", at: NOW },
       ]);

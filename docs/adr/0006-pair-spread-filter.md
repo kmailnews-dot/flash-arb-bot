@@ -1,6 +1,7 @@
 # ADR 0006 — Filtre dynamique de viabilité des paires (P1-16-bis)
 
-- **Statut** : accepté (conception) — intégration implémentée, non commitée
+- **Statut** : accepté — store v2 implémenté et testé (phase 1), non commité ;
+  scheduler et sondes non démarrés
 - **Date** : 2026-11-20
 - **Contexte** : P1-16-bis (écart médian dynamique), complément de P1-16
   (plafond statique de frais par jambe).
@@ -11,7 +12,9 @@
 > « FERMÉ » (intégration et tests ciblés validés, sans commit). Les décisions
 > D1–D15 restent la référence de conception ; la section « Intégration dans
 > le bot » documente les noms de variables et le comportement réellement
-> branchés dans `bot/index.js` et `bot/config.js`.
+> branchés dans `bot/index.js` et `bot/config.js`. La phase 1 du store v2
+> (samples + attempts) est précisée en D1, D6, D8 et D14 ; le scheduler et le
+> câblage des probes ne font pas partie de cette phase.
 
 ## Contexte
 
@@ -120,7 +123,9 @@ historique a été remplacé par `PAIR_SPREAD_PATH` lors de l'intégration
 
 L'état est **dérivé**, pas un registre comptable :
 
-- il ne contient que des adresses publiques et des `netProfitBps` ;
+- il ne contient que des adresses publiques, des samples (`netProfitBps`,
+  `at`) et des attempts (`at`, `outcome`, `source`, `reason` facultatif) ;
+  aucun secret n'y est stocké ;
 - il est reconstructible à partir des cycles futurs ;
 - le supprimer est toujours sûr (l'historique repart de zéro) ;
 - il n'est jamais versionné (`logs/` est ignoré par `.gitignore`) ;
@@ -128,41 +133,71 @@ L'état est **dérivé**, pas un registre comptable :
   pas la clé de route stable, et un backfill mélangerait des configurations
   différentes. L'historique commence à l'activation du filtre.
 
-Schéma versionné (exemple avec clé tronquée) :
+Schéma versionné v2 (exemple avec clé tronquée) :
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "pairs": {
     "v1|42161|0xaf88...|0x82af...|V3|0xe592...|500|0xb273...|V2|0x1b02...||": {
       "samples": [
         { "netProfitBps": "-42", "at": 1763500000000 },
         { "netProfitBps": "-37", "at": 1763500300000 }
+      ],
+      "attempts": [
+        { "at": 1763500300000, "outcome": "success", "source": "scan" },
+        { "at": 1763500600000, "outcome": "empty", "source": "probe" }
       ]
     }
   }
 }
 ```
 
-Règles de forme :
+Règles de forme v2 :
 
-- `version` vaut `1` ;
-- `pairs` est un objet (pas un tableau) indexé par la clé stable de D7 ;
-- chaque entrée contient un tableau `samples` ;
+- `version` vaut `2` pour le schéma courant. La version `1` reste **lisible**
+  pour compatibilité : elle est migrée en mémoire vers v2 et n'est jamais
+  réécrite du seul fait du chargement (voir D14).
+- `pairs` est un objet (pas un tableau) indexé par la clé stable de D7.
+- chaque entrée contient un tableau `samples` et un tableau `attempts`.
+  En v2, `attempts` est **obligatoire pour chaque paire**, même vide. Une
+  paire v2 sans `attempts` est un schéma invalide (D6 : fail-open, aucune
+  écriture). En v1, `attempts` est absent par définition ; un champ
+  `attempts` parasite dans une entrée v1 est un champ inconnu, ignoré.
 - chaque échantillon contient `netProfitBps` (chaîne décimale signée,
-  parseable en `BigInt`) et `at` (entier sûr, epoch ms, positif ou nul) ;
-- les champs inconnus sont ignorés ;
-- un tableau `samples` plus long que la fenêtre est toléré en lecture : seuls
-  les derniers par `at` sont conservés, et l'écriture tronque ;
-- les entrées dont tous les échantillons sont expirés sont supprimées à
-  l'écriture ;
+  parseable en `BigInt`) et `at` (entier sûr, epoch ms, positif ou nul).
+- chaque attempt contient `at` (entier sûr strictement positif, epoch ms,
+  **non futur** par rapport au `now` du cycle), `outcome` (`success`,
+  `empty` ou `failure`), `source` (`scan` ou `probe`) et, facultativement,
+  `reason` (code court `^[A-Z][A-Z0-9_]{0,63}$`, jamais un message libre,
+  une URL RPC ou une trace).
+- les champs inconnus sont ignorés.
+- un tableau `samples` plus long que la fenêtre est toléré en lecture :
+  seuls les derniers par `at` sont conservés, et l'écriture tronque.
+- les attempts sont triés par `at` (ordre stable pour les ex æquo), dédupliqués
+  sur le tuple exact `(at, outcome, source, reason)` **avant** le plafond de
+  20, puis plafonnés aux 20 plus récents. Deux attempts différents partageant
+  le même `at` sont conservés.
+- les entrées sans échantillon valide et sans attempt sont supprimées à
+  l'écriture.
 - toute autre violation structurelle rend le fichier **corrompu** au sens
   de D6 (fail-open, aucune écriture).
 
-Bornes : au plus `windowSize` échantillons par paire, et les paires dont le
-dernier échantillon dépasse l'ancienneté maximale sont élaguées à la
-prochaine écriture. La taille du fichier reste donc proportionnelle aux
-paires actives et à la fenêtre, pas au nombre de cycles historiques.
+Migration v1 : les samples v1 gardent leur sens ; `attempts` démarre vide et
+n'est **jamais** déduit des samples. Aucun attempt artificiel n'est créé. La
+migration est exclusivement en mémoire : le fichier reste en v1 tant qu'une
+écriture réelle (nouveau sample/attempt ou élagage d'expiré) n'a pas lieu.
+
+Bornes : au plus `windowSize` échantillons et `MAX_ATTEMPTS_PER_PAIR` (20)
+attempts par paire. Les paires dont tous les échantillons sont expirés et qui
+n'ont aucun attempt sont élaguées à la prochaine écriture. La taille du
+fichier reste donc proportionnelle aux paires actives, à la fenêtre et au
+plafond d'attempts, pas au nombre de cycles historiques.
+
+Un attempt stocké avec un `at` futur n'est **pas** purgé silencieusement : il
+rend l'état non inscriptible (D6, R7). Cette situation est temporaire : elle
+se résout d'elle-même quand l'horloge dépasse `at`, ou après correction ou
+suppression du fichier par l'opérateur.
 
 ### D2 — Échantillon retenu
 
@@ -364,8 +399,8 @@ Récupération :
   fail-open, la paire est rescannée, et un nouvel échantillon est écrit.
   C'est le filet de sécurité borné par l'ancienneté maximale.
 
-Aucune marge n'est appliquée en v1 : le rejet se fait exactement sous le
-plancher. Si la phase `shadow` montre des rejets trop agressifs, une marge
+Aucune marge n'est appliquée dans cette version du filtre : le rejet se fait
+exactement sous le plancher. Si la phase `shadow` montre des rejets trop agressifs, une marge
 `median < floor - marge` pourra être ajoutée ; ce serait une révision de
 cet ADR, pas une interprétation.
 
@@ -379,7 +414,9 @@ optimisation ; une panne de son état ne doit jamais bloquer un scan.
 | Fichier absent | `ENOENT` | scan | création à la première écriture | warning de cycle |
 | Moins de 5 échantillons valides | comptage après ancienneté | scan | oui, si de nouveaux échantillons existent | warning de cycle |
 | JSON invalide ou fichier vide | `SyntaxError` | scan | **non** | warning avec chemin |
-| Version inconnue | `version !== 1` | scan | **non** | warning avec chemin |
+| Version inconnue | `version ∉ {1, 2}` | scan | **non** | warning avec chemin |
+| Paire v2 sans `attempts` | validation D1 | scan | **non** | warning avec chemin |
+| Attempt stocké futur (`at > now`) | validation D1 | scan | **non** | warning avec chemin |
 | Schéma invalide | validation D1 | scan | **non** | warning avec chemin |
 | Erreur d'E/S | `EACCES`, `EISDIR`, autre | scan | **non** | warning avec chemin |
 | Écriture échouée | erreur au `rename`/`write` | le scan a déjà eu lieu | — | warning |
@@ -396,6 +433,26 @@ Règles :
 - Un fichier **absent** n'est pas corrompu : il est créé à la première
   écriture. Un fichier **vide** est un JSON invalide, donc corrompu,
   comme dans M1-bis.
+- La version `1` est acceptée en lecture et migrée en mémoire vers v2. Une
+  paire v2 doit contenir `attempts` (même vide) ; son absence est un schéma
+  invalide, pas une migration implicite.
+- Un attempt futur n'est pas une donnée statistique : il rend l'état
+  **non inscriptible** tant que `at > now`. Le store reste fail-open (scan
+  autorisé), aucune écriture n'écrase le fichier, et l'attempt n'est pas
+  purgé silencieusement. La situation se résout quand l'horloge dépasse
+  `at` ; l'opérateur peut aussi corriger le fichier ou le supprimer (état
+  reconstructible).
+- Le conflit sample/attempt non-success ne s'applique qu'aux samples qui
+  survivent réellement à la normalisation et à la fenêtre (nouveau timestamp
+  retenu, ou meilleure valeur à un timestamp existant). Un sample expiré,
+  tronqué par la fenêtre ou éliminé comme doublon de moindre valeur ne
+  rejette pas le commit. Les samples futurs ou invalides sont refusés par la
+  validation d'entrée, avant cette règle de conflit.
+- Une lecture ne réécrit pas le fichier uniquement pour le normaliser
+  (tri, déduplication, plafond, migration v1 en mémoire). La forme canonique
+  est persistée à la prochaine écriture réelle (D14).
+- Toute erreur de validation survient avant l'ouverture du fichier
+  temporaire : aucun fichier partiellement écrit n'est laissé.
 - Les codes de journalisation proposés sont préfixés pour éviter toute
   confusion avec les guards fail-closed :
   `PAIR_SPREAD_STATE_CORRUPT`, `PAIR_SPREAD_STATE_SCHEMA_INVALID`,
@@ -479,6 +536,15 @@ Conséquences :
 - Une paire filtrée en `enforce` ne produit aucun échantillon (aucun scan).
 - Une paire en `shadow` produit toujours son échantillon, même si la
   décision simulée est un rejet.
+- Les attempts sont dédupliqués sur le tuple exact
+  `(at, outcome, source, reason)` à chaque normalisation (lecture, commit,
+  écriture). La déduplication précède le plafond de 20 : un doublon ne peut
+  pas évincer un attempt distinct. Deux attempts différents partageant le
+  même `at` sont conservés ; seul un tuple entièrement identique est fusionné.
+- Un attempt identique déjà stocké n'est pas réajouté. `attemptsAdded` ne
+  compte que les attempts réellement ajoutés après normalisation et plafond.
+- Un attempt n'est jamais déduit d'un sample et un sample n'est jamais déduit
+  d'un attempt : les deux tableaux sont indépendants.
 
 Sans cette déduplication, une paire avec 10 tailles remplirait la fenêtre
 10 fois plus vite qu'une paire avec une seule taille, et la fenêtre ne
@@ -605,12 +671,12 @@ Pires cas :
 | Écriture échouée | historique non mis à jour | aucun |
 
 L'état ne contient aucun secret : uniquement des adresses publiques, des
-`netProfitBps` et des horodatages. Il est local et ignoré par Git
-(`logs/`). Un attaquant capable d'écrire dans `logs/` pourrait influencer
-la couverture de scan, mais ne pourrait pas autoriser une exécution : les
-guards et `decide()` restent les seules autorités. La compromission locale
-de `logs/` est un risque plus large, déjà hors périmètre des guards
-existants.
+samples (`netProfitBps`, `at`) et des attempts (`at`, `outcome`, `source`,
+`reason` facultatif). Il est local et ignoré par Git (`logs/`). Un attaquant
+capable d'écrire dans `logs/` pourrait influencer la couverture de scan,
+mais ne pourrait pas autoriser une exécution : les guards et `decide()`
+restent les seules autorités. La compromission locale de `logs/` est un
+risque plus large, déjà hors périmètre des guards existants.
 
 ### D13 — Scan, exit code et observabilité
 
@@ -686,14 +752,25 @@ qui n'existe pas.
 - Aucune écriture en mode `off`.
 - Aucune écriture si l'état est corrompu, illisible ou d'une version
   inconnue (D6).
-- Aucune écriture si aucun échantillon n'a été ajouté et aucun échantillon
-  expiré n'a été élagué : le cycle est un no-op pour l'état. C'est le cas,
-  par exemple, d'un cycle où toutes les paires sont filtrées.
+- Aucune écriture si le commit ne change rien et qu'aucun échantillon expiré
+  n'a été élagué : le cycle est un no-op pour l'état. C'est le cas, par
+  exemple, d'un cycle où toutes les paires sont filtrées.
+- Aucune réécriture uniquement pour normaliser un fichier déjà lisible. Le
+  chargement applique en mémoire le tri, la déduplication, le plafond et la
+  migration v1 ; un commit sans changement réel laisse le fichier tel quel.
+  La forme canonique v2 est persistée à la prochaine écriture réelle (nouveau
+  sample/attempt ou élagage d'expiré). Cette politique ne compromet ni
+  l'intégrité ni la migration : chaque lecture réapplique la même
+  normalisation, et un fichier v1 reste lisible jusqu'à cette écriture. Seul
+  un attempt futur bloque l'écriture (D6) et n'est jamais contourné par une
+  normalisation silencieuse.
 - Une erreur d'écriture est un warning, pas une erreur de cycle : le scan a
   déjà eu lieu, l'`exitCode` n'est pas modifié.
-- Les échantillons sont triés par `at` avant écriture, et les entrées sans
-  échantillon valide sont supprimées. Le JSON est indenté (2 espaces) avec
-  un saut de ligne final, comme les autres états.
+- Les échantillons sont triés par `at` avant écriture. Les attempts sont
+  triés par `at`, dédupliqués sur le tuple exact puis plafonnés à 20. Les
+  entrées sans échantillon valide et sans attempt sont supprimées. Le JSON
+  est indenté (2 espaces) avec un saut de ligne final, comme les autres
+  états. Le fichier écrit est toujours en version 2.
 - Aucun verrou inter-process. `fs.rename` garantit qu'un lecteur ne voit
   jamais un JSON tronqué, mais deux cycles concurrents peuvent produire un
   « dernier écrivain gagne » et perdre les échantillons de l'autre. C'est
@@ -728,8 +805,10 @@ ADR.
 ### Intégration dans le bot
 
 L'implémentation a aligné les noms proposés en D15 sur le style de
-`bot/config.js`. Les décisions D1–D14 sont inchangées ; seuls les noms de
-variables et les points de branchement sont précisés ici.
+`bot/config.js`. Les décisions D1–D14 restent la référence ; seuls les noms
+de variables et les points de branchement sont précisés ici. La phase 1 du
+store v2 ajoute la persistance des attempts ; le scheduler et le câblage des
+probes ne font pas partie de cette phase.
 
 | Réglage | Variable réellement lue | Défaut | Validation |
 |---|---|---|---|
@@ -764,6 +843,12 @@ Points de branchement :
   `recordPairSpreadSamples({ loaded })` (D14). Aucune écriture en mode `off`,
   si l'état n'est pas inscriptible, ou si rien n'a changé. Un état corrompu,
   illisible ou d'une version inconnue n'est jamais remplacé.
+- Le store expose aussi `recordPairSpreadCommit({ loaded, samples, attempts })`
+  pour écrire samples et attempts dans la même écriture atomique, et conserve
+  `recordPairSpreadSamples` / `appendPairSpreadSamples` comme API compatible.
+  `bot/index.js` utilise encore l'API samples-only : le câblage des attempts
+  et des probes n'est pas fait dans cette phase. Le fichier écrit est en v2 ;
+  `attempts` est obligatoire pour chaque paire, même vide.
 - L'`exitCode` suit D13 : `0` si `enforce` a filtré toutes les paires
   configurées sans erreur indépendante ; `1` sinon (aucune paire, zéro scan
   non volontaire, refus chainId, erreur de paire ou seuil RPC).
@@ -934,7 +1019,8 @@ Points qui devront être recalibrés après la phase `shadow` :
 - `bot/pairSpread.js` — décision pure `decidePairSpread`, clé
   `buildPairKey`, échantillon `bestNetProfitBps`, fenêtre et médiane
 - `bot/pairSpreadStore.js` — `loadPairSpreadState`,
-  `recordPairSpreadSamples`, écriture atomique et versionnement
+  `recordPairSpreadCommit`, `recordPairSpreadSamples`, schéma v2
+  (samples + attempts), lecture v1, écriture atomique et versionnement
 - `test/BotPairSpread.test.js`, `test/BotPairSpreadStore.test.js`,
   `test/BotMain.test.js` — couverture ciblée de l'intégration
 - `bot/index.js` — boucle de scan, `selectBestResult`, `exitCode`
@@ -980,7 +1066,8 @@ Points qui devront être recalibrés après la phase `shadow` :
 11. **Clé stable** : chainId, tokens, types de jambes, routeurs et
     paramètres V3 pertinents, dont quoter ; adresses en minuscules.
 12. **Déduplication** : échantillons dédupliqués par clé, un seul par
-    paire et par cycle.
+    paire et par cycle ; attempts dédupliqués sur le tuple exact
+    `(at, outcome, source, reason)` avant le plafond de 20.
 13. **Médiane exacte** : `BigInt`, comparaison sur la médiane doublée,
     aucune division ni flottant.
 14. **Aucun double comptage** : premium, frais de pool, gaz et L1 sont
@@ -994,8 +1081,35 @@ Points qui devront être recalibrés après la phase `shadow` :
 18. **Écriture atomique** : au plus une écriture groupée par cycle, après
     la boucle des paires.
 
+### Compléments v2 — stockage des tentatives
+
+Le schéma v2 conserve, pour chaque paire, un tableau `attempts` obligatoire
+(éventuellement vide) en plus de `samples`.
+
+- `outcome` : `success`, `empty` ou `failure`.
+- `source` : `scan` ou `probe`.
+- `reason` facultatif : code court `^[A-Z][A-Z0-9_]{0,63}$`, jamais un
+  message libre, une URL RPC ou une trace.
+- `at` : entier sûr strictement positif, non futur par rapport au `now` du
+  cycle. Un attempt futur rend l'état non inscriptible (fail-open) jusqu'à
+  ce que l'horloge le dépasse ; il n'est jamais purgé silencieusement.
+- plafond : 20 attempts par paire, les plus récents par `at`.
+- déduplication : tuple exact avant plafond ; deux attempts différents au
+  même `at` sont conservés.
+- migration v1 : samples inchangés, `attempts` vide, aucun attempt déduit
+  d'un sample ; migration en mémoire, réécriture v2 seulement lors d'une
+  écriture réelle.
+- un attempt n'est jamais fabriqué depuis un sample et un sample n'est
+  jamais fabriqué depuis un attempt.
+- un attempt `empty`/`failure` ne peut pas accompagner un sample qui survit
+  à la normalisation ; les samples expirés, tronqués ou doublons de moindre
+  valeur ne déclenchent pas ce conflit.
+- aucune réécriture uniquement pour normaliser un fichier lisible (tri,
+  déduplication, plafond, migration v1) ; la forme canonique est persistée
+  à la prochaine écriture réelle.
+
 ---
 
 *Fin de l'ADR 0006. Ce document formalise les décisions de conception.
-L'intégration dans le bot, sa configuration et ses tests sont réalisés
-séparément et restent soumis à validation avant commit.*
+Le store v2 (phase 1) est implémenté et testé ; le scheduler, le câblage des
+probes et le commit restent à valider séparément.*
