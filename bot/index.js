@@ -25,7 +25,7 @@ const {
 const {
   DEFAULT_PAIR_SPREADS_PATH,
   loadPairSpreadState,
-  recordPairSpreadSamples,
+  recordPairSpreadCommit,
 } = require("./pairSpreadStore");
 
 const AAVE_POOL_PREMIUM_ABI = ["function FLASHLOAN_PREMIUM_TOTAL() view returns (uint128)"];
@@ -77,6 +77,43 @@ function compareResults(a, b) {
 function selectBestResult(results) {
   if (!Array.isArray(results) || results.length === 0) return null;
   return [...results].sort(compareResults)[0];
+}
+
+const PAIR_SPREAD_ATTEMPT_PRECEDENCE = Object.freeze({
+  empty: 0,
+  failure: 1,
+  success: 2,
+});
+
+/// Keeps exactly one final attempt per pair key and cycle. A valid observation
+/// always wins over a failure or an empty result encountered for the same key.
+function mergePairSpreadAttempt(attempts, attempt) {
+  const existing = attempts.get(attempt.key);
+  if (
+    existing === undefined ||
+    PAIR_SPREAD_ATTEMPT_PRECEDENCE[attempt.outcome] >
+      PAIR_SPREAD_ATTEMPT_PRECEDENCE[existing.outcome]
+  ) {
+    attempts.set(attempt.key, attempt);
+  }
+}
+
+/// Deterministic classification of a scan that produced no usable sample.
+/// A quoted attempt is a non-error object with a usable amountIn. QUOTE_ERRORS
+/// is reserved for results made only of errors or unusable entries; a quote
+/// that came back without a calculable netProfitBps is UNPRICED.
+function classifyEmptyScan(results) {
+  if (results.length === 0) return "NO_RESULTS";
+  const hasQuotedAttempt = results.some(
+    (result) =>
+      result !== null &&
+      typeof result === "object" &&
+      !Array.isArray(result) &&
+      !result.error &&
+      typeof result.amountIn === "bigint" &&
+      result.amountIn > 0n
+  );
+  return hasQuotedAttempt ? "UNPRICED" : "QUOTE_ERRORS";
 }
 
 function logPairSpreadEvent(event) {
@@ -331,6 +368,7 @@ async function main({
   let wouldFilterPairs = 0;
   let pairErrors = 0;
   const pairSpreadSamples = new Map();
+  const pairSpreadAttempts = new Map();
   const executionConfig = { ...cycleConfig, ethUsdPrice, aaveFlashLoanPremiumBps };
   const configuredPairs = Array.isArray(cycleConfig.pairs) ? cycleConfig.pairs : [];
 
@@ -358,7 +396,6 @@ async function main({
           pair: pair.label,
           message: `[PAIR SPREAD] could not evaluate pair=${pair.label}: ${err.message}. Scanning anyway.`,
         });
-        pairKey = null;
         pairDecision = null;
       }
 
@@ -406,14 +443,33 @@ async function main({
 
     try {
       console.log(`\nScanning ${pair.label} ...`);
-      const results = await scanPairImpl({
-        provider,
-        pair,
-        config: executionConfig,
-        gasPriceWei,
-        ethUsdPrice,
-        blockTag,
-      });
+      let results;
+      try {
+        results = await scanPairImpl({
+          provider,
+          pair,
+          config: executionConfig,
+          gasPriceWei,
+          ethUsdPrice,
+          blockTag,
+        });
+        if (!Array.isArray(results)) {
+          throw new TypeError("scanPair must return an array of results");
+        }
+      } catch (err) {
+        // Only a throw from scanPair itself is a scan failure. Logging,
+        // scans.jsonl and maybeExecute errors happen outside this boundary.
+        if (pairKey !== null) {
+          mergePairSpreadAttempt(pairSpreadAttempts, {
+            key: pairKey,
+            outcome: "failure",
+            source: "scan",
+            at: pairSpreadNow,
+            reason: "SCAN_ERROR",
+          });
+        }
+        throw err;
+      }
 
       if (pairKey !== null) {
         const sampleBps = bestNetProfitBps(results);
@@ -426,6 +482,20 @@ async function main({
               at: pairSpreadNow,
             });
           }
+          mergePairSpreadAttempt(pairSpreadAttempts, {
+            key: pairKey,
+            outcome: "success",
+            source: "scan",
+            at: pairSpreadNow,
+          });
+        } else {
+          mergePairSpreadAttempt(pairSpreadAttempts, {
+            key: pairKey,
+            outcome: "empty",
+            source: "scan",
+            at: pairSpreadNow,
+            reason: classifyEmptyScan(results),
+          });
         }
       }
 
@@ -516,10 +586,11 @@ async function main({
 
   if (pairSpread.mode !== "off" && pairSpreadStateAvailable && pairSpreadLoaded) {
     try {
-      const recordResult = await recordPairSpreadSamples({
+      const recordResult = await recordPairSpreadCommit({
         filePath: pairSpread.filePath,
         loaded: pairSpreadLoaded,
         samples: Array.from(pairSpreadSamples.values()),
+        attempts: Array.from(pairSpreadAttempts.values()),
         now: pairSpreadNow,
         windowSize: pairSpread.windowSize,
         maxAgeMs: pairSpread.maxAgeMs,
@@ -534,11 +605,13 @@ async function main({
         writable: recordResult.writable,
         written: recordResult.written,
         added: recordResult.added,
+        attemptsAdded: recordResult.attemptsAdded,
         expiredPruned: recordResult.expiredPruned,
         warning: warningIsNew ? recordResult.warning : null,
         message:
           `[PAIR SPREAD] persist status=${recordResult.status} written=${recordResult.written} ` +
-          `added=${recordResult.added} expiredPruned=${recordResult.expiredPruned}` +
+          `added=${recordResult.added} attemptsAdded=${recordResult.attemptsAdded} ` +
+          `expiredPruned=${recordResult.expiredPruned}` +
           (warningIsNew ? ` warning=${recordResult.warning}` : ""),
       });
     } catch (err) {

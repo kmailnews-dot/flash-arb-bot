@@ -105,11 +105,11 @@ describe("bot/index main", function () {
     }));
   }
 
-  function writePairSpreadFile(filePath, pairs) {
+  function writePairSpreadFile(filePath, pairs, { version = 1 } = {}) {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(
       filePath,
-      `${JSON.stringify({ version: 1, pairs }, null, 2)}\n`,
+      `${JSON.stringify({ version, pairs }, null, 2)}\n`,
       "utf8"
     );
   }
@@ -919,10 +919,11 @@ describe("bot/index main", function () {
     expect(stored.pairs[key].samples[0].netProfitBps).to.equal("25");
   });
 
-  it("records no sample when netProfitBps is null", async function () {
+  it("records an empty attempt and no sample when netProfitBps is null", async function () {
     const tmpDir = makeSpreadTmpDir("flash-arb-pair-spread-null-");
     const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
     const pair = makePairSpreadPair(80);
+    const key = buildPairKey({ chainId: 31337, pair });
 
     const { result: summary } = await captureConsole(() =>
       main({
@@ -933,7 +934,15 @@ describe("bot/index main", function () {
     );
 
     expect(summary.scanned).to.equal(1);
-    expect(fs.existsSync(pairSpreadPath)).to.equal(false);
+    expect(fs.existsSync(pairSpreadPath)).to.equal(true);
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(stored.pairs[key].samples).to.deep.equal([]);
+    expect(stored.pairs[key].attempts).to.have.length(1);
+    expect(stored.pairs[key].attempts[0]).to.include({
+      outcome: "empty",
+      source: "scan",
+      reason: "UNPRICED",
+    });
   });
 
   it("records one sample per route and cycle, keeping the best value", async function () {
@@ -1105,6 +1114,731 @@ describe("bot/index main", function () {
 
     expect(summary.scanned).to.equal(1);
     expect(fs.existsSync(pairSpreadPath)).to.equal(false);
+  });
+
+  it("records a success attempt with its sample after a priced scan", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-attempt-success-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(170);
+    const key = buildPairKey({ chainId: 31337, pair });
+
+    const { result: summary } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [pair] }),
+        scanPair: async () => [scanResult({ netProfitBps: 42n })],
+      })
+    );
+
+    expect(summary.scanned).to.equal(1);
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(stored.version).to.equal(2);
+    expect(stored.pairs[key].samples).to.have.length(1);
+    expect(stored.pairs[key].samples[0].netProfitBps).to.equal("42");
+    expect(stored.pairs[key].attempts).to.have.length(1);
+    expect(stored.pairs[key].attempts[0]).to.include({
+      outcome: "success",
+      source: "scan",
+    });
+    expect(stored.pairs[key].attempts[0]).to.not.have.property("reason");
+    expect(stored.pairs[key].attempts[0].at).to.equal(stored.pairs[key].samples[0].at);
+  });
+
+  it("records success attempts for zero and negative valid net profit", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-attempt-zero-negative-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const zeroPair = makePairSpreadPair(180);
+    const negativePair = makePairSpreadPair(190);
+    const zeroKey = buildPairKey({ chainId: 31337, pair: zeroPair });
+    const negativeKey = buildPairKey({ chainId: 31337, pair: negativePair });
+    const bpsByLabel = new Map([
+      [zeroPair.label, 0n],
+      [negativePair.label, -25n],
+    ]);
+
+    const { result: summary } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [zeroPair, negativePair] }),
+        scanPair: async ({ pair }) => [
+          scanResult({ netProfitBps: bpsByLabel.get(pair.label) }),
+        ],
+      })
+    );
+
+    expect(summary.scanned).to.equal(2);
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(stored.pairs[zeroKey].samples[0].netProfitBps).to.equal("0");
+    expect(stored.pairs[zeroKey].attempts[0].outcome).to.equal("success");
+    expect(stored.pairs[negativeKey].samples[0].netProfitBps).to.equal("-25");
+    expect(stored.pairs[negativeKey].attempts[0].outcome).to.equal("success");
+  });
+
+  it("records an empty NO_RESULTS attempt when scanPair returns no result", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-attempt-no-results-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(200);
+    const key = buildPairKey({ chainId: 31337, pair });
+
+    const { result: summary } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [pair] }),
+        scanPair: async () => [],
+      })
+    );
+
+    expect(summary.scanned).to.equal(0);
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(stored.pairs[key].samples).to.deep.equal([]);
+    expect(stored.pairs[key].attempts).to.have.length(1);
+    expect(stored.pairs[key].attempts[0]).to.include({
+      outcome: "empty",
+      source: "scan",
+      reason: "NO_RESULTS",
+    });
+  });
+
+  it("records an empty UNPRICED attempt when no netProfitBps is calculable", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-attempt-unpriced-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(210);
+    const key = buildPairKey({ chainId: 31337, pair });
+
+    const { result: summary } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [pair] }),
+        scanPair: async () => [scanResult({ netProfitBps: null })],
+      })
+    );
+
+    expect(summary.scanned).to.equal(1);
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(stored.pairs[key].samples).to.deep.equal([]);
+    expect(stored.pairs[key].attempts).to.have.length(1);
+    expect(stored.pairs[key].attempts[0]).to.include({
+      outcome: "empty",
+      source: "scan",
+      reason: "UNPRICED",
+    });
+  });
+
+  it("records an empty QUOTE_ERRORS attempt when every result is an error", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-attempt-quote-errors-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(220);
+    const key = buildPairKey({ chainId: 31337, pair });
+
+    const { result: summary } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [pair] }),
+        scanPair: async () => [
+          scanResult({ error: new Error("RPC down") }),
+          scanResult({ error: "DEPTH_EXCEEDED" }),
+        ],
+      })
+    );
+
+    expect(summary.scanned).to.equal(2);
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(stored.pairs[key].samples).to.deep.equal([]);
+    expect(stored.pairs[key].attempts).to.have.length(1);
+    expect(stored.pairs[key].attempts[0]).to.include({
+      outcome: "empty",
+      source: "scan",
+      reason: "QUOTE_ERRORS",
+    });
+  });
+
+  it("classifies entries with missing or non-positive amountIn as QUOTE_ERRORS", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-attempt-invalid-amount-in-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const zeroPair = makePairSpreadPair(40);
+    const negativePair = makePairSpreadPair(50);
+    const missingPair = makePairSpreadPair(60);
+    const zeroKey = buildPairKey({ chainId: 31337, pair: zeroPair });
+    const negativeKey = buildPairKey({ chainId: 31337, pair: negativePair });
+    const missingKey = buildPairKey({ chainId: 31337, pair: missingPair });
+    const missingAmountIn = scanResult({ netProfitBps: null });
+    delete missingAmountIn.amountIn;
+    const resultsByLabel = new Map([
+      [zeroPair.label, scanResult({ netProfitBps: null, amountIn: 0n })],
+      [negativePair.label, scanResult({ netProfitBps: null, amountIn: -1n })],
+      [missingPair.label, missingAmountIn],
+    ]);
+
+    const { result: summary } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, {
+          pairs: [zeroPair, negativePair, missingPair],
+        }),
+        scanPair: async ({ pair }) => [resultsByLabel.get(pair.label)],
+      })
+    );
+
+    expect(summary.scanned).to.equal(3);
+    const stored = readPairSpreadFile(pairSpreadPath);
+    for (const key of [zeroKey, negativeKey, missingKey]) {
+      expect(stored.pairs[key].samples).to.deep.equal([]);
+      expect(stored.pairs[key].attempts).to.have.length(1);
+      expect(stored.pairs[key].attempts[0]).to.include({
+        outcome: "empty",
+        source: "scan",
+        reason: "QUOTE_ERRORS",
+      });
+    }
+  });
+
+  it("keeps UNPRICED when at least one usable quote has no calculable bps", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-attempt-mixed-quote-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(70);
+    const key = buildPairKey({ chainId: 31337, pair });
+
+    const { result: summary } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [pair] }),
+        scanPair: async () => [
+          scanResult({ netProfitBps: null, amountIn: 0n }),
+          scanResult({ netProfitBps: null }),
+        ],
+      })
+    );
+
+    expect(summary.scanned).to.equal(2);
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(stored.pairs[key].attempts).to.have.length(1);
+    expect(stored.pairs[key].attempts[0]).to.include({
+      outcome: "empty",
+      source: "scan",
+      reason: "UNPRICED",
+    });
+  });
+
+  it("records a failure SCAN_ERROR attempt when scanPair throws", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-attempt-scan-failure-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(230);
+    const key = buildPairKey({ chainId: 31337, pair });
+
+    const { result: summary, warnings } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [pair] }),
+        scanPair: async () => {
+          throw new Error("SCAN_BOOM");
+        },
+      })
+    );
+
+    expect(summary.scanned).to.equal(0);
+    expect(summary.exitCode).to.equal(1);
+    expect(warnings.join("\n")).to.include("SCAN_BOOM");
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(stored.pairs[key].samples).to.deep.equal([]);
+    expect(stored.pairs[key].attempts).to.have.length(1);
+    expect(stored.pairs[key].attempts[0]).to.include({
+      outcome: "failure",
+      source: "scan",
+      reason: "SCAN_ERROR",
+    });
+    expect(stored.pairs[key].attempts[0]).to.not.have.property("message");
+  });
+
+  it("records a failure SCAN_ERROR attempt when scanPair returns a non-array", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-attempt-scan-contract-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const undefinedPair = makePairSpreadPair(80);
+    const objectPair = makePairSpreadPair(90);
+    const undefinedKey = buildPairKey({ chainId: 31337, pair: undefinedPair });
+    const objectKey = buildPairKey({ chainId: 31337, pair: objectPair });
+
+    const { result: summary, warnings } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, {
+          pairs: [undefinedPair, objectPair],
+        }),
+        scanPair: async ({ pair }) =>
+          pair.label === undefinedPair.label ? undefined : { results: [] },
+      })
+    );
+
+    expect(summary.scanned).to.equal(0);
+    expect(summary.exitCode).to.equal(1);
+    expect(warnings.join("\n")).to.include(
+      "scanPair must return an array of results"
+    );
+    expect(warnings.join("\n")).to.not.include("bestNetProfitBps");
+    const stored = readPairSpreadFile(pairSpreadPath);
+    for (const key of [undefinedKey, objectKey]) {
+      expect(stored.pairs[key].samples).to.deep.equal([]);
+      expect(stored.pairs[key].attempts).to.have.length(1);
+      expect(stored.pairs[key].attempts[0]).to.include({
+        outcome: "failure",
+        source: "scan",
+        reason: "SCAN_ERROR",
+      });
+    }
+  });
+
+  it("records no attempt for a pair skipped by enforce", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-attempt-enforce-skip-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(240);
+    const key = buildPairKey({ chainId: 31337, pair });
+    writePairSpreadFile(pairSpreadPath, {
+      [key]: { samples: pairSpreadSamples([-80, -60, -40, -20, -10]) },
+    });
+    let scans = 0;
+
+    const { result: summary } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [pair] }),
+        scanPair: async () => {
+          scans += 1;
+          return [scanResult({ netProfitBps: 10n })];
+        },
+      })
+    );
+
+    expect(scans).to.equal(0);
+    expect(summary.filteredPairs).to.equal(1);
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(stored.version).to.equal(1);
+    expect(stored.pairs[key]).to.not.have.property("attempts");
+  });
+
+  it("performs no pair-spread store read or write in mode off", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-attempt-mode-off-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(250);
+    const originalReadFile = fsp.readFile;
+    let pairSpreadReads = 0;
+    fsp.readFile = async (file, ...args) => {
+      if (path.resolve(file) === path.resolve(pairSpreadPath)) pairSpreadReads += 1;
+      return originalReadFile.call(fsp, file, ...args);
+    };
+
+    let summary;
+    try {
+      ({ result: summary } = await captureConsole(() =>
+        main({
+          provider: makeMinimalProvider(),
+          config: makeMinimalConfig(tmpDir, {
+            pairs: [pair],
+            pairSpreadMode: "off",
+            pairSpreadPath,
+          }),
+          scanPair: async () => [scanResult({ netProfitBps: 10n })],
+        })
+      ));
+    } finally {
+      fsp.readFile = originalReadFile;
+    }
+
+    expect(summary.scanned).to.equal(1);
+    expect(pairSpreadReads).to.equal(0);
+    expect(fs.existsSync(pairSpreadPath)).to.equal(false);
+  });
+
+  it("keeps one attempt per key with success > failure > empty precedence", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-attempt-precedence-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const keyAFailurePair = makePairSpreadPair(200);
+    const keyBFailurePair = makePairSpreadPair(210);
+    const keyCSuccessPair = makePairSpreadPair(220);
+    const keyDSuccessPair = makePairSpreadPair(230);
+    const keyESuccessPair = makePairSpreadPair(240);
+    const keyAEmptyPair = { ...keyAFailurePair, label: "A empty first" };
+    const keyAFailure = { ...keyAFailurePair, label: "A failure second" };
+    const keyBFailure = { ...keyBFailurePair, label: "B failure first" };
+    const keyBSuccess = { ...keyBFailurePair, label: "B success second" };
+    const keyCEmpty = { ...keyCSuccessPair, label: "C empty first" };
+    const keyCSuccess = { ...keyCSuccessPair, label: "C success second" };
+    const keyDSuccess = { ...keyDSuccessPair, label: "D success first" };
+    const keyDFailure = { ...keyDSuccessPair, label: "D failure second" };
+    const keyESuccess = { ...keyESuccessPair, label: "E success first" };
+    const keyEEmpty = { ...keyESuccessPair, label: "E empty second" };
+    const keyA = buildPairKey({ chainId: 31337, pair: keyAFailurePair });
+    const keyB = buildPairKey({ chainId: 31337, pair: keyBFailurePair });
+    const keyC = buildPairKey({ chainId: 31337, pair: keyCSuccessPair });
+    const keyD = buildPairKey({ chainId: 31337, pair: keyDSuccessPair });
+    const keyE = buildPairKey({ chainId: 31337, pair: keyESuccessPair });
+    const behavior = new Map([
+      [keyAEmptyPair.label, "empty"],
+      [keyAFailure.label, "throw"],
+      [keyBFailure.label, "throw"],
+      [keyBSuccess.label, "success"],
+      [keyCEmpty.label, "empty"],
+      [keyCSuccess.label, "success"],
+      [keyDSuccess.label, "success"],
+      [keyDFailure.label, "throw"],
+      [keyESuccess.label, "success"],
+      [keyEEmpty.label, "empty"],
+    ]);
+
+    const { result: summary, warnings } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, {
+          pairs: [
+            keyAEmptyPair,
+            keyAFailure,
+            keyBFailure,
+            keyBSuccess,
+            keyCEmpty,
+            keyCSuccess,
+            keyDSuccess,
+            keyDFailure,
+            keyESuccess,
+            keyEEmpty,
+          ],
+        }),
+        scanPair: async ({ pair }) => {
+          const outcome = behavior.get(pair.label);
+          if (outcome === "throw") throw new Error(`boom ${pair.label}`);
+          if (outcome === "empty") return [];
+          return [scanResult({ netProfitBps: 55n })];
+        },
+      })
+    );
+
+    expect(summary.scanned).to.equal(4);
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(stored.version).to.equal(2);
+    expect(stored.pairs[keyA].samples).to.deep.equal([]);
+    expect(stored.pairs[keyA].attempts).to.have.length(1);
+    expect(stored.pairs[keyA].attempts[0]).to.include({
+      outcome: "failure",
+      reason: "SCAN_ERROR",
+    });
+    expect(stored.pairs[keyB].samples[0].netProfitBps).to.equal("55");
+    expect(stored.pairs[keyB].attempts).to.have.length(1);
+    expect(stored.pairs[keyB].attempts[0].outcome).to.equal("success");
+    expect(stored.pairs[keyC].samples[0].netProfitBps).to.equal("55");
+    expect(stored.pairs[keyC].attempts).to.have.length(1);
+    expect(stored.pairs[keyC].attempts[0].outcome).to.equal("success");
+    // D1: a success is never replaced by a later failure or empty observation.
+    expect(stored.pairs[keyD].samples).to.have.length(1);
+    expect(stored.pairs[keyD].samples[0].netProfitBps).to.equal("55");
+    expect(stored.pairs[keyD].attempts).to.have.length(1);
+    expect(stored.pairs[keyD].attempts[0]).to.include({
+      outcome: "success",
+      source: "scan",
+    });
+    expect(stored.pairs[keyE].samples).to.have.length(1);
+    expect(stored.pairs[keyE].samples[0].netProfitBps).to.equal("55");
+    expect(stored.pairs[keyE].attempts).to.have.length(1);
+    expect(stored.pairs[keyE].attempts[0]).to.include({
+      outcome: "success",
+      source: "scan",
+    });
+    // The Store commit succeeded and emitted no persistence warning.
+    expect(warnings.join("\n")).to.not.include("persist status=");
+    expect(warnings.join("\n")).to.not.include("could not persist state");
+  });
+
+  it("keeps the first observation when two attempts have the same outcome", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-attempt-tie-break-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const basePair = makePairSpreadPair(250);
+    const key = buildPairKey({ chainId: 31337, pair: basePair });
+    const first = { ...basePair, label: "same key empty first" };
+    const second = { ...basePair, label: "same key empty second" };
+
+    const { result: summary } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [first, second] }),
+        scanPair: async ({ pair }) =>
+          pair.label === first.label
+            ? []
+            : [scanResult({ netProfitBps: null })],
+      })
+    );
+
+    expect(summary.scanned).to.equal(1);
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(stored.pairs[key].attempts).to.have.length(1);
+    expect(stored.pairs[key].attempts[0]).to.include({
+      outcome: "empty",
+      source: "scan",
+      reason: "NO_RESULTS",
+    });
+  });
+
+  it("does not record a failure when maybeExecute throws after a successful scan", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-attempt-execute-error-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(230);
+    const key = buildPairKey({ chainId: 31337, pair });
+
+    const { result: summary, warnings } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [pair] }),
+        scanPair: async () => [
+          scanResult({ netProfitBps: 20n, netProfitUsd: 10, isOpportunity: true }),
+        ],
+        maybeExecute: async () => {
+          throw new Error("EXEC_BOOM");
+        },
+      })
+    );
+
+    expect(summary.scanned).to.equal(1);
+    expect(warnings.join("\n")).to.include("EXEC_BOOM");
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(stored.pairs[key].samples[0].netProfitBps).to.equal("20");
+    expect(stored.pairs[key].attempts).to.have.length(1);
+    expect(stored.pairs[key].attempts[0]).to.include({
+      outcome: "success",
+      source: "scan",
+    });
+  });
+
+  it("does not record a scan failure when the scan journal write fails", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-attempt-journal-error-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(240);
+    const key = buildPairKey({ chainId: 31337, pair });
+
+    const { result: summary, warnings } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, {
+          pairs: [pair],
+          // A directory makes appendScanResult fail with EISDIR.
+          scanLogPath: tmpDir,
+        }),
+        scanPair: async () => [scanResult({ netProfitBps: 30n })],
+      })
+    );
+
+    expect(summary.scanned).to.equal(1);
+    expect(warnings.join("\n")).to.include("could not persist scan result");
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(stored.pairs[key].attempts).to.have.length(1);
+    expect(stored.pairs[key].attempts[0]).to.include({
+      outcome: "success",
+      source: "scan",
+    });
+  });
+
+  it("does not record a scan failure when result logging throws", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-attempt-log-error-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(250);
+    const key = buildPairKey({ chainId: 31337, pair });
+
+    const { result: summary, warnings } = await captureConsole(() => {
+      const collector = console.log;
+      return main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [pair] }),
+        scanPair: async () => {
+          console.log = () => {
+            console.log = collector;
+            throw new Error("LOG_BOOM");
+          };
+          return [scanResult({ netProfitBps: 35n })];
+        },
+      });
+    });
+
+    expect(summary.scanned).to.equal(1);
+    expect(warnings.join("\n")).to.include("LOG_BOOM");
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(stored.pairs[key].attempts).to.have.length(1);
+    expect(stored.pairs[key].attempts[0]).to.include({
+      outcome: "success",
+      source: "scan",
+    });
+  });
+
+  it("writes samples and attempts once after the loop", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-attempt-one-write-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const successPair = makePairSpreadPair(170);
+    const emptyPair = makePairSpreadPair(180);
+    const failingPair = makePairSpreadPair(190);
+    const successKey = buildPairKey({ chainId: 31337, pair: successPair });
+    const emptyKey = buildPairKey({ chainId: 31337, pair: emptyPair });
+    const failingKey = buildPairKey({ chainId: 31337, pair: failingPair });
+    const originalRename = fsp.rename;
+    let pairSpreadWrites = 0;
+    fsp.rename = async (from, to) => {
+      if (path.resolve(to) === path.resolve(pairSpreadPath)) pairSpreadWrites += 1;
+      return originalRename.call(fsp, from, to);
+    };
+
+    let summary;
+    try {
+      ({ result: summary } = await captureConsole(() =>
+        main({
+          provider: makeMinimalProvider(),
+          config: makePairSpreadConfig(tmpDir, {
+            pairs: [successPair, emptyPair, failingPair],
+          }),
+          scanPair: async ({ pair }) => {
+            if (pair.label === failingPair.label) throw new Error("boom");
+            if (pair.label === emptyPair.label) return [];
+            return [scanResult({ netProfitBps: 12n })];
+          },
+        })
+      ));
+    } finally {
+      fsp.rename = originalRename;
+    }
+
+    expect(summary.scanned).to.equal(1);
+    expect(pairSpreadWrites).to.equal(1);
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(Object.keys(stored.pairs)).to.have.length(3);
+    expect(stored.pairs[successKey].attempts[0].outcome).to.equal("success");
+    expect(stored.pairs[emptyKey].attempts[0].outcome).to.equal("empty");
+    expect(stored.pairs[failingKey].attempts[0].outcome).to.equal("failure");
+  });
+
+  it("reports the Store attemptsAdded counter in pair_spread_persist", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-attempts-added-log-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const successPair = makePairSpreadPair(100);
+    const emptyPair = makePairSpreadPair(110);
+    const successKey = buildPairKey({ chainId: 31337, pair: successPair });
+    const emptyKey = buildPairKey({ chainId: 31337, pair: emptyPair });
+    const originalFormat = process.env.LOG_FORMAT;
+    process.env.LOG_FORMAT = "json";
+    let logs;
+    try {
+      ({ logs } = await captureConsole(() =>
+        main({
+          provider: makeMinimalProvider(),
+          config: makePairSpreadConfig(tmpDir, {
+            pairs: [successPair, emptyPair],
+          }),
+          scanPair: async ({ pair }) =>
+            pair.label === successPair.label
+              ? [scanResult({ netProfitBps: 42n })]
+              : [],
+        })
+      ));
+    } finally {
+      if (originalFormat === undefined) delete process.env.LOG_FORMAT;
+      else process.env.LOG_FORMAT = originalFormat;
+    }
+
+    const persistEvents = logs
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .filter((event) => event && event.event === "pair_spread_persist");
+    expect(persistEvents).to.have.length(1);
+    expect(persistEvents[0].attemptsAdded).to.equal(2);
+    expect(persistEvents[0].written).to.equal(true);
+    expect(persistEvents[0].message).to.include("attemptsAdded=2");
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(stored.pairs[successKey].attempts).to.have.length(1);
+    expect(stored.pairs[emptyKey].attempts).to.have.length(1);
+  });
+
+  it("uses the cycle timestamp for both the sample and its attempt", async function () {
+    const fixedNow = Date.now();
+    const originalNow = Date.now;
+    Date.now = () => fixedNow;
+    const tmpDir = makeSpreadTmpDir("flash-arb-attempt-timestamp-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(200);
+    const key = buildPairKey({ chainId: 31337, pair });
+
+    try {
+      await captureConsole(() =>
+        main({
+          provider: makeMinimalProvider(),
+          config: makePairSpreadConfig(tmpDir, { pairs: [pair] }),
+          scanPair: async () => [scanResult({ netProfitBps: 8n })],
+        })
+      );
+    } finally {
+      Date.now = originalNow;
+    }
+
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(stored.pairs[key].samples[0].at).to.equal(fixedNow);
+    expect(stored.pairs[key].attempts[0].at).to.equal(fixedNow);
+  });
+
+  it("preserves attempts already stored when a scan adds a new success", async function () {
+    const tmpDir = makeSpreadTmpDir("flash-arb-attempt-preserve-");
+    const pairSpreadPath = path.join(tmpDir, "pair_spreads.json");
+    const pair = makePairSpreadPair(210);
+    const key = buildPairKey({ chainId: 31337, pair });
+    const oldNow = Date.now() - 60_000;
+    writePairSpreadFile(
+      pairSpreadPath,
+      {
+        [key]: {
+          samples: [{ netProfitBps: "5", at: oldNow }],
+          attempts: [
+            { at: oldNow - 1000, outcome: "success", source: "scan" },
+            { at: oldNow, outcome: "empty", source: "probe", reason: "NO_RESULTS" },
+          ],
+        },
+      },
+      { version: 2 }
+    );
+
+    const { result: summary } = await captureConsole(() =>
+      main({
+        provider: makeMinimalProvider(),
+        config: makePairSpreadConfig(tmpDir, { pairs: [pair] }),
+        scanPair: async () => [scanResult({ netProfitBps: 15n })],
+      })
+    );
+
+    expect(summary.scanned).to.equal(1);
+    const stored = readPairSpreadFile(pairSpreadPath);
+    expect(stored.pairs[key].samples).to.have.length(2);
+    expect(stored.pairs[key].samples.map((sample) => sample.netProfitBps)).to.have.members([
+      "5",
+      "15",
+    ]);
+    expect(stored.pairs[key].attempts).to.have.length(3);
+    expect(
+      stored.pairs[key].attempts.some(
+        (attempt) =>
+          attempt.at === oldNow - 1000 &&
+          attempt.outcome === "success" &&
+          attempt.source === "scan"
+      )
+    ).to.equal(true);
+    expect(
+      stored.pairs[key].attempts.some(
+        (attempt) =>
+          attempt.at === oldNow &&
+          attempt.outcome === "empty" &&
+          attempt.source === "probe" &&
+          attempt.reason === "NO_RESULTS"
+      )
+    ).to.equal(true);
+    expect(
+      stored.pairs[key].attempts.some(
+        (attempt) =>
+          attempt.at > oldNow &&
+          attempt.outcome === "success" &&
+          attempt.source === "scan"
+      )
+    ).to.equal(true);
   });
 });
 

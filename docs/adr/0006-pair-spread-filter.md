@@ -1,7 +1,7 @@
 # ADR 0006 — Filtre dynamique de viabilité des paires (P1-16-bis)
 
-- **Statut** : accepté — store v2 implémenté et testé (phase 1), non commité ;
-  scheduler et sondes non démarrés
+- **Statut** : accepté — store v2 commité (`b854ab5`) et attempts enregistrées
+  par les scans (phase 2B) ; scheduler et sondes non démarrés
 - **Date** : 2026-11-20
 - **Contexte** : P1-16-bis (écart médian dynamique), complément de P1-16
   (plafond statique de frais par jambe).
@@ -12,9 +12,10 @@
 > « FERMÉ » (intégration et tests ciblés validés, sans commit). Les décisions
 > D1–D15 restent la référence de conception ; la section « Intégration dans
 > le bot » documente les noms de variables et le comportement réellement
-> branchés dans `bot/index.js` et `bot/config.js`. La phase 1 du store v2
-> (samples + attempts) est précisée en D1, D6, D8 et D14 ; le scheduler et le
-> câblage des probes ne font pas partie de cette phase.
+> branchés dans `bot/index.js` et `bot/config.js`. Le store v2
+> (samples + attempts) est commité dans `b854ab5` ; la phase 2B branche les
+> attempts de source `scan` dans le cycle. Le scheduler et le câblage des
+> probes restent une phase distincte.
 
 ## Contexte
 
@@ -133,6 +134,10 @@ L'état est **dérivé**, pas un registre comptable :
   pas la clé de route stable, et un backfill mélangerait des configurations
   différentes. L'historique commence à l'activation du filtre.
 
+Depuis la phase 2B, le cycle écrit les attempts de source `scan` (`success`,
+`empty`, `failure`) décrites en D2-bis. Les attempts de source `probe` restent
+réservées à une phase ultérieure ; aucune n'est fabriquée par le scan.
+
 Schéma versionné v2 (exemple avec clé tronquée) :
 
 ```json
@@ -222,6 +227,10 @@ remplacement, ni un `0` fabriqué pour combler une absence : cela fausserait
 la médiane et pourrait filtrer une paire sur une donnée inventée. Un `0n`
 réellement mesuré reste un échantillon valide.
 
+Depuis la phase 2B, ce cas produit un attempt `empty` (`NO_RESULTS`,
+`UNPRICED` ou `QUOTE_ERRORS`) sans sample, et une exception de `scanPair` ou un
+retour non-tableau produit un attempt `failure` (`SCAN_ERROR`). Voir D2-bis.
+
 Points d'implémentation importants :
 
 - Ne pas réutiliser `selectBestResult` (`bot/index.js:63-66`) : il classe
@@ -246,6 +255,55 @@ Nuance assumée : prendre le maximum de plusieurs tailles est un estimateur
 légèrement biaisé vers le haut (winner's curse). Ce biais pousse le filtre
 à **moins** rejeter, pas à rejeter à tort. C'est cohérent avec la politique
 fail-open et le statut d'optimisation de D12.
+
+### D2-bis — Attempts enregistrées par le scan (phase 2B)
+
+Un attempt décrit le **résultat d'une observation de scan**, jamais le succès
+d'une opportunité de trading. `bot/index.js` enregistre au plus un attempt
+final par clé stable et par cycle, avec `source: "scan"` et `at` égal au
+`now` du cycle (le même que celui du sample).
+
+| Situation | `outcome` | `reason` | Sample |
+|---|---|---|---|
+| `scanPair` retourne et `bestNetProfitBps(results) !== null` | `success` | absent | oui, même clé et même `at` |
+| `scanPair` retourne `[]` | `empty` | `NO_RESULTS` | non |
+| `scanPair` retourne au moins une quote tentée sans `netProfitBps` calculable | `empty` | `UNPRICED` | non |
+| `scanPair` ne retourne aucune quote tentée (erreurs ou entrées inexploitables uniquement) | `empty` | `QUOTE_ERRORS` | non |
+| `scanPair` lève une exception ou retourne autre chose qu'un tableau | `failure` | `SCAN_ERROR` | non |
+
+- Un profit nul, négatif ou sous le seuil reste un `success` si
+  `bestNetProfitBps` retourne une valeur valide.
+- Une **quote tentée** est un objet non-error avec `amountIn` de type `bigint`
+  et strictement positif. Un objet sans `amountIn` exploitable (absent, autre
+  type, `0n` ou négatif) est une entrée inexploitable : il ne suffit pas à
+  classer le scan `UNPRICED`.
+- La classification est déterministe : dès qu'un résultat valide existe,
+  `success` prévaut. `UNPRICED` couvre les résultats qui contiennent au moins
+  une quote tentée mais aucun bps calculable ; `QUOTE_ERRORS` est réservé aux
+  résultats exclusivement composés d'erreurs ou d'entrées inexploitables
+  (aucune quote tentée).
+- Un retour non-tableau viole le contrat de `scanPair` : `Array.isArray(results)`
+  est vérifié dans la frontière try/catch du scan, une attempt
+  `failure`/`SCAN_ERROR` est produite, puis le catch de paire historique est
+  suivi. `bestNetProfitBps` n'est jamais appelé sur un non-tableau.
+- Le message brut de l'exception n'est jamais stocké : seul le code
+  `SCAN_ERROR` est écrit.
+- Aucun attempt n'est enregistré pour : le mode `off`, une paire sautée par
+  `enforce`, un refus de chainId, un refus live avant le scan, une erreur de
+  décision sans clé stable, une erreur de `maybeExecute` après un scan
+  terminé, ou une erreur de persistance.
+- Une erreur de `scanPair` (exception ou retour non-tableau) est une erreur de
+  **scan**. Une erreur de `maybeExecute`, du logging ou de `scans.jsonl`
+  survient après l'observation et ne doit jamais produire un attempt `failure`.
+- Si plusieurs entrées de configuration partagent la même clé dans le même
+  cycle, une seule attempt finale est conservée avec la précédence
+  `success > failure > empty`. Une observation valide l'emporte toujours sur
+  un résultat vide ou une erreur rencontrée pour la même clé. La
+  déduplication ne repose pas sur le timestamp : elle est indexée par clé.
+- À outcome égal, la première observation rencontrée pour la clé dans l'ordre
+  de configuration est conservée : le merge ne remplace pas une attempt de
+  même priorité. Ce tie-break est déterministe et ne dépend ni du timestamp ni
+  du contenu du résultat.
 
 ### D3 — Fenêtre, activation et ancienneté
 
@@ -545,6 +603,10 @@ Conséquences :
   compte que les attempts réellement ajoutés après normalisation et plafond.
 - Un attempt n'est jamais déduit d'un sample et un sample n'est jamais déduit
   d'un attempt : les deux tableaux sont indépendants.
+- Depuis la phase 2B, les attempts de scan suivent la même règle de cycle : au
+  plus un attempt final par clé, avec la précédence `success > failure >
+  empty` (D2-bis). La déduplication du store sur le tuple exact reste une
+  seconde barrière, pas la règle de cycle.
 
 Sans cette déduplication, une paire avec 10 tailles remplirait la fenêtre
 10 fois plus vite qu'une paire avec une seule taille, et la fenêtre ne
@@ -744,7 +806,14 @@ qui n'existe pas.
 ### D14 — Écriture atomique, une fois par cycle
 
 - L'état est chargé une fois, modifié en mémoire, puis écrit **au plus une
-  fois** par cycle, après la boucle des paires.
+  fois** par cycle, après la boucle des paires. `bot/index.js` transmet les
+  samples et les attempts fusionnés à `recordPairSpreadCommit` dans le même
+  commit atomique.
+- `recordPairSpreadSamples` délègue à `recordPairSpreadCommit` avec
+  `attempts: []`. Ce tableau vide signifie qu'aucun nouvel attempt n'est
+  ajouté ; il n'efface pas les attempts existantes. `appendPairSpreadCommit`
+  conserve et fusionne les attempts déjà présentes avec les nouveaux samples.
+  Le wrapper samples-only est donc sans effet sur le tableau `attempts`.
 - Écriture atomique : `mkdir` du répertoire, fichier temporaire
   `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`, écriture JSON, `fh.sync()`, fermeture,
   puis `fs.rename`. Mêmes conventions que `bot/guards.js:78-89` et
@@ -806,9 +875,10 @@ ADR.
 
 L'implémentation a aligné les noms proposés en D15 sur le style de
 `bot/config.js`. Les décisions D1–D14 restent la référence ; seuls les noms
-de variables et les points de branchement sont précisés ici. La phase 1 du
-store v2 ajoute la persistance des attempts ; le scheduler et le câblage des
-probes ne font pas partie de cette phase.
+de variables et les points de branchement sont précisés ici. Le store v2 est
+commité dans `b854ab5` ; la phase 2B branche les attempts de source `scan`
+dans le cycle. Le scheduler et le câblage des probes restent une phase
+distincte.
 
 | Réglage | Variable réellement lue | Défaut | Validation |
 |---|---|---|---|
@@ -836,19 +906,35 @@ Points de branchement :
   toujours scannée. En `enforce`, une décision `skip` incrémente
   `filteredPairs`, journalise `PAIR_SPREAD_BELOW_FLOOR` et passe à la paire
   suivante sans `scanPair` ni entrée `scans.jsonl`.
-- Après un scan réussi, un seul échantillon par clé et par cycle est retenu :
-  `bestNetProfitBps(results)` (D8, D10). Aucun échantillon pour `null`, une
-  erreur, ou une paire filtrée.
+- Après chaque `scanPair`, le résultat est classifié immédiatement : un
+  `success` retient un seul échantillon par clé et par cycle via
+  `bestNetProfitBps(results)` (D8, D10) et écrit un attempt `success` au même
+  `at` ; sinon un attempt `empty` est écrit avec `NO_RESULTS` (tableau vide),
+  `UNPRICED` (au moins une quote tentée avec `amountIn` bigint > 0n mais aucun
+  bps calculable) ou `QUOTE_ERRORS` (aucune quote tentée) (D2-bis). Une
+  exception de `scanPair` ou un retour non-tableau produit un attempt
+  `failure` avec `SCAN_ERROR`, puis suit le catch de paire historique.
+- Une seule attempt finale est conservée par clé et par cycle, avec la
+  précédence `success > failure > empty`. À outcome égal, la première
+  observation de la clé dans l'ordre de configuration est conservée. Une paire
+  filtrée en `enforce`, un refus de chainId ou live, une erreur de décision
+  sans clé stable, une erreur de `maybeExecute`, de logging ou de
+  `scans.jsonl` ne produisent aucun attempt `failure`.
 - L'état est persisté au plus une fois après la boucle, via
-  `recordPairSpreadSamples({ loaded })` (D14). Aucune écriture en mode `off`,
-  si l'état n'est pas inscriptible, ou si rien n'a changé. Un état corrompu,
-  illisible ou d'une version inconnue n'est jamais remplacé.
-- Le store expose aussi `recordPairSpreadCommit({ loaded, samples, attempts })`
-  pour écrire samples et attempts dans la même écriture atomique, et conserve
-  `recordPairSpreadSamples` / `appendPairSpreadSamples` comme API compatible.
-  `bot/index.js` utilise encore l'API samples-only : le câblage des attempts
-  et des probes n'est pas fait dans cette phase. Le fichier écrit est en v2 ;
-  `attempts` est obligatoire pour chaque paire, même vide.
+  `recordPairSpreadCommit({ loaded, samples, attempts, now })` (D14). Aucune
+  écriture en mode `off`, si l'état n'est pas inscriptible, ou si rien n'a
+  changé. Un état corrompu, illisible ou d'une version inconnue n'est jamais
+  remplacé.
+- `recordPairSpreadSamples` / `appendPairSpreadSamples` restent des API
+  samples-only compatibles pour les appelants externes. Elles délèguent avec
+  `attempts: []`, ce qui n'ajoute aucun attempt et préserve les attempts déjà
+  stockées. `bot/index.js` utilise `recordPairSpreadCommit` pour ajouter
+  samples et attempts dans une même écriture atomique. Le fichier écrit est en
+  v2 ; `attempts` est obligatoire pour chaque paire, même vide.
+- L'événement `pair_spread_persist` expose `attemptsAdded`, la valeur retournée
+  par le Store, sans recalcul local.
+- Les probes et le scheduler ne sont pas câblés dans cette phase : seuls les
+  attempts de source `scan` sont produits par le cycle.
 - L'`exitCode` suit D13 : `0` si `enforce` a filtré toutes les paires
   configurées sans erreur indépendante ; `1` sinon (aucune paire, zéro scan
   non volontaire, refus chainId, erreur de paire ou seuil RPC).
@@ -1108,8 +1194,17 @@ Le schéma v2 conserve, pour chaque paire, un tableau `attempts` obligatoire
   déduplication, plafond, migration v1) ; la forme canonique est persistée
   à la prochaine écriture réelle.
 
+Depuis la phase 2B, `bot/index.js` écrit les attempts de source `scan` selon
+D2-bis : `success` avec un sample au même `at`, `empty` avec `NO_RESULTS`,
+`UNPRICED` ou `QUOTE_ERRORS`, `failure` avec `SCAN_ERROR` quand `scanPair`
+lève ou retourne autre chose qu'un tableau. Une seule attempt finale est
+conservée par clé et par cycle (`success > failure > empty`) ; à outcome égal,
+la première observation est conservée. Les probes et le scheduler restent hors
+périmètre.
+
 ---
 
 *Fin de l'ADR 0006. Ce document formalise les décisions de conception.
-Le store v2 (phase 1) est implémenté et testé ; le scheduler, le câblage des
-probes et le commit restent à valider séparément.*
+Le store v2 est commité dans `b854ab5` et les attempts de scan sont intégrées
+(phase 2B) ; le scheduler et le câblage des probes restent à valider
+séparément.*

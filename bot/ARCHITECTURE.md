@@ -27,11 +27,16 @@ d'environnement est `bot/config.js`. Les références sont volontairement des po
    au lieu de 4. Les tailles sont scannées par ordre croissant ; dès qu'une taille dépasse la
    profondeur, toutes les tailles supérieures sont marquées `DEPTH_EXCEEDED` sans RPC. Chaque
    résultat est persisté dans `scans.jsonl` avant de choisir le meilleur. En `shadow`/`enforce`,
-   un seul échantillon par clé et par cycle est ensuite retenu via `bestNetProfitBps(results)` ;
-   une paire filtrée, une erreur ou un `netProfitBps` `null` ne produit aucun échantillon.
-   Le store v2 sait aussi persister des attempts (`success`, `empty`, `failure`, sources
-   `scan`/`probe`), mais le câblage des probes n'est pas encore fait : `bot/index.js` continue
-   d'utiliser l'API samples-only.
+   le résultat du scan est classifié immédiatement : un `success` retient au plus un échantillon
+   par clé et par cycle via `bestNetProfitBps(results)` et écrit un attempt `success` au même
+   `at` ; sinon un attempt `empty` est écrit (`NO_RESULTS` si le tableau est vide, `UNPRICED` si
+   au moins une quote tentée a un `amountIn` bigint > 0n mais aucun bps calculable,
+   `QUOTE_ERRORS` sinon). Une exception de `scanPair` ou un retour non-tableau produit un
+   attempt `failure` (`SCAN_ERROR`) puis suit le catch de paire historique. Une seule attempt
+   finale est conservée par clé et par cycle, avec la précédence `success > failure > empty` ;
+   à outcome égal, la première observation est conservée. Une paire filtrée, une erreur de
+   `maybeExecute`, de logging ou de `scans.jsonl` ne produit aucun attempt `failure`. Les probes
+   et le scheduler ne sont pas encore câblés : seuls les attempts de source `scan` sont produits.
 4. Le scanner calcule un `netProfit` exact en unités du token emprunté (BigInt) : profit brut
    moins le gaz, lui-même converti avec le multiplicateur L1 (`l1CostMultiplierBps`). Une
    opportunité doit passer le plancher `effectiveMinProfitBps` sur le net, le plancher USD
@@ -210,16 +215,22 @@ bot/run.js run() (process persistant)
   vérification du chainId, avec un `now` unique ; une erreur de chargement laisse le cycle
   continuer avec un historique vide. `decidePairSpread()` ne compare que `pair.minProfitBps`
   (jamais `effectiveMinProfitBps`) et ne saute une paire qu'en `enforce`. Après un scan réussi,
-  `bestNetProfitBps()` retient au plus un échantillon par clé et par cycle. L'état est écrit au
-  plus une fois après la boucle, jamais s'il est corrompu, illisible ou d'une version inconnue.
-  Le schéma courant est v2 : chaque paire porte `samples` et `attempts` (obligatoire, même vide) ;
-  v1 reste lisible et migré en mémoire. Les attempts sont dédupliqués sur
-  `(at, outcome, source, reason)` avant le plafond de 20. Un attempt futur rend l'état
-  non inscriptible (fail-open) jusqu'à ce que l'horloge le dépasse, sans purge silencieuse. Une
-  lecture ne réécrit pas le fichier uniquement pour le normaliser ; la forme canonique v2 est
-  persistée à la prochaine écriture réelle. Réf. : `bot/pairSpread.js`, `bot/pairSpreadStore.js`,
-  `bot/index.js` (`resolvePairSpreadSettings`, `pairSpreadNow`, boucle des paires, persistance
-  finale), ADR 0006 D1, D6, D8, D14.
+  `bestNetProfitBps()` retient au plus un échantillon par clé et par cycle. Le même cycle
+  enregistre au plus une attempt finale par clé, avec la précédence `success > failure > empty` :
+  `success` si `bestNetProfitBps()` retourne une valeur (même nulle ou négative), `empty` sinon
+  (`NO_RESULTS`, `UNPRICED` si au moins une quote tentée avec `amountIn` bigint > 0n n'a pas de
+  bps, `QUOTE_ERRORS` sinon), `failure` (`SCAN_ERROR`) si `scanPair` lève ou retourne autre chose
+  qu'un tableau. À outcome égal, la première observation de la clé est conservée. Une erreur de
+  `maybeExecute`, du logging ou de `scans.jsonl` ne produit pas de `failure`.
+  L'état est écrit au plus une fois après la boucle via `recordPairSpreadCommit`, jamais s'il est
+  corrompu, illisible ou d'une version inconnue. Le schéma courant est v2 : chaque paire porte
+  `samples` et `attempts` (obligatoire, même vide) ; v1 reste lisible et migré en mémoire. Les
+  attempts sont dédupliqués sur `(at, outcome, source, reason)` avant le plafond de 20. Un
+  attempt futur rend l'état non inscriptible (fail-open) jusqu'à ce que l'horloge le dépasse,
+  sans purge silencieuse. Une lecture ne réécrit pas le fichier uniquement pour le normaliser ;
+  la forme canonique v2 est persistée à la prochaine écriture réelle. Réf. : `bot/pairSpread.js`,
+  `bot/pairSpreadStore.js`, `bot/index.js` (`resolvePairSpreadSettings`, `pairSpreadNow`, boucle
+  des paires, persistance finale), ADR 0006 D1, D2-bis, D6, D8, D14.
 - **Exit code D13 : un cycle entièrement filtré est un succès volontaire.** Si `enforce` filtre
   toutes les paires configurées sans erreur indépendante, `exitCode` vaut `0` ; sinon le
   comportement `scanned === 0 → 1` est conservé (aucune paire, zéro scan non volontaire, refus
@@ -324,10 +335,23 @@ Contrat de types : `bot/domain.js` (aucun export runtime, `bot/domain.js:215`).
 - **Sur-sérialisation de `main`.** `getNetwork` et `getFeeData` partagent `mainThrottle` et sont
   donc espacés de 250 ms au lieu d'être réellement parallèles. Acceptable (2 appels par cycle), à
   noter si le cycle devient sensible à la latence. Réf. : `bot/index.js:188-196`.
+- **Frontière d'exception du scan.** Seul un throw de `scanPairImpl` ou un retour non-tableau
+  (vérifié par `Array.isArray(results)` dans la même frontière) produit un attempt `failure`
+  (`SCAN_ERROR`). Le try/catch interne est volontairement limité à cet appel ; une erreur de
+  `maybeExecute`, du logging ou de l'écriture de `scans.jsonl` survient après l'observation et ne
+  doit jamais être classée comme failure de scan. Le throw est ensuite relayé au catch de paire
+  historique pour préserver `pairErrors`, les warnings et l'`exitCode`. Réf. : `bot/index.js`
+  (boucle des paires), ADR 0006 D2-bis.
+- **Une attempt finale par clé et par cycle.** La fusion est indexée par clé stable, pas par
+  timestamp, avec la précédence `success > failure > empty`. Un doublon de route qui échoue après
+  un scan valide ne doit pas remplacer le `success` ni le sample déjà collecté. À outcome égal, la
+  première observation est conservée. Ne pas dédupliquer uniquement sur `at` : deux paires
+  distinctes peuvent partager le même `now`. Réf. : `bot/index.js` (`mergePairSpreadAttempt`),
+  ADR 0006 D2-bis/D8.
 - **Pair filtrée : warning, pas de quote fantôme.** En `enforce`, le log `SKIP` est émis en
-  `warn` (console) et la paire n'écrit ni `scans.jsonl` ni échantillon. Ne pas compter ce warning
-  comme une erreur RPC ou de paire : il ne doit pas modifier `rpcErrors`, `pairErrors` ni
-  l'`exitCode` au-delà de la règle D13. Réf. : `bot/index.js` (`logPairSpreadEvent`,
+  `warn` (console) et la paire n'écrit ni `scans.jsonl`, ni échantillon, ni attempt. Ne pas compter
+  ce warning comme une erreur RPC ou de paire : il ne doit pas modifier `rpcErrors`, `pairErrors`
+  ni l'`exitCode` au-delà de la règle D13. Réf. : `bot/index.js` (`logPairSpreadEvent`,
   `pair_spread_filtered`).
 - **Le filtre ne remplace ni P1-16 ni `decide()`.** P1-16 reste fail-closed au chargement,
   `decide()` reste fail-closed avant exécution ; P1-16-bis est la seule couche fail-open et ne
