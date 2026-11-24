@@ -112,8 +112,18 @@ historique de la matrice initiale.
 | P1-18 | À FAIRE | — | multi-hop |
 | P1-10-bis | FERMÉ | 2d2f34a | adaptive par profil : effectiveMaxTradeSize {majors,longtail}, applyAdaptive conscient du profil, gestion logSweep |
 | P1-10-bis-logSweep | FERMÉ | 2d2f34a | applyAdaptive traite désormais pair.logSweep (facteur appliqué, clamp au cap du profil) |
-| P1-16-bis | FERMÉ | — | écart médian dynamique : `bot/pairSpread.js` + `bot/pairSpreadStore.js` intégrés dans `bot/index.js` et `bot/config.js` (`PAIR_SPREAD_*`) ; tests ciblés verts, non commité |
+| P1-16-bis | TERMINÉ | f14895d | écart médian dynamique : `bot/pairSpread.js` + `bot/pairSpreadStore.js` intégrés dans `bot/index.js` et `bot/config.js` (`PAIR_SPREAD_*`) ; commité, Store v2 complété par b854ab5 |
+| Pair Spread Probes T1–T5 | TERMINÉ (code et tests) | b2245d0 | scheduler pur, Store v2 (`source: "probe"`), intégration `main()` et configuration ; probes désactivées par défaut (`0/0/1`) ; validation opérationnelle non effectuée, activation GitHub Actions différée |
 | P1-10-ter | FERMÉ | bc182c4 | cap maxTradeSizeUsd (500 majors, 2000 longtail) + fallback token units. Validé en réel : tailles 10/50/100/500 USDC passent validatePairs et applyAdaptive sans écrasement. |
+
+> **Pair Spread Probes T1–T5 (ADR 0007).** Le code et les tests sont
+> terminés et commités dans `b2245d0` ; les probes restent désactivées par
+> défaut (`PAIR_SPREAD_PROBE_INTERVAL_MS=0`,
+> `PAIR_SPREAD_PROBE_GLOBAL_INTERVAL_MS=0`,
+> `PAIR_SPREAD_PROBE_MAX_PER_CYCLE=1`). La validation opérationnelle n'a pas
+> été effectuée et l'activation dans `scan.yml` reste différée (Store non
+> persisté entre runs). Cette entrée dépend de P1-16-bis, désormais terminé ;
+> elle ne ferme ni P1-17 (reporté) ni P1-18 (multi-hop, à faire).
 
 ## Suivi D0–D12 (issus de l'audit)
 
@@ -306,7 +316,7 @@ G1 économique : non concluant. Les paires testées (WETH/USDC, WETH/ARB, WETH/W
 
 ## M1-bis — fail-closed du breaker sur état corrompu ou illisible
 
-**Statut** : corrigé, en attente de validation (non commité).
+**Statut** : corrigé et commité dans `ad8f035`.
 
 **Défaut confirmé (M1)** : `checkCircuitBreaker`
 (`bot/guards.js`) avalait les erreurs de lecture :

@@ -42,9 +42,9 @@ Ces règles s'appliquent à toutes les sessions sur ce projet. Lis-les avant tou
 ## 8. CONTEXTE DU PROJET (mis à jour manuellement)
 - **Stack** : Solidity ^0.8.20, Node.js 20, Hardhat, ethers v6, Aave V3, Uniswap V3 (SwapRouter original uniquement, jamais SwapRouter02), SushiSwap V2.
 - **Réseau** : Arbitrum One (42161), Arbitrum Sepolia (421614).
-- **Dernier commit** : 1f74225 (D7-bis helper effectiveMinProfitBps).
-- **Prochaine étape** : D9 (seuils absents = rejet explicite dans decide) ou P1-16-bis — voir docs/PRIORITES.md.
-- **Tests** : 337 passing, 2 pending (tests fork), 0 failing.
+- **Dernier commit connu à la revue** : b2245d0 (`feat(bot): implement pair spread probes`), commit d'intégration T1–T5 ; état du dépôt : `main`, sept commits en avance sur `origin/main` au moment de la revue. Ces valeurs sont ponctuelles, pas des garanties permanentes.
+- **Prochaine étape** : validation opérationnelle des probes Pair Spread (code et tests terminés, probes désactivées par défaut) ; autres points ouverts dans docs/PRIORITES.md.
+- **Tests** : dernier résultat vérifié le 24 novembre 2026 : 731 passing, 2 pending (tests fork), 0 failing. Résultat ponctuel, à revérifier après toute modification.
 
 ## 9. ARCHITECTURE
 - Carte du bot : bot/ARCHITECTURE.md (flux, modules, invariants, pièges).

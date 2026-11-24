@@ -204,6 +204,55 @@ cumulative file. A quick analysis:
 jq -r 'select(.isOpportunity) | [.timestamp,.pair,.tradeSize,.netProfitUsd] | @tsv' logs/scans.jsonl
 ```
 
+### Pair spread filter and probes
+
+The optional pair-spread filter can skip pairs whose recent spread history is too weak. It is
+disabled by default (`PAIR_SPREAD_MODE=off`). In `shadow`, the bot only logs what it would skip;
+in `enforce`, it skips a pair when the doubled median of the recent window is below
+`2 × pair.minProfitBps` **and** the latest sample is below `pair.minProfitBps`.
+
+When enabled, history is stored in `logs/pair_spreads.json` (override with
+`PAIR_SPREAD_PATH`). The Store v2 keeps samples plus attempts, with at most 20 attempts per pair;
+v1 files are accepted and upgraded to v2 when the Store next writes. Defaults are a 20-sample
+window, 5 minimum samples and a 24-hour maximum age (`PAIR_SPREAD_WINDOW_SIZE`,
+`PAIR_SPREAD_MIN_SAMPLES`, `PAIR_SPREAD_MAX_AGE_MS`).
+
+When a pair is filtered in `enforce`, the bot can run **read-only probes** after the main scan
+loop to refresh that pair's history. Probes reuse `scanPair`, never write `scans.jsonl`, never
+increment scan counters and never call `maybeExecute`. Samples and attempts (`source: "probe"`)
+go through the same Store and the same single per-cycle commit. Probes were implemented and
+committed in `b2245d0` (T1–T5), with unit and integration tests, but they have **not** been
+validated operationally and are not enabled by default.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PAIR_SPREAD_PROBE_INTERVAL_MS` | `0` | Minimum interval between two probes of the same pair. `0` disables probes. |
+| `PAIR_SPREAD_PROBE_GLOBAL_INTERVAL_MS` | `0` | Minimum interval between two probe batch starts. Must be `> 0` when the per-pair interval is `> 0`. |
+| `PAIR_SPREAD_PROBE_MAX_PER_CYCLE` | `1` | Maximum probes selected per cycle, integer `1`–`10`. |
+
+Activation requires all of the following:
+
+- `PAIR_SPREAD_MODE=enforce`;
+- `PAIR_SPREAD_PROBE_INTERVAL_MS > 0`;
+- `PAIR_SPREAD_PROBE_GLOBAL_INTERVAL_MS > 0`;
+- each interval `<= PAIR_SPREAD_MAX_AGE_MS / PAIR_SPREAD_MIN_SAMPLES`;
+- `PAIR_SPREAD_PROBE_MAX_PER_CYCLE` between `1` and `10`.
+
+Example explicit activation profile (not a default):
+
+```bash
+PAIR_SPREAD_MODE=enforce
+PAIR_SPREAD_PROBE_INTERVAL_MS=3600000
+PAIR_SPREAD_PROBE_GLOBAL_INTERVAL_MS=300000
+PAIR_SPREAD_PROBE_MAX_PER_CYCLE=1
+```
+
+The scheduled `scan.yml` workflow does not enable probes and does not persist
+`logs/pair_spreads.json` between ephemeral runners. The first intended activation target is the
+persistent `run.js` process; activating probes in GitHub Actions would require persisting and
+restoring the Store first. Until operational measurements are collected, treat the feature as
+implemented and tested, not as production-validated.
+
 ### Live-execution loss guards
 
 With `DRY_RUN=false`, `maybeExecute` checks the following before submitting, in order:

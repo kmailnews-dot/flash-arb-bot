@@ -1,7 +1,7 @@
 # ADR 0007 — Sondes périodiques de spread par paire
 
-- **Statut** : accepté ; implémentation T1–T5 présente dans l'arbre de
-  travail (non commitée), tests unitaires et d'intégration présents ;
+- **Statut** : accepté ; implémentation T1–T5 intégrée par le commit
+  `b2245d0` ; tests unitaires et d'intégration intégrés par ce même commit ;
   validation opérationnelle non effectuée ; activation par défaut
   désactivée ; activation dans GitHub Actions différée.
 - **Date** : 2026-11-22
@@ -9,29 +9,40 @@
   X10 de l'audit final, puis anomalies F1–F11 de l'audit des probes
   intégrées, y compris l'anomalie F8 (contrat de journalisation), corrigée
   dans cette révision. Révision du 2026-11-24 : statut d'implémentation
-  actualisé, décisions D1–D15 inchangées.
+  actualisé après le commit d'intégration `b2245d0`, décisions D1–D15
+  inchangées.
 - **Contexte** : audit read-only des probes ; réponse à la limite connue n° 3
   et à la condition de réexamen n° 8 de l'ADR 0006.
-- **Portée** : document de décision. L'implémentation T1–T5 est présente
-  dans l'arbre de travail mais n'est ni commitée ni déployée par cet ADR.
+- **Portée** : document de décision. L'implémentation T1–T5 a été intégrée
+  par le commit `b2245d0` ; elle n'est ni déployée ni validée
+  opérationnellement par cet ADR. `b2245d0` est le commit d'intégration de
+  référence, pas un HEAD permanent du projet.
 - **Complète** : `docs/adr/0006-pair-spread-filter.md`, sans le modifier.
 - **Validation** : arbitrages A1–A17 rendus le 2026-11-23 ; corrections
-  F1–F11 intégrées. L'implémentation T1–T5 et les tests unitaires et
-  d'intégration D13 sont présents dans l'arbre de travail ; la validation
-  opérationnelle reste à effectuer.
+  F1–F11 intégrées. Le code et les tests de T1–T5 sont commités dans
+  `b2245d0` ; la validation opérationnelle reste à effectuer.
 
-> **Note de statut (2026-11-24).** L'implémentation T1–T5 est présente dans
-> l'arbre de travail, non commitée : scheduler pur, intégration `main()`,
-> Store, backoff/overlay D15 et configuration. Les tests unitaires
-> (`test/BotPairSpreadProbe.test.js`,
+> **Note de statut (2026-11-24).** L'implémentation T1–T5 a été intégrée par
+> le commit `b2245d0` (`feat(bot): implement pair spread probes`) : scheduler
+> pur, intégration `main()`, Store, backoff/overlay D15 et configuration.
+> Les tests unitaires (`test/BotPairSpreadProbe.test.js`,
 > `test/ValidatePairSpreadProbeConfig.test.js`) et d'intégration
-> (`test/BotPairSpreadProbeIntegration.test.js`) sont présents. Aucune
-> validation opérationnelle n'a encore été effectuée, les probes restent
-> désactivées par défaut (`intervalMs = 0`) et leur activation dans GitHub
-> Actions est différée. Les mentions « à implémenter » ou « non exécuté »
-> qui subsistent dans le corps des décisions D1–D15 décrivent l'état au
-> moment de leur rédaction ; elles sont levées par la présente mise à jour
-> de statut, sans modification des décisions elles-mêmes.
+> (`test/BotPairSpreadProbeIntegration.test.js`) sont commités dans ce même
+> commit. Il faut distinguer trois validations :
+>
+> - **validation du code** : effectuée par l'intégration commitée dans
+>   `b2245d0` ;
+> - **validation par tests** : les tests T1–T5 sont présents et exécutés par
+>   la suite du projet ; le dernier résultat vérifié est vert (731 passing,
+>   2 pending, 0 failing, le 24 novembre 2026) ;
+> - **validation opérationnelle** : non effectuée. Les probes restent
+>   désactivées par défaut (`intervalMs = 0`) et leur activation dans GitHub
+>   Actions est différée.
+>
+> Les mentions « à implémenter » ou « non exécuté » qui subsistent dans le
+> corps des décisions D1–D15 décrivent l'état au moment de leur rédaction ;
+> elles sont levées par la présente mise à jour de statut, sans modification
+> des décisions elles-mêmes.
 
 ## 1. Résumé
 
@@ -49,26 +60,26 @@ Les décisions sont les suivantes :
 
 | ID | Décision | Statut |
 |---|---|---|
-| D1 | Probes réservées aux paires filtrées en `enforce` ; quotes read-only, aucune exécution. | acceptée ; implémentée dans l'arbre de travail (T1–T5) |
-| D2 | Une probe réutilise `scanPair` complet ; aucun `scans.jsonl`, aucun compteur, aucun `maybeExecute`. | acceptée ; implémentée dans l'arbre de travail (T1–T5) |
-| D3 | Contrat complet du scheduler (`globalIntervalMs`, `lastGlobalProbeAt`, `suspendedUntil`, `cursorKey`, `pendingAttempts`) : paramètres requis/optionnels et sentinelles, forme de `selected`, `intervalMs === 0 → selected = []`, `maxPerCycle <= 10`, filtre des clés vides ; candidats filtrés en `enforce`, dédupliqués, ordonnés par clé ; départ à la clé immédiatement suivante si `cursorKey` est présent, sinon à la première clé lexicale ; curseur circulaire en mémoire qui ne dépasse aucune clé sélectionnée non résolue (une clé exclue par D5 est résolue). | acceptée ; implémentée dans l'arbre de travail (T1–T5) |
-| D4 | Le skip `enforce` reste inchangé ; une probe réussie avec `bps >= plancher` réactive la paire au cycle suivant. | acceptée ; implémentée dans l'arbre de travail (T1–T5) |
-| D5 | Exclusion structurelle : une clé scannée et une clé sondée ne peuvent pas coïncider dans un cycle. | acceptée ; implémentée dans l'arbre de travail (T1–T5) |
-| D6 | Scheduler appelé une fois par cycle, sans timer externe ; intervalle en millisecondes. | acceptée ; implémentée dans l'arbre de travail (T1–T5) |
-| D7 | Budget : `maxPerCycle` borné à 1–10, intervalle par paire et intervalle global obligatoire dès que les probes sont actives ; capacité nominale, coût RPC et métriques runtime avant `enforce` distingués, sans garantie de rotation. | acceptée ; implémentée dans l'arbre de travail (T1–T5) |
-| D8 | Historique persisté reconstruit avec `max(samples[].at, attempts[].at)`, y compris les paires à attempts seules ; overlay `pendingAttempts` appliqué à la sélection ; horodatages persistés et horodatages de scheduler distingués. | acceptée ; implémentée dans l'arbre de travail (T1–T5) |
-| D9 | Erreurs de probe classées `failure`/`SCAN_ERROR` ou `empty`, sans effet sur les compteurs, l'`exitCode`, le breaker ni l'adaptive ; logging non bloquant et erreur de classification sans sample. | acceptée ; implémentée dans l'arbre de travail (T1–T5) |
-| D10 | Persistance dans le Store v2 existant, `source: "probe"`, un seul commit par cycle ; validité de l'état, indication d'écriture et écriture réellement réussie distinguées. | acceptée ; implémentée dans l'arbre de travail (T1–T5) |
-| D11 | Un seul `pairSpreadNow` par cycle pour les samples et attempts ; `lastGlobalProbeAt` reçoit le `probeNow` capturé au début de la phase de probe, pas l'heure réelle de démarrage du batch. | acceptée ; implémentée dans l'arbre de travail (T1–T5) |
-| D12 | Trois réglages, désactivés par défaut ; la validation des types, des bornes et du couplage `intervalMs > 0 ⇒ globalIntervalMs > 0` est identique dans tous les modes ; seuls l'exécution des probes et l'avertissement de démarrage dépendent du mode, selon les conditions prévues par D12. | acceptée ; implémentée dans l'arbre de travail (T1–T5) |
-| D13 | Tests unitaires (contrat, curseur et annulations, logging/classification), configuration, intégration `BotMain`, Store et panne d'écriture (exceptions de commit incluses). | acceptée ; tests présents dans l'arbre de travail |
-| D14 | Aucun changement réseau, contrat, ABI, guard, breaker, `scans.jsonl` ou schéma Store ; invariant d'architecture amendé. | acceptée ; implémentée dans l'arbre de travail (T1–T5) |
-| D15 | Panne d'écriture : `commitSucceeded = ok && written`, backoff 5–60 min en plafonds de suspension, récupération anticipée uniquement sur écriture réelle, `pendingAttempts` ré-émis, exceptions de commit inattendues et déterministes distinctes d'un `WRITE_FAILED`, limite explicite après redémarrage. | acceptée ; implémentée dans l'arbre de travail (T1–T5) |
+| D1 | Probes réservées aux paires filtrées en `enforce` ; quotes read-only, aucune exécution. | acceptée ; implémentée et commitée dans `b2245d0` (T1–T5) |
+| D2 | Une probe réutilise `scanPair` complet ; aucun `scans.jsonl`, aucun compteur, aucun `maybeExecute`. | acceptée ; implémentée et commitée dans `b2245d0` (T1–T5) |
+| D3 | Contrat complet du scheduler (`globalIntervalMs`, `lastGlobalProbeAt`, `suspendedUntil`, `cursorKey`, `pendingAttempts`) : paramètres requis/optionnels et sentinelles, forme de `selected`, `intervalMs === 0 → selected = []`, `maxPerCycle <= 10`, filtre des clés vides ; candidats filtrés en `enforce`, dédupliqués, ordonnés par clé ; départ à la clé immédiatement suivante si `cursorKey` est présent, sinon à la première clé lexicale ; curseur circulaire en mémoire qui ne dépasse aucune clé sélectionnée non résolue (une clé exclue par D5 est résolue). | acceptée ; implémentée et commitée dans `b2245d0` (T1–T5) |
+| D4 | Le skip `enforce` reste inchangé ; une probe réussie avec `bps >= plancher` réactive la paire au cycle suivant. | acceptée ; implémentée et commitée dans `b2245d0` (T1–T5) |
+| D5 | Exclusion structurelle : une clé scannée et une clé sondée ne peuvent pas coïncider dans un cycle. | acceptée ; implémentée et commitée dans `b2245d0` (T1–T5) |
+| D6 | Scheduler appelé une fois par cycle, sans timer externe ; intervalle en millisecondes. | acceptée ; implémentée et commitée dans `b2245d0` (T1–T5) |
+| D7 | Budget : `maxPerCycle` borné à 1–10, intervalle par paire et intervalle global obligatoire dès que les probes sont actives ; capacité nominale, coût RPC et métriques runtime avant `enforce` distingués, sans garantie de rotation. | acceptée ; implémentée et commitée dans `b2245d0` (T1–T5) |
+| D8 | Historique persisté reconstruit avec `max(samples[].at, attempts[].at)`, y compris les paires à attempts seules ; overlay `pendingAttempts` appliqué à la sélection ; horodatages persistés et horodatages de scheduler distingués. | acceptée ; implémentée et commitée dans `b2245d0` (T1–T5) |
+| D9 | Erreurs de probe classées `failure`/`SCAN_ERROR` ou `empty`, sans effet sur les compteurs, l'`exitCode`, le breaker ni l'adaptive ; logging non bloquant et erreur de classification sans sample. | acceptée ; implémentée et commitée dans `b2245d0` (T1–T5) |
+| D10 | Persistance dans le Store v2 existant, `source: "probe"`, un seul commit par cycle ; validité de l'état, indication d'écriture et écriture réellement réussie distinguées. | acceptée ; implémentée et commitée dans `b2245d0` (T1–T5) |
+| D11 | Un seul `pairSpreadNow` par cycle pour les samples et attempts ; `lastGlobalProbeAt` reçoit le `probeNow` capturé au début de la phase de probe, pas l'heure réelle de démarrage du batch. | acceptée ; implémentée et commitée dans `b2245d0` (T1–T5) |
+| D12 | Trois réglages, désactivés par défaut ; la validation des types, des bornes et du couplage `intervalMs > 0 ⇒ globalIntervalMs > 0` est identique dans tous les modes ; seuls l'exécution des probes et l'avertissement de démarrage dépendent du mode, selon les conditions prévues par D12. | acceptée ; implémentée et commitée dans `b2245d0` (T1–T5) |
+| D13 | Tests unitaires (contrat, curseur et annulations, logging/classification), configuration, intégration `BotMain`, Store et panne d'écriture (exceptions de commit incluses). | acceptée ; tests commités dans `b2245d0` |
+| D14 | Aucun changement réseau, contrat, ABI, guard, breaker, `scans.jsonl` ou schéma Store ; invariant d'architecture amendé. | acceptée ; implémentée et commitée dans `b2245d0` (T1–T5) |
+| D15 | Panne d'écriture : `commitSucceeded = ok && written`, backoff 5–60 min en plafonds de suspension, récupération anticipée uniquement sur écriture réelle, `pendingAttempts` ré-émis, exceptions de commit inattendues et déterministes distinctes d'un `WRITE_FAILED`, limite explicite après redémarrage. | acceptée ; implémentée et commitée dans `b2245d0` (T1–T5) |
 
 **A1.** Ces décisions sont acceptées comme base d'implémentation. Les
 corrections documentaires issues des arbitrages A1–A17 sont intégrées par la
-révision du 2026-11-23. L'implémentation T1–T5 et les tests D13 sont présents
-dans l'arbre de travail, non commités ; la validation opérationnelle reste à
+révision du 2026-11-23. L'implémentation T1–T5 et les tests D13 ont été
+intégrés par le commit `b2245d0` ; la validation opérationnelle reste à
 effectuer. Les arbitrages rendus sont consignés en section 7.
 
 **Profil d'activation retenu.** Les valeurs par défaut restent
@@ -86,28 +97,29 @@ runtime définies en D7 (A6), sans seuil numérique fixé par cet ADR.
 
 | Élément | État vérifié | Référence |
 |---|---|---|
-| Branche / HEAD | `main`, `6711a25` (`feat(bot): persist pair spread scan attempts`) ; implémentation T1–T5 non commitée dans l'arbre de travail | `git log -1`, `git status` |
+| Branche / HEAD | `main`, commit d'intégration T1–T5 `b2245d0` (`feat(bot): implement pair spread probes`), HEAD au moment de la revue ; ce n'est pas un HEAD permanent du projet | `git log -1 b2245d0`, `git status` |
 | ADR 0006 | accepté ; D1–D15 de référence ; store v2 et attempts `scan` intégrés | `docs/adr/0006-pair-spread-filter.md` |
 | Store v2 | samples + attempts, plafond 20 attempts par paire, sources `scan`/`probe` | `bot/pairSpreadStore.js:22`, `:36` |
-| Attempts `scan` | branchées dans le cycle (phase 2B) | `bot/index.js:462-499` |
-| Implémentation probe | présente, **non commitée** (T1–T5) : scheduler pur, intervalle global, borne `maxPerCycle <= 10`, historique samples + attempts | `bot/pairSpreadProbe.js` (arbre de travail) |
-| Tests probe | présents, **non commités** | `test/BotPairSpreadProbe.test.js`, `test/ValidatePairSpreadProbeConfig.test.js`, `test/BotPairSpreadProbeIntegration.test.js` |
-| Config probe | présente, **non commitée** (T1–T5) : trois réglages, `optionalProbeInteger`, couplage `intervalMs > 0 ⇒ globalIntervalMs > 0`, avertissements de capacité, conforme à D12 | `bot/config.js` (arbre de travail) |
-| Boucle principale | état chargé une fois par cycle ; `pairSpreadNow` fixé au début | `bot/index.js:258-302` |
-| Skip `enforce` | `continue` avant `scanPair` | `bot/index.js:430-440` |
-| Commit d'état | un seul `recordPairSpreadCommit` après la boucle | `bot/index.js:587-626` |
-| Cycle persistant | `run.js`, `DEFAULT_POLL_INTERVAL_MS = 15000`, cycles non chevauchants | `bot/run.js:6`, `:75-127` |
-| Période d'un cycle | `main()` puis `setTimeout(pollIntervalMs)` ; la période réelle est `durée de main() + pollIntervalMs + surcoût`, sans borne supérieure dans le code | `bot/run.js:103-127` |
+| Attempts `scan` | branchées dans le cycle (phase 2B) | `bot/index.js:916-980` |
+| Implémentation probe | présente et **commitée** dans `b2245d0` (T1–T5) : scheduler pur, intervalle global, borne `maxPerCycle <= 10`, historique samples + attempts | `bot/pairSpreadProbe.js` |
+| Tests probe | présents et **commités** dans `b2245d0` | `test/BotPairSpreadProbe.test.js`, `test/ValidatePairSpreadProbeConfig.test.js`, `test/BotPairSpreadProbeIntegration.test.js` |
+| Config probe | présente et **commitée** dans `b2245d0` (T1–T5) : trois réglages, `optionalProbeInteger`, couplage `intervalMs > 0 ⇒ globalIntervalMs > 0`, avertissements de capacité, conforme à D12 | `bot/config.js` |
+| Boucle principale | état chargé une fois par cycle ; `pairSpreadNow` fixé au début | `bot/index.js:717-770` |
+| Skip `enforce` | `continue` avant `scanPair` | `bot/index.js:894-908` |
+| Commit d'état | un seul `recordPairSpreadCommit` après la boucle | `bot/index.js:1083-1110` |
+| Cycle persistant | `run.js`, `DEFAULT_POLL_INTERVAL_MS = 15000`, cycles non chevauchants | `bot/run.js:6`, `:78-127` |
+| Période d'un cycle | `main()` puis `setTimeout(pollIntervalMs)` ; la période réelle est `durée de main() + pollIntervalMs + surcoût`, sans borne supérieure dans le code | `bot/run.js:105-127` |
 | Cycle planifié | `scan.yml`, cron `*/5 * * * *`, `DRY_RUN=true`, timeout 15 min, `cancel-in-progress` | `.github/workflows/scan.yml:12-27` |
 | Persistance `scan.yml` | seul `logs/scans.jsonl` est uploadé ; `logs/pair_spreads.json` ne survit pas d'un run à l'autre | `.github/workflows/scan.yml:55-63` |
 | Défauts du filtre | fenêtre 20, `minSamples` 5, `maxAgeMs` 24 h (max 168 h) | `bot/pairSpread.js:6-8`, ADR 0006 |
 | Fenêtre du filtre | `selectWindowSamples` conserve `at >= now - maxAgeMs` et `at <= now` : intervalle fermé `[now - maxAgeMs, now]` | `bot/pairSpread.js:225-258` |
 | Coût d'un scan | 3 quotes par taille dans la profondeur (2 pour la profondeur + 1 retour), 2 pour la première taille au-delà, 0 pour les suivantes ; 2 pour la re-quote interpolée si `interp.interpolated === true` | `bot/scanner.js:257-377` |
-| Nombre de tailles | `tradeSizes.length` n'a **aucune borne supérieure explicite** (non vide, sans doublon, positif, sous le plafond du profil) ; `logSweep.steps` est borné à 3–20 | `bot/config.js:206-208`, `:227-255`, `:272-279` |
-| Throttle RPC | FIFO par throttle, `THROTTLE_MIN_INTERVAL_MS = 250` par défaut ; espace les départs, ne borne ni la file ni le total | `bot/throttle.js:44-78`, `bot/config.js:604` |
+| Nombre de tailles | `tradeSizes.length` n'a **aucune borne supérieure explicite** (non vide, sans doublon, positif, sous le plafond du profil) ; `logSweep.steps` est borné à 3–20 | `bot/config.js:303-402` |
+| Throttle RPC | FIFO par throttle, `THROTTLE_MIN_INTERVAL_MS = 250` par défaut ; espace les départs, ne borne ni la file ni le total | `bot/throttle.js:44-78`, `bot/config.js:736` |
 | `QUOTE_STALE` | quote plus vieille que `maxQuoteAgeMs` (60 s par défaut) | `bot/scanner.js:319-327` |
 
-Le prototype `bot/pairSpreadProbe.js` est un module pur :
+Le prototype initial audité de `bot/pairSpreadProbe.js` (avant
+l'implémentation T1–T5) était un module pur :
 
 - `initProbeHistoryFromState` reconstruit l'historique à partir des
   **samples uniquement** (`:52-89`) ; c'est le défaut M1 ;
@@ -239,8 +251,8 @@ journaux de scan ou les compteurs du cycle.
 
 Chaque décision est présentée avec sa justification, ses conséquences et
 les hypothèses qu'elle requiert. Les décisions D1–D15 sont **acceptées comme
-base d'implémentation** (A1). L'implémentation T1–T5 et ses tests sont
-présents dans l'arbre de travail ; la validation opérationnelle n'est pas
+base d'implémentation** (A1). L'implémentation T1–T5 et ses tests ont été
+intégrés par le commit `b2245d0` ; la validation opérationnelle n'est pas
 effectuée. Les corrections issues des arbitrages A1–A17 sont intégrées dans
 le texte.
 
@@ -2410,8 +2422,8 @@ activation. Ils n'utilisent ni RPC réel, ni `logs/` réel, ni transaction.
 
 **Statut des tests (2026-11-24).** Les fichiers
 `test/BotPairSpreadProbe.test.js` et
-`test/ValidatePairSpreadProbeConfig.test.js` sont présents dans l'arbre de
-travail, non commités, aux côtés de
+`test/ValidatePairSpreadProbeConfig.test.js` sont présents et commités dans
+`b2245d0`, aux côtés de
 `test/BotPairSpreadProbeIntegration.test.js`. Ils couvrent le contrat retenu
 et les adaptations décrites ci-dessous, qui ont été appliquées :
 
@@ -2440,8 +2452,8 @@ Les tests existants ne doivent pas être modifiés pour masquer un défaut ;
 tout changement d'attente doit être justifié par une décision de cet ADR.
 Les adaptations des tests du prototype décrites ci-dessus sont des
 changements de contrat documentés, pas un masquage de défaut. Les tests D13
-sont présents dans l'arbre de travail ; leur validation opérationnelle
-complète reste à effectuer.
+sont commités dans `b2245d0` ; la validation opérationnelle des probes reste
+à effectuer.
 
 ### D14 — Exclusions, invariants de sécurité et amendement d'architecture
 
@@ -2875,12 +2887,12 @@ Les arbitrages A1–A17 ont été rendus le 2026-11-23. Ils portent sur le
 document et sur la base d'implémentation ; à cette date, ils ne validaient
 ni le prototype `bot/pairSpreadProbe.js`, ni un comportement testé, et aucun
 code ni test n'avait été modifié pour les appliquer. Depuis, l'implémentation
-T1–T5 et les tests D13 sont présents dans l'arbre de travail, non commités ;
-la validation opérationnelle reste à effectuer.
+T1–T5 et les tests D13 ont été intégrés par le commit `b2245d0` ; la
+validation opérationnelle reste à effectuer.
 
 | ID | Question | Arbitrage rendu | Conséquence |
 |---|---|---|---|
-| A1 | Cet ADR est-il accepté comme base d'implémentation ? | **oui**, corrections documentaires appliquées ; implémentation T1–T5 et tests D13 présents dans l'arbre de travail, non commités | le document reste la base acceptée ; validation opérationnelle non effectuée |
+| A1 | Cet ADR est-il accepté comme base d'implémentation ? | **oui**, corrections documentaires appliquées ; implémentation T1–T5 et tests D13 commités dans `b2245d0` | le document reste la base acceptée ; validation opérationnelle non effectuée |
 | A2 | Les probes doivent-elles être activées par défaut ? | **non** : `intervalMs = 0` | aucune probe sans configuration explicite |
 | A3 | Quelle valeur d'`intervalMs` à l'activation ? | `3600000` ms (1 h) comme point de départ | rotation initiale lente mais mesurable |
 | A4 | Que signifie `globalIntervalMs = 0` ? | **pas de throttle au niveau pur** ; interdit dès que `intervalMs > 0` ; `300000` ms à l'activation | pas d'héritage implicite de l'intervalle par paire |
@@ -2998,9 +3010,8 @@ explicite, jamais `0`.
 
 ## 8. Fichiers concernés par l'implémentation
 
-Cette liste décrit les fichiers de l'implémentation T1–T5, présente dans
-l'arbre de travail mais non commitée. Ces modifications ne sont pas
-attribuées à l'ADR lui-même.
+Cette liste décrit les fichiers de l'implémentation T1–T5, intégrée par le
+commit `b2245d0`. Ces modifications ne sont pas attribuées à l'ADR lui-même.
 
 | Fichier | Nature du changement | Risque |
 |---|---|---|
@@ -3019,8 +3030,8 @@ attribuées à l'ADR lui-même.
 | `bot/ARCHITECTURE.md` | amendement D14 : `scannedKeys ∩ probedKeys = ∅`, probe sans effets métier, curseur et clés sélectionnées non résolues, clé D5 exclue résolue, après `WRITE_FAILED` toutes les probes commencées sont résolues et le curseur avance, logging/classification, exceptions de commit inattendues et refus déterministes par `error.code` stable, état de processus non persisté | faible |
 | `docs/PRIORITES.md` | statut après implémentation | faible |
 
-Les tests listés sont présents dans l'arbre de travail, non commités ; leur
-exécution relève de la mission d'implémentation, pas de l'ADR.
+Les tests listés sont commités dans `b2245d0` ; leur exécution relève de la
+suite de tests du projet, pas de l'ADR.
 
 `docs/adr/0006-pair-spread-filter.md` n'est **pas** dans cette liste : il
 ne doit pas être modifié.
@@ -3193,25 +3204,25 @@ l'appelant.
 - `docs/adr/0006-pair-spread-filter.md` — décisions D1–D15, règle D5
   (`:378`), limite connue n° 3 (`:1054-1060`), condition de réexamen n° 8
   (`:1094-1095`).
-- `bot/pairSpreadProbe.js` — module pur (implémentation T1–T5),
-  `initProbeHistoryFromState` (`:52-89`), `selectProbeCandidates`
-  (`:99-152`), `recordProbeAttempt` (`:158-173`),
-  `validateProbeMaxPerCycle` (`:20-25`).
+- `bot/pairSpreadProbe.js` — module pur (implémentation T1–T5, commit
+  `b2245d0`), `initProbeHistoryFromState` (`:178-231`),
+  `selectProbeCandidates` (`:242-345`), `recordProbeAttempt` (`:352-369`),
+  `validateProbeMaxPerCycle` (`:39-50`).
 - `bot/pairSpread.js` — `buildPairKey` (`:81-108`), `bestNetProfitBps`
   (`:146-164`), `decidePairSpread` (`:297-374`).
 - `bot/pairSpreadStore.js` — Store v2, `MAX_ATTEMPTS_PER_PAIR` (`:22`),
   sources (`:36`), déduplication des samples (`:199-202`), sample futur
   (`:605`), attempt futur (`:630`), conflit sample/attempt (`:791-801`),
   garde d'écriture (`:919-930`), `WRITE_FAILED` (`:958-982`).
-- `bot/index.js` — `resolvePairSpreadSettings` (`:132-146`),
-  `pairSpreadNow` (`:258`), chargement de l'état (`:261-302`), skip
-  `enforce` (`:430-440`), attempts de scan (`:462-499`), commit unique
-  (`:587-626`), `exitCode` (`:646-654`).
-- `bot/config.js` — `validatePairSpreadSettings` (`:60-118`), défauts de
-  probe (`:446-447`), réglages `PAIR_SPREAD_*` (`:669-679`), propagation
-  (`:692-720`).
+- `bot/index.js` — `resolvePairSpreadSettings` (`:577-603`),
+  `pairSpreadNow` (`:717`), chargement de l'état (`:725-770`), skip
+  `enforce` (`:894-908`), attempts de scan (`:916-980`), commit unique
+  (`:1094-1110`), `exitCode` (`:1239-1241`).
+- `bot/config.js` — `validatePairSpreadSettings` (`:98-244`), défauts de
+  probe (`bot/pairSpreadProbe.js:8-9`), réglages `PAIR_SPREAD_*`
+  (`:785-815`), propagation (`:851-857`).
 - `bot/run.js` — `DEFAULT_POLL_INTERVAL_MS = 15000` (`:6`), absence de
-  chevauchement (`:111-127`).
+  chevauchement (`:105-127`).
 - `bot/scanner.js` — `scanPair` (`:257-377`), `QUOTE_STALE` (`:319-327`).
 - `.github/workflows/scan.yml` — cron `*/5 * * * *` (`:12-13`),
   `concurrency.cancel-in-progress` (`:17-20`), `timeout-minutes: 15`
@@ -3220,13 +3231,14 @@ l'appelant.
   d'un cycle filtré (`:234-239`).
 - `test/BotPairSpreadProbe.test.js`, `test/ValidatePairSpreadProbeConfig.test.js`
   et `test/BotPairSpreadProbeIntegration.test.js` — tests unitaires et
-  d'intégration présents dans l'arbre de travail, non commités.
+  d'intégration commités dans `b2245d0`.
 
 ---
 
 *Fin de l'ADR 0007. Les décisions D1–D15, les arbitrages A1–A17 et les
 corrections F1–F11, y compris la correction F8 (contrat de journalisation
 `debug`/`debug`/`warn`), sont acceptés comme base d'implémentation au
-2026-11-23. L'implémentation T1–T5 et les tests D13 sont présents dans
-l'arbre de travail, non commités ; la validation opérationnelle reste à
-effectuer et les probes demeurent désactivées par défaut.*
+2026-11-23. L'implémentation T1–T5 et les tests D13 ont été intégrés par le
+commit `b2245d0` ; la validation opérationnelle reste à effectuer et les
+probes demeurent désactivées par défaut. `b2245d0` est le commit
+d'intégration de référence, pas un HEAD permanent du projet.*
