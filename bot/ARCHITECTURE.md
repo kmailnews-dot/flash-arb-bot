@@ -35,16 +35,30 @@ d'environnement est `bot/config.js`. Les références sont volontairement des po
    attempt `failure` (`SCAN_ERROR`) puis suit le catch de paire historique. Une seule attempt
    finale est conservée par clé et par cycle, avec la précédence `success > failure > empty` ;
    à outcome égal, la première observation est conservée. Une paire filtrée, une erreur de
-   `maybeExecute`, de logging ou de `scans.jsonl` ne produit aucun attempt `failure`. Les probes
-   et le scheduler ne sont pas encore câblés : seuls les attempts de source `scan` sont produits.
-4. Le scanner calcule un `netProfit` exact en unités du token emprunté (BigInt) : profit brut
+   `maybeExecute`, de logging ou de `scans.jsonl` ne produit aucun attempt `failure`. Une paire
+   filtrée en `enforce` devient candidate à une probe (étape suivante) ; les scans produisent
+   des attempts de source `scan`.
+4. Après la boucle des paires et avant le commit unique, `main()` appelle
+   `runPairSpreadProbePhase()` (`bot/index.js`). La phase ne fait rien si le mode n'est pas
+   `enforce` ou si `PAIR_SPREAD_PROBE_INTERVAL_MS` vaut `0` : les probes sont donc désactivées
+   par défaut. Elle ne sonde pas non plus si l'état est indisponible ou non inscriptible
+   (`pairSpreadStateAvailable === false`, `loaded.ok === false` ou `loaded.writable !== true`).
+   Sinon elle capture `probeNow` une seule fois, reconstruit l'historique de rotation depuis les
+   samples et attempts persistés, puis appelle le scheduler pur `selectProbeCandidates()`
+   (`bot/pairSpreadProbe.js`). Seules les paires filtrées en `enforce` sont candidates, et une
+   clé déjà scannée dans le cycle est exclue (D5). Chaque probe commencée réutilise `scanPair()`
+   avec le même `blockTag` et le même `executionConfig` que le scan, mais n'écrit pas
+   `scans.jsonl`, n'incrémente aucun compteur et n'appelle jamais `maybeExecute()`. Le résultat
+   produit au plus un sample et un attempt `source: "probe"`, horodatés avec `pairSpreadNow` ;
+   le curseur runtime est mis à jour après la boucle. Détail : « Les probes pair-spread ».
+5. Le scanner calcule un `netProfit` exact en unités du token emprunté (BigInt) : profit brut
    moins le gaz, lui-même converti avec le multiplicateur L1 (`l1CostMultiplierBps`). Une
    opportunité doit passer le plancher `effectiveMinProfitBps` sur le net, le plancher USD
    (`max(MIN_PROFIT_USD, 3×gaz)`) et rester strictement positive. Si le meilleur résultat est
    `isOpportunity`, `main()` appelle `maybeExecute()`. En `DRY_RUN`, `maybeExecute()` logge et
    s'arrête. Sinon il vérifie les secrets, estime le gaz, re-quote, appelle `decide()` puis
    `execute()`.
-5. `execute()` (`bot/execute.js:236`) applique les guards, fait le `staticCall`, réserve le gaz,
+6. `execute()` (`bot/execute.js:236`) applique les guards, fait le `staticCall`, réserve le gaz,
    revérifie le breaker, envoie, attend le receipt et réconcilie le gaz (`bot/execute.js:236-798`).
    L'état d'exécution (gaz, breaker) est persisté par `guards.js`, pas par `persist.js`.
 
@@ -86,10 +100,11 @@ bot/run.js run() (process persistant)
 | `bot/prices.js` | Quotes DEX V2 (`getAmountsOut`) et V3 (QuoterV2) | `quoteLeg` | `ethers`, `abis` |
 | `bot/persist.js` | Journal JSONL des scans + formatage des logs | `appendScanResult`, `logEvent` | `fs/promises`, `path`, `sanitizeError` |
 | `bot/scanner.js` | Scan des paires/tailles, profondeur, profit net exact (BigInt), prix ETH/USD | `scanPair`, `scanTradeSize`, `getEthUsdPrice` | `ethers`, `prices`, `pricing`, `sanitizeError`, `minProfitUsd` |
-| `bot/index.js` | Un cycle complet (`main`) | `main` | `ethers`, `scanner`, `executor`, `persist`, `networks`, `guards`, `config` (lazy), `pairSpread`, `pairSpreadStore` |
+| `bot/index.js` | Un cycle complet (`main`) : scan, phase de probes, commit unique | `main` | `ethers`, `scanner`, `executor`, `persist`, `networks`, `guards`, `config` (lazy), `pairSpread`, `pairSpreadProbe`, `pairSpreadStore` |
 | `bot/run.js` | Boucle persistante et gestion provider/signaux | `run` | `ethers`, `index` |
 | `bot/adaptive.js` | Seuils adaptatifs bornés (MIN_PROFIT_BPS, taille de trade), historique | `loadAdaptive`, `recordOutcome`, `applyAdaptive` | `fs/promises`, `path` |
 | `bot/pairSpread.js` | Décision pure de viabilité d'une paire : clé stable, fenêtre, médiane BigInt, échantillon | `decidePairSpread`, `buildPairKey`, `bestNetProfitBps` | aucune |
+| `bot/pairSpreadProbe.js` | Scheduler pur de probes : historique samples + attempts, sélection, curseur, attempts en mémoire ; aucun I/O, aucune horloge | `selectProbeCandidates`, `initProbeHistoryFromState`, `recordProbeAttempt` | aucune |
 | `bot/pairSpreadStore.js` | État `logs/pair_spreads.json` v2 : samples + attempts, lecture v1, validation, écriture atomique | `loadPairSpreadState`, `recordPairSpreadCommit`, `recordPairSpreadSamples` | `fs/promises`, `path`, `crypto`, `pairSpread` |
 | `bot/resilient.js` | Classification d'erreur + retry borné + backoff | `classifyError`, `shouldRetry`, `backoffMs` | aucune |
 | `bot/throttle.js` | Sérialisation RPC + intervalle minimum + stats | `createThrottle`, `withThrottle`, `getStats` | aucune |
@@ -231,6 +246,23 @@ bot/run.js run() (process persistant)
   la forme canonique v2 est persistée à la prochaine écriture réelle. Réf. : `bot/pairSpread.js`,
   `bot/pairSpreadStore.js`, `bot/index.js` (`resolvePairSpreadSettings`, `pairSpreadNow`, boucle
   des paires, persistance finale), ADR 0006 D1, D2-bis, D6, D8, D14.
+- **Les probes pair-spread sont read-only, optionnelles et non persistées (ADR 0007).**
+  Une probe n'est exécutée qu'en `enforce` avec `PAIR_SPREAD_PROBE_INTERVAL_MS > 0`, et
+  uniquement pour une paire déjà filtrée (`pairDecision.skip`). Le scheduler pur
+  `selectProbeCandidates()` est appelé une fois par cycle, après la boucle de scan et avant le
+  commit ; il ne crée aucun timer. `scannedKeys ∩ probedKeys = ∅` : une clé scannée ou déjà
+  sondée dans le cycle est examinée puis résolue sans probe, et le scan gagne. Une probe
+  réutilise `scanPair()` avec le `blockTag` du cycle, mais ne produit ni `scans.jsonl`, ni
+  compteur, ni `maybeExecute`, ni effet sur l'`exitCode`, le breaker ou l'adaptive. Ses samples
+  et attempts (`source: "probe"`) sont horodatés avec le `pairSpreadNow` unique et commités par
+  le même `recordPairSpreadCommit` que les scans. `probeNow` ne sert qu'à la suspension et au
+  throttle global ; `lastGlobalProbeAt`, `writeFailures`, `suspendedUntil`, `pendingAttempts`
+  et `cursorKey` sont des états de processus, jamais persistés. Un `WRITE_FAILED` arme un
+  backoff 5/10/20/40/60 min, conserve les attempts complets en attente et ne conserve aucun
+  sample ; seule une écriture réelle (`ok && written`) réinitialise le backoff et retire les
+  attempts. Un état invalide ou non inscriptible interdit les probes. Réf. : `bot/index.js`
+  (`runPairSpreadProbePhase`), `bot/pairSpreadProbe.js`, `bot/pairSpreadStore.js`, ADR 0007
+  D1–D15.
 - **Exit code D13 : un cycle entièrement filtré est un succès volontaire.** Si `enforce` filtre
   toutes les paires configurées sans erreur indépendante, `exitCode` vaut `0` ; sinon le
   comportement `scanned === 0 → 1` est conservé (aucune paire, zéro scan non volontaire, refus
@@ -252,6 +284,307 @@ bot/run.js run() (process persistant)
   La libération s'applique aussi au breaker final après réservation (`bot/execute.js:426-431`).
   La branche `if (err.receipt)` est défensive : mocks uniquement, pas de receipt sur
   `sendTransaction` en ethers v6 (`bot/execute.js:467-510`).
+
+## Les probes pair-spread (ADR 0007)
+
+Une probe est un scan **read-only** d'une paire déjà filtrée en `enforce`, exécuté après la
+boucle principale afin de rafraîchir son historique en dehors du flux scan/opportunité.
+Elle ne peut ni signer, ni envoyer, ni appeler `maybeExecute()`. Cette section décrit
+l'intégration effective ; ADR 0007 reste la référence des décisions D1–D15.
+
+### Activation et configuration
+
+- **Désactivation par défaut.** `PAIR_SPREAD_MODE` vaut `off` par défaut et
+  `PAIR_SPREAD_PROBE_INTERVAL_MS` vaut `0`. Aucune probe n'est alors exécutée et aucun état
+  n'est lu en mode `off`.
+- **Conditions d'exécution.** Une probe n'est possible que si `mode === "enforce"` **et**
+  `probeIntervalMs > 0`, avec un état chargé disponible et inscriptible. En `shadow`, les
+  probes ne sont jamais exécutées ; en `enforce` avec un intervalle nul, elles restent
+  désactivées.
+- **Trois réglages.** `PAIR_SPREAD_PROBE_INTERVAL_MS` (défaut `0`) est l'intervalle minimal
+  entre deux probes d'une même paire ; `PAIR_SPREAD_PROBE_GLOBAL_INTERVAL_MS` (défaut `0`)
+  est l'intervalle minimal entre deux batchs démarrés ; `PAIR_SPREAD_PROBE_MAX_PER_CYCLE`
+  (défaut `1`) borne les clés sélectionnées par cycle, avec un plafond dur de `10`.
+- **Documentation des variables.** `.env.example` documente les trois variables
+  `PAIR_SPREAD_PROBE_*` et leurs valeurs par défaut ; il ne les active pas à lui seul.
+  L'activation exige aussi `PAIR_SPREAD_MODE=enforce` et un intervalle par paire non nul.
+- **Validation fail-fast.** Les types, bornes et le couplage sont validés dans **tous** les
+  modes : `intervalMs > 0` exige `globalIntervalMs > 0`, chaque intervalle doit rester
+  `<= maxAgeMs / minSamples`, et `maxPerCycle` doit être dans `[1, 10]`. Les chaînes vides
+  utilisent le défaut ; les chaînes d'espaces, les flottants, les signes et les exposants sont
+  rejetés par `optionalProbeInteger()` (`bot/config.js`), jamais convertis en `0`.
+- **Inertie.** En `off`/`shadow`, ou en `enforce` avec `intervalMs = 0`, des réglages non
+  défaut sont validés mais restent inertes ; un avertissement `PROBE_SETTINGS_INERT` le
+  signale au démarrage.
+- **Capacité nominale seulement.** Au démarrage, `pairCount = config.pairs.length` alimente
+  `PROBE_CAPACITY_MARGIN` (`minSamples × R_nom > maxAgeMs`) ou
+  `PROBE_CAPACITY_INDETERMINATE` (`pairCount` absent, `null` ou `0`, ou produit de rotation
+  au-delà de `Number.MAX_SAFE_INTEGER`, alors que les probes sont actives). Ces avertissements
+  sont des indicateurs nominaux, pas une preuve de capacité ; aucun
+  `PROBE_CAPACITY_IMPOSSIBLE` n'est émis. Réf. : `bot/config.js`
+  (`validatePairSpreadSettings`, `optionalProbeInteger`), ADR 0007 D7/D12.
+
+### Scheduler pur
+
+`bot/pairSpreadProbe.js` ne fait aucun I/O, ne lit ni l'environnement ni l'horloge et ne mute
+aucune entrée. `main()` lui passe toutes les valeurs :
+
+- `initProbeHistoryFromState(state)` reconstruit `Map<key, at>` avec
+  `max(samples[].at, attempts[].at)` par clé. Les paires à samples seuls, à attempts seuls ou
+  aux deux sont incluses ; les tableaux absents sont traités comme vides (tolérance v1). Les
+  timestamps futurs sont conservés ici puis exclus par la sélection.
+- `selectProbeCandidates(contract)` reçoit les candidats, l'historique persisté,
+  `pairSpreadNow`, `probeNow`, les trois réglages, `lastGlobalProbeAt`, `suspendedUntil`,
+  `cursorKey`, `scannedKeys`, `probedKeys` et `pendingAttempts`. Tous les paramètres requis
+  sont validés avant le préambule ; `maxPerCycle = 0` ou `11` est rejeté même si les probes sont
+  désactivées.
+- Le scheduler applique l'ordre suivant : suspension (`probeNow < suspendedUntil`), intervalle
+  nul, throttle global, filtre des clés invalides et déduplication par clé (première
+  occurrence), tri lexicographique, calcul d'éligibilité, parcours circulaire, puis retour de
+  `{ selected: [{ key, pair, lastAt }], nextCursorKey }`.
+- L'éligibilité d'une clé utilise `lastAt = max(history.get(key) ?? -1,
+  pendingAttempts.get(key)?.at ?? -1)`. Une clé jamais observée (`lastAt === -1`) est éligible
+  sans filtre d'intervalle ; une clé déjà observée est exclue si `lastAt > pairSpreadNow` ou si
+  `pairSpreadNow - lastAt < intervalMs`. Une clé de `scannedKeys` ou `probedKeys` est examinée
+  mais non sélectionnée (D5).
+- Le parcours part de la clé immédiatement suivante si `cursorKey` figure dans la liste,
+  sinon de la première clé lexicale ; il examine chaque clé une fois, sans répétition, et
+  retient au plus `maxPerCycle` clés éligibles. Une clé non éligible ne consomme pas de slot.
+  `nextCursorKey` est la dernière clé **examinée**, pas la dernière clé sélectionnée ; une
+  liste de candidats vide conserve `cursorKey`.
+- `recordProbeAttempt({ history, key, at })` retourne une nouvelle `Map` et ne recule jamais
+  un timestamp existant. Dans `runPairSpreadProbePhase`, la sélection est calculée une seule
+  fois avant la boucle : cette mise à jour n'influence donc pas les probes du cycle courant et
+  n'est pas persistée. L'historique est reconstruit au cycle suivant depuis le Store, avec
+  l'overlay `pendingAttempts`. Réf. : `bot/pairSpreadProbe.js`, `bot/index.js`
+  (`runPairSpreadProbePhase`), ADR 0007 D8/D11.
+
+### Candidats et exclusion D5
+
+- Seules les paires dont `decidePairSpread()` retourne `skip === true` en `enforce` sont
+  candidates. Une paire avec `INSUFFICIENT_SAMPLES`, `INVALID_FLOOR` ou `INVALID_SAMPLES`
+  reste scannée normalement et n'est pas sondée. Une paire dont la clé `buildPairKey()` est
+  invalide n'est pas candidate et reste scannée normalement.
+- Deux entrées de configuration qui partagent la même clé produisent **une seule** probe ; la
+  première occurrence fournit la paire. Deux routeurs différents produisent deux clés
+  distinctes.
+- `scannedKeys` reçoit la clé **avant** chaque appel à `scanPair`, y compris si l'appel lève.
+  `probedKeys` reçoit la clé à l'entrée du wrapper de probe, **avant** `scanPair`. L'invariant
+  du cycle est `scannedKeys ∩ probedKeys = ∅` : si une clé est déjà scannée, la probe est
+  abandonnée et la clé est résolue sans consommer de slot. Le scan gagne toujours.
+- Une clé exclue par D5 ne produit ni sample ni attempt, mais elle est examinée par le
+  scheduler et résolue par le curseur runtime : elle peut être dépassée. Réf. : `bot/index.js`
+  (boucle des paires, `scannedKeys`, `runPairSpreadProbePhase`), ADR 0007 D5.
+
+### Horloges
+
+- **`pairSpreadNow`** est capturé **une seule fois** après la vérification du chainId. Il sert
+  au chargement de l'état, aux décisions, aux `at` des samples et attempts de scan **et** de
+  probe, et au `now` du commit. L'éligibilité par paire du scheduler utilise cette horloge,
+  jamais `probeNow`.
+- **`probeNow`** est capturé une seule fois au début de la phase de probe, après la boucle
+  principale. Il sert uniquement à la suspension, au throttle global et à la valeur écrite
+  dans `lastGlobalProbeAt`. Il n'est jamais utilisé comme `at` et n'est jamais persisté.
+- **`suspendedUntil`** est calculé avec `Date.now()` au moment d'un échec d'écriture. C'est une
+  valeur de processus, ni un horodatage d'événement ni une valeur persistée.
+- **`lastGlobalProbeAt`** est initialisé à `null`, puis reçoit la valeur de `probeNow` capturée
+  au début de la phase. Le code l'affecte à chaque probe commencée avec cette même valeur ; la
+  première affectation est donc celle qui compte. Il n'est pas mis à jour pour un batch vide,
+  un batch dont toutes les clés sont exclues par D5, une annulation avant la première probe ou
+  une suspension. Il survit aux cycles du même processus et est perdu au redémarrage :
+  **il n'est pas persisté**. Le premier batch après un redémarrage n'est donc pas throttlé.
+- `probeNow` peut être postérieur à `pairSpreadNow` (cycle long) sans créer de sample futur :
+  l'`at` persisté reste `pairSpreadNow`. Une horloge qui recule bloque le batch global et peut
+  maintenir un attempt en attente tant que son `at` est futur. Réf. : `bot/index.js`
+  (`pairSpreadNow`, `probeNow`, `runPairSpreadProbePhase`), ADR 0007 D6/D11.
+
+### Déroulement et classification
+
+Pour chaque clé sélectionnée, dans l'ordre du scheduler :
+
+1. si le signal optionnel est déjà annulé, la boucle s'arrête sans commencer de nouvelle probe ;
+2. si la clé est dans `scannedKeys` ou `probedKeys`, elle est résolue sans probe (D5) ;
+3. sinon `probedKeys.add(key)`, `lastGlobalProbeAt = probeNow`, puis `scanPair()` est appelé
+   avec le même `executionConfig`, `gasPriceWei`, `ethUsdPrice`, `blockTag` et
+   `scanPairImpl` que le scan normal.
+
+Le résultat est classifié comme un scan vide, avec les mêmes raisons :
+
+| Situation | Attempt | Reason | Sample |
+|---|---|---|---|
+| `scanPair` lève, retourne autre chose qu'un tableau, ou `bestNetProfitBps()` retourne autre chose qu'un `bigint`/`null` | `failure` | `SCAN_ERROR` | non |
+| tableau vide | `empty` | `NO_RESULTS` | non |
+| au moins une quote tentée avec `amountIn` bigint > 0n, mais aucun bps calculable | `empty` | `UNPRICED` | non |
+| aucune quote exploitable | `empty` | `QUOTE_ERRORS` | non |
+| `bestNetProfitBps()` retourne un `bigint` (y compris `0` ou négatif) | `success` | — | oui |
+
+- Une probe `success` ajoute un sample au `pairSpreadNow` et un attempt `success` de source
+  `probe` au même `at`. Un sample de probe ne porte pas de champ `source`, comme tous les
+  samples v2. Une probe `empty` ou `failure` ne produit aucun sample.
+- Une exception de classification produit un attempt `failure`/`SCAN_ERROR` sans sample : elle
+  ne doit pas fabriquer un couple sample + attempt non-`success` interdit par le Store. Une
+  exception du logger, elle, est sans effet sur l'outcome, le sample et l'attempt.
+- Le cycle conserve au plus un attempt final par clé via `mergePairSpreadAttempt()` avec la
+  précédence `success > failure > empty` ; à outcome égal, la première observation est
+  conservée. Le sample retenu est celui de plus haut `netProfitBps` pour la clé.
+- Chaque probe commencée émet exactement un événement `pair_spread_probe` (`debug` pour
+  `success` et `empty`, `warn` pour `failure`) avec clé, label, outcome, raison et durée. Une
+  clé exclue par D5 ou non commencée n'émet pas cet événement ; le volume est borné par
+  `maxPerCycle`. Le logging est non bloquant.
+- Une probe n'écrit pas dans `scans.jsonl`, n'incrémente ni `scanned`, ni `opportunities`, ni
+  `executed`, ni `rpcErrors`, ni `pairErrors`, et ne modifie ni l'`exitCode`, ni le breaker, ni
+  l'adaptive. Un échec de probe n'interrompt pas les autres probes. Un `QUOTE_STALE` produit
+  par une probe lente est classé `empty` (selon les résultats), pas `failure`.
+  Réf. : `bot/index.js` (`runPairSpreadProbePhase`, `classifyEmptyScan`,
+  `mergePairSpreadAttempt`), ADR 0007 D2/D9.
+
+### Persistance, écriture et pannes
+
+- **Même Store, même commit.** Les samples et attempts de probe utilisent le même fichier
+  `logs/pair_spreads.json`, le même schéma v2 et le même `recordPairSpreadCommit` que les
+  scans. Il n'y a **qu'un seul commit par cycle**, après la phase de probe, avec
+  `now = pairSpreadNow`, les samples de scan + probe et les attempts de scan + probe. Aucun
+  nouveau fichier, aucun nouveau schéma, aucune migration.
+- Les attempts de probe portent `source: "probe"` ; le plafond de 20 attempts par paire est
+  partagé avec les scans. Les samples sont dédupliqués par `at` en conservant la valeur
+  maximale ; les attempts sont dédupliqués sur `(at, outcome, source, reason)`.
+- **État invalide ou non inscriptible.** Si `loadPairSpreadState()` lève,
+  `pairSpreadStateAvailable` reste `false` : aucune probe et aucun commit d'état pour le cycle,
+  mais le scan continue avec un historique vide. Si le chargement retourne
+  `ok === false` ou `writable !== true` (fichier corrompu, illisible, schéma invalide, version
+  inconnue, attempt futur), les probes sont refusées et le commit est refusé sans écraser le
+  fichier. Un fichier absent est un état vide `writable: true` : les probes sont autorisées et
+  le commit peut créer le fichier.
+- **`writable: true` n'est pas une preuve d'écriture.** C'est une indication calculée au
+  chargement ; seules les permissions, l'espace disque et le `rename` final décident. Seul un
+  retour `ok: true` **et** `written: true` prouve qu'une écriture a eu lieu.
+- **Classification d'un retour de commit.** `ok && written` = succès réel ; `ok && !written` =
+  no-op (état identique, aucune entrée expirée à purger) ; `!ok && !written && writable &&
+  error.code === PAIR_SPREAD_STATE_WRITE_FAILED` = panne d'écriture ; tout autre retour, y
+  compris `!ok && written`, est un refus déterministe.
+- **`WRITE_FAILED`.** `writeFailures += 1`, puis
+  `suspendedUntil = Date.now() + min(300000 × 2^(writeFailures - 1), 3600000)` : 5, 10, 20,
+  40, 60, puis 60 minutes. Les attempts complets du cycle (scan et probe) sont fusionnés dans
+  `pendingAttempts` ; les samples du cycle sont perdus. Le cycle reste un succès : aucun
+  compteur, `exitCode`, breaker ou adaptive n'est modifié. Le backoff est armé même si le cycle
+  ne contenait aucune probe, car le commit est commun. Un événement
+  `pair_spread_probe_write_failed` expose le nombre d'échecs, le backoff, `suspendedUntil` et
+  la taille de l'overlay.
+- **Pendant la suspension.** Le scheduler retourne une sélection vide avant tout parcours ;
+  aucune probe n'est tentée et `lastGlobalProbeAt` n'est pas mis à jour. Le scan normal
+  continue. Le commit du cycle continue d'avoir lieu : il peut ré-émettre les attempts en
+  attente et, si l'écriture réussit réellement, lever la suspension par anticipation.
+- **`pendingAttempts`.** Chaque entrée est un attempt complet `{ key, at, outcome, source,
+  reason? }`, une par clé. La fusion conserve l'attempt de `at` maximal ; à `at` égal, la
+  précédence `success > failure > empty` départage. Les samples ne sont jamais conservés dans
+  l'overlay. L'overlay survit aux cycles du processus et est perdu au redémarrage.
+- **Ré-émission.** Chaque commit inclut les attempts du cycle et les entrées en attente dont
+  `at <= pairSpreadNow` ; une entrée future reste dans l'overlay et ne rend pas l'état non
+  inscriptible. Un attempt en attente non-`success` est écarté si le commit courant contient un
+  sample **survivant** pour la même clé (garde de conflit du Store, préflight via
+  `appendPairSpreadCommit()`) ; un attempt `success` n'est jamais écarté. Si le préflight lève,
+  toutes les clés ayant un sample sont traitées comme survivantes.
+- **Après un commit réussi.** `writeFailures = 0`, `suspendedUntil = 0`, et les entrées de
+  `pendingAttempts` dont `at <= pairSpreadNow` sont retirées, y compris une entrée non-`success`
+  écartée par la garde de conflit. Les entrées futures restent. Un événement
+  `pair_spread_probe_recovered` est émis si un état de panne existait.
+- **No-op.** `ok && !written` ne réinitialise rien, ne lève pas la suspension, ne fusionne rien
+  et ne retire aucune entrée, même une entrée écartée par la garde de conflit. Il ne prouve pas
+  qu'une écriture future réussira.
+- **Refus déterministe.** Un retour de refus non-`WRITE_FAILED` n'arme aucun backoff et ne
+  fusionne pas les attempts du cycle ; l'overlay existant est conservé. Une exception dont
+  `error.code` vaut exactement `PAIR_SPREAD_STATE_VALIDATION_FAILED` ou
+  `PAIR_SPREAD_STATE_CONFLICT` est traitée de la même façon, sans `instanceof` ni message. Le
+  conflit est levé, pas retourné en `ok: false`.
+- **Exception inattendue.** Toute autre exception de commit (I/O, erreur de programmation,
+  code absent ou inconnu) laisse l'issue incertaine : aucun backoff, `writeFailures` inchangé,
+  et les attempts du cycle sont fusionnés dans `pendingAttempts` pour le commit suivant. Le
+  cycle reste non échoué. Réf. : `bot/index.js` (`classifyReturnedCommit`,
+  `buildCommitAttempts`, `applyWriteFailedBackoff`, `applyCommitSucceeded`),
+  `bot/pairSpreadStore.js` (`recordPairSpreadCommit`, `PAIR_SPREAD_STORE_CODES`), ADR 0007
+  D10/D15.
+- **Tests D15.** Le backoff, la ré-émission de `pendingAttempts`, `commitSucceeded` et les
+  exceptions de commit sont couverts par `test/BotPairSpreadProbeIntegration.test.js`.
+  `test/BotPairSpreadProbe.test.js` couvre le scheduler pur et l'overlay de sélection, pas le
+  backoff. Réf. : ADR 0007 D13/D15.
+
+### Curseur, annulation et reprise
+
+- Le curseur runtime est initialisé à `null` et vit uniquement en mémoire. Le scheduler retourne
+  `nextCursorKey` (dernière clé examinée) ; `bot/index.js` applique ensuite la règle de
+  résolution :
+  - sélection vide : `cursorKey = nextCursorKey` ;
+  - aucune clé sélectionnée résolue : curseur inchangé ;
+  - toutes les clés sélectionnées résolues : `cursorKey = nextCursorKey` ;
+  - résolution partielle : `cursorKey = lastResolvedKey`.
+- Une clé est **résolue** si elle a été commencée ou explicitement exclue par D5. Une clé
+  sélectionnée mais non commencée après une annulation reste non résolue et devant le curseur ;
+  elle sera resélectionnée au batch suivant. Une clé exclue par D5 est résolue et peut être
+  dépassée, sans attempt ni sample.
+- Le signal optionnel est vérifié avant la sélection et avant chaque probe. Une annulation
+  avant la sélection journalise `pair_spread_probe_cancelled` sans modifier le curseur ni
+  `lastGlobalProbeAt`. Une annulation après le début d'une probe n'interrompt pas la probe en
+  cours : elle a son attempt ; les clés suivantes non commencées restent non résolues. Le
+  curseur reste inchangé si aucune clé n'a été résolue, sinon il s'arrête à la dernière clé
+  résolue.
+- Un `WRITE_FAILED` n'est **pas** une annulation : il survient au commit, après la boucle. Toutes
+  les probes commencées sont résolues et le curseur avance selon la règle ; aucune clé ne reste
+  non résolue du seul fait de l'échec d'écriture.
+- Après un redémarrage, `cursorKey = null`, `lastGlobalProbeAt = null`, `pendingAttempts` est
+  vide et le backoff est perdu. La rotation repart de la première clé ; la fairness n'est
+  **pas** garantie entre deux processus ni entre deux exécutions `scan.yml`. Les `lastAt`
+  persistés empêchent seulement de sonder trop tôt une paire récente. Réf. : `bot/index.js`
+  (`runPairSpreadProbePhase`, curseur runtime), `bot/pairSpreadProbe.js` (`nextCursorKey`),
+  ADR 0007 D3/A17/D15.
+
+### Limites et non-garanties
+
+- **Pas d'activation dans GitHub Actions.** `.github/workflows/scan.yml` ne définit aucune
+  variable `PAIR_SPREAD_PROBE_*` (les défauts restent `0`/`1`) et n'uploade que
+  `logs/scans.jsonl`. Un runner GitHub est éphémère : `logs/pair_spreads.json`, le curseur,
+  `lastGlobalProbeAt`, le backoff et `pendingAttempts` ne survivent pas d'un run à l'autre.
+  Les probes ne sont donc pas opérationnelles dans ce workflow et l'intervalle global n'y
+  borne pas les exécutions ; le cron reste la seule borne. Une activation y exigerait la
+  persistance/restauration du Store et une vérification de la durée sous 15 min, hors du
+  périmètre actuel. L'activation initiale prévue par l'ADR est le processus persistant
+  `run.js`.
+- **Pas de garantie de capacité ni de rotation.** `R_nom = max(intervalMs,
+  ceil(N_config / maxPerCycle) × globalIntervalMs)` est une estimation nominale, pas une borne.
+  Le nombre réel de candidats, la durée des cycles (non bornée), les `empty`/`failure`, les
+  suspensions, les annulations et les redémarrages peuvent allonger la rotation sans limite
+  démontrable. Aucune période maximale par paire n'est garantie, même avec le curseur.
+- **Coût RPC non borné par les réglages.** Une probe coûte un scan complet ; le nombre de
+  requêtes dépend de `tradeSizes.length`, qui n'a pas de plafond explicite, et des résultats de
+  profondeur. `maxPerCycle` borne les probes par batch, pas les requêtes ; le throttle RPC
+  espace les départs mais ne borne ni la file ni le total.
+- **Pas de persistance d'exécution.** `lastGlobalProbeAt` n'est pas persisté (exigence
+  explicite) ; `writeFailures`, `suspendedUntil`, `pendingAttempts` et `cursorKey` non plus.
+  Un redémarrage perd la fairness, le backoff et les attempts non écrits ; un `WRITE_FAILED`
+  perd les samples du cycle. Les attempts en attente ne sont pas reconstruits depuis le Store.
+- **Pas de verrou inter-process.** Deux processus pourraient écrire le Store ; c'est une limite
+  connue d'ADR 0006, non résolue par les probes.
+- **Un attempt futur rend l'état non inscriptible** jusqu'à ce que l'horloge le dépasse ; les
+  probes sont alors refusées et aucune purge silencieuse n'est faite.
+
+### Seam de test de `main()`
+
+`main()` accepte des dépendances injectables : `provider`, `config`, `scanPair`,
+`maybeExecute`, `probeRuntime`, `signal`, `throttle`, `loadPairSpreadState` et
+`recordPairSpreadCommit`. En production, les seams ne sont pas utilisés : `bot/index.js` les
+laisse à leurs défauts et `bot/run.js` ne fournit que `provider` et `config`.
+
+- `throttle` remplace le throttle module-level `getMainThrottle(config)` pour les appels
+  `readChainId`, `getFeeData` et `getBlockNumber`. Il ne touche pas aux throttles de `scanner`,
+  `executor` ou `execute`. Les tests injectent `createThrottle({ minIntervalMs: 0 })` pour
+  éviter d'attendre l'intervalle réel et pour ne pas hériter du singleton créé par un autre
+  fichier de test lorsque `Date.now` est simulé.
+- `probeRuntime` permet d'injecter un runtime frais (simulation de redémarrage) ou de partager
+  un runtime entre deux appels de `main()` (même processus). Sans injection, le runtime
+  module-level `defaultProbeRuntime` est partagé par tous les appels du processus.
+- `signal` est un seam d'annulation optionnel ; `run.js` ne le passe pas. Il sert aux tests et
+  à un appelant embarqué, sans modifier le runtime de production.
+- `loadPairSpreadState` et `recordPairSpreadCommit` permettent de simuler un état invalide, une
+  panne d'écriture ou une exception de commit sans toucher au disque réel.
 
 ## Les typedefs
 
@@ -280,6 +613,8 @@ Contrat de types : `bot/domain.js` (aucun export runtime, `bot/domain.js:215`).
   (`bot/run.js:189-207`).
 - `bot/adaptive.js` : `loadAdaptive`, `recordOutcome`, `applyAdaptive`.
 - `bot/pairSpread.js` : `decidePairSpread`, `buildPairKey`, `bestNetProfitBps`.
+- `bot/pairSpreadProbe.js` : `initProbeHistoryFromState`, `selectProbeCandidates`,
+  `recordProbeAttempt`.
 - `bot/pairSpreadStore.js` : `loadPairSpreadState`, `recordPairSpreadCommit`,
   `recordPairSpreadSamples` (API samples-only compatible).
 - `bot/resilient.js` : `classifyError`, `shouldRetry`, `backoffMs`.
@@ -372,6 +707,31 @@ Contrat de types : `bot/domain.js` (aucun export runtime, `bot/domain.js:215`).
   est persistée à la prochaine écriture réelle. Ne pas ajouter de réécriture « de confort » :
   elle n'apporte pas d'intégrité (chaque lecture normalise) et romprait la politique D14.
   Réf. : `bot/pairSpreadStore.js` (`recordPairSpreadCommit`), ADR 0006 D14.
+- **`probeNow` n'est jamais un `at`.** Une probe est horodatée avec `pairSpreadNow`, capturé
+  avant le scan. Utiliser `probeNow` ou `Date.now()` au moment de la probe créerait un sample
+  postérieur au `now` du commit et rendrait l'état non inscriptible. `probeNow` ne sert qu'à la
+  suspension, au throttle global et à `lastGlobalProbeAt`. Réf. : `bot/index.js`
+  (`runPairSpreadProbePhase`), ADR 0007 D6.
+- **`lastGlobalProbeAt` est horodaté à la phase, pas à la probe.** Le code l'affecte à chaque
+  probe commencée, pas seulement à la première, mais toujours avec le `probeNow` capturé au
+  début de la phase : la valeur observable est identique. Il n'est pas persisté ; un
+  redémarrage autorise un batch immédiat, même si les `lastAt` par paire restent persistés.
+  Réf. : `bot/index.js` (`runPairSpreadProbePhase`), ADR 0007 D11.
+- **Probe : `ok:false, written:true` est un refus, pas un succès.** Ce retour n'arme aucun
+  backoff et ne fusionne pas les attempts du cycle. À l'inverse, `ok:true, written:false` est un
+  no-op qui ne réinitialise pas le backoff, ne lève pas la suspension et ne retire aucune entrée
+  de `pendingAttempts`, même une entrée écartée par la garde de conflit. Ne pas traiter `ok`
+  seul comme preuve d'écriture. Réf. : `bot/index.js` (`classifyReturnedCommit`,
+  `applyCommitSucceeded`), ADR 0007 D15.
+- **La garde de conflit des probes passe par le préflight du Store.** La survie d'un sample est
+  vérifiée par `appendPairSpreadCommit()`, pas par la seule liste brute du cycle. Si le préflight
+  lève, toutes les clés ayant un sample sont considérées comme survivantes : l'attempt en
+  attente non-`success` est écarté. Réf. : `bot/index.js` (`buildCommitAttempts`),
+  `bot/pairSpreadStore.js` (`appendPairSpreadCommit`), ADR 0007 D15.
+- **`WRITE_FAILED` n'annule pas la rotation.** L'échec survient au commit, après la boucle : les
+  probes commencées sont résolues et le curseur avance. Les attempts complets sont fusionnés,
+  les samples du cycle sont perdus, et les probes ne sont pas rejouées au prochain passage du
+  seul fait de l'échec. Réf. : `bot/index.js` (`applyWriteFailedBackoff`), ADR 0007 D15.
 - **Test `throttle` non flaky.** L'ancien test `respects minIntervalMs and measures the actual
   wait` mesurait une durée réelle et pouvait échouer si l'event loop était bloqué. Il a été
   remplacé par `accumulates wait time in stats when the min interval has not elapsed`, qui vérifie
@@ -405,6 +765,19 @@ Contrat de types : `bot/domain.js` (aucun export runtime, `bot/domain.js:215`).
 - **Pas de garantie de profit.** Les filtres de `decide()` (`bot/decide.js:95-265`), le `staticCall`
   (`bot/execute.js:369-382`) et les guards réduisent le risque mais ne garantissent rien. Rappel
   MEV point 7 : la configuration actuelle est jugée économiquement défavorable.
+- **Pas de probes dans `scan.yml`.** Le workflow ne définit aucune variable `PAIR_SPREAD_PROBE_*`
+  (les défauts restent `0`/`1`), n'uploade pas `logs/pair_spreads.json` et s'exécute sur un
+  runner éphémère : Store, curseur, `lastGlobalProbeAt`, backoff et `pendingAttempts` ne
+  survivent pas d'un run à l'autre. Les probes n'y sont pas opérationnelles ; l'activation
+  initiale prévue est le processus persistant `run.js`.
+- **Aucune transaction depuis une probe.** Une probe ne signe pas, n'appelle jamais
+  `maybeExecute()` et n'écrit pas dans `scans.jsonl` ; elle ne modifie ni compteurs, ni
+  `exitCode`, ni breaker, ni adaptive. « Probe » ne signifie pas « exécution » : c'est un scan
+  read-only dont seuls les samples et attempts sont persistés.
+- **Pas de garantie de capacité ni de fairness.** `PROBE_CAPACITY_MARGIN` est une estimation
+  nominale, pas une preuve ; la rotation réelle n'a pas de période maximale par paire, car les
+  cycles, les `empty`/`failure`, les suspensions, les annulations et les redémarrages ne sont
+  pas bornés. Le coût RPC d'une probe n'est pas borné par `maxPerCycle`.
 
 ## Dettes documentées
 

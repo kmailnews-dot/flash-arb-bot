@@ -43,6 +43,10 @@ const PAIR_SPREAD_STORE_CODES = Object.freeze({
   SCHEMA_INVALID: "PAIR_SPREAD_STATE_SCHEMA_INVALID",
   UNREADABLE: "PAIR_SPREAD_STATE_UNREADABLE",
   WRITE_FAILED: "PAIR_SPREAD_STATE_WRITE_FAILED",
+  // D15: deterministic pre-write refusals are classified only by this stable
+  // property. Never use instanceof, a tag or the message to classify them.
+  VALIDATION_FAILED: "PAIR_SPREAD_STATE_VALIDATION_FAILED",
+  CONFLICT: "PAIR_SPREAD_STATE_CONFLICT",
 });
 const STORE_CODES = new Set(Object.values(PAIR_SPREAD_STORE_CODES));
 
@@ -75,6 +79,20 @@ function schemaError(filePath, detail, reason = "schema_invalid") {
   );
 }
 
+// D15: validation/conflit refusals keep their existing Error subclass
+// (TypeError/RangeError) but expose the stable `code` the commit wrapper uses.
+function storeValidationError(ErrorType, message) {
+  const error = new ErrorType(message);
+  error.code = PAIR_SPREAD_STORE_CODES.VALIDATION_FAILED;
+  return error;
+}
+
+function storeConflictError(message) {
+  const error = new TypeError(message);
+  error.code = PAIR_SPREAD_STORE_CODES.CONFLICT;
+  return error;
+}
+
 /// D1: PAIR_SPREAD_PATH is the operator override, aligned with bot/config.js
 /// (ADR 0006, "Intégration dans le bot"). The default stays anchored on the
 /// module so the file lives next to the other bot states.
@@ -92,14 +110,20 @@ function createEmptyPairSpreadState() {
 
 function validateFilePath(filePath) {
   if (typeof filePath !== "string" || filePath.trim() === "") {
-    throw new TypeError("filePath must be a non-empty string");
+    throw storeValidationError(
+      TypeError,
+      "filePath must be a non-empty string"
+    );
   }
   return filePath;
 }
 
 function validateNow(now) {
   if (!Number.isSafeInteger(now) || now < 0) {
-    throw new RangeError("now must be a non-negative safe integer");
+    throw storeValidationError(
+      RangeError,
+      "now must be a non-negative safe integer"
+    );
   }
   return now;
 }
@@ -110,7 +134,8 @@ function validateWindowSize(windowSize) {
     windowSize < MIN_WINDOW_SIZE ||
     windowSize > MAX_WINDOW_SIZE
   ) {
-    throw new RangeError(
+    throw storeValidationError(
+      RangeError,
       `windowSize must be an integer between ${MIN_WINDOW_SIZE} and ${MAX_WINDOW_SIZE}`
     );
   }
@@ -124,7 +149,10 @@ function validateMaxAgeMs(maxAgeMs) {
     maxAgeMs <= 0 ||
     maxAgeMs > MAX_MAX_AGE_MS
   ) {
-    throw new RangeError(`maxAgeMs must be a finite number in (0, ${MAX_MAX_AGE_MS}]`);
+    throw storeValidationError(
+      RangeError,
+      `maxAgeMs must be a finite number in (0, ${MAX_MAX_AGE_MS}]`
+    );
   }
   return maxAgeMs;
 }
@@ -574,10 +602,16 @@ function statesEqual(a, b) {
 
 function parseIncomingSample(sample, index, now) {
   if (!isPlainObject(sample)) {
-    throw new TypeError(`samples[${index}] must be an object`);
+    throw storeValidationError(
+      TypeError,
+      `samples[${index}] must be an object`
+    );
   }
   if (typeof sample.key !== "string" || sample.key.length === 0) {
-    throw new TypeError(`samples[${index}].key must be a non-empty string`);
+    throw storeValidationError(
+      TypeError,
+      `samples[${index}].key must be a non-empty string`
+    );
   }
 
   let value;
@@ -589,7 +623,8 @@ function parseIncomingSample(sample, index, now) {
   ) {
     value = BigInt(sample.netProfitBps);
   } else {
-    throw new TypeError(
+    throw storeValidationError(
+      TypeError,
       `samples[${index}].netProfitBps must be a bigint or a signed decimal string`
     );
   }
@@ -599,10 +634,16 @@ function parseIncomingSample(sample, index, now) {
 
   const at = sample.at === undefined ? now : sample.at;
   if (!Number.isSafeInteger(at) || at < 0) {
-    throw new RangeError(`samples[${index}].at must be a non-negative safe integer`);
+    throw storeValidationError(
+      RangeError,
+      `samples[${index}].at must be a non-negative safe integer`
+    );
   }
   if (at > now) {
-    throw new RangeError(`samples[${index}].at must not be in the future`);
+    throw storeValidationError(
+      RangeError,
+      `samples[${index}].at must not be in the future`
+    );
   }
 
   return { key: sample.key, netProfitBps, at, value };
@@ -613,29 +654,44 @@ function parseIncomingSample(sample, index, now) {
 /// was never observed.
 function parseIncomingAttempt(attempt, index, now) {
   if (!isPlainObject(attempt)) {
-    throw new TypeError(`attempts[${index}] must be an object`);
+    throw storeValidationError(
+      TypeError,
+      `attempts[${index}] must be an object`
+    );
   }
   if (typeof attempt.key !== "string" || attempt.key.length === 0) {
-    throw new TypeError(`attempts[${index}].key must be a non-empty string`);
+    throw storeValidationError(
+      TypeError,
+      `attempts[${index}].key must be a non-empty string`
+    );
   }
   if (attempt.at === undefined) {
-    throw new RangeError(`attempts[${index}].at is required`);
+    throw storeValidationError(
+      RangeError,
+      `attempts[${index}].at is required`
+    );
   }
   if (!Number.isSafeInteger(attempt.at) || attempt.at <= 0) {
-    throw new RangeError(
+    throw storeValidationError(
+      RangeError,
       `attempts[${index}].at must be a positive safe integer`
     );
   }
   if (attempt.at > now) {
-    throw new RangeError(`attempts[${index}].at must not be in the future`);
+    throw storeValidationError(
+      RangeError,
+      `attempts[${index}].at must not be in the future`
+    );
   }
   if (!ATTEMPT_OUTCOME_SET.has(attempt.outcome)) {
-    throw new TypeError(
+    throw storeValidationError(
+      TypeError,
       `attempts[${index}].outcome must be one of ${PAIR_SPREAD_ATTEMPT_OUTCOMES.join(", ")}`
     );
   }
   if (!ATTEMPT_SOURCE_SET.has(attempt.source)) {
-    throw new TypeError(
+    throw storeValidationError(
+      TypeError,
       `attempts[${index}].source must be one of ${PAIR_SPREAD_ATTEMPT_SOURCES.join(", ")}`
     );
   }
@@ -651,7 +707,8 @@ function parseIncomingAttempt(attempt, index, now) {
       typeof attempt.reason !== "string" ||
       !ATTEMPT_REASON_PATTERN.test(attempt.reason)
     ) {
-      throw new TypeError(
+      throw storeValidationError(
+        TypeError,
         `attempts[${index}].reason must be a short uppercase code`
       );
     }
@@ -692,10 +749,10 @@ function appendPairSpreadCommit({
   validateWindowSize(windowSize);
   validateMaxAgeMs(maxAgeMs);
   if (!Array.isArray(samples)) {
-    throw new TypeError("samples must be an array");
+    throw storeValidationError(TypeError, "samples must be an array");
   }
   if (!Array.isArray(attempts)) {
-    throw new TypeError("attempts must be an array");
+    throw storeValidationError(TypeError, "attempts must be an array");
   }
 
   const before = parsePairSpreadDocument(state, {
@@ -792,7 +849,7 @@ function appendPairSpreadCommit({
     if (!survivingSamplesByKey.has(key)) continue;
     for (const attempt of list) {
       if (attempt.outcome !== "success") {
-        throw new TypeError(
+        throw storeConflictError(
           `attempts for ${JSON.stringify(key)} with outcome "${attempt.outcome}" ` +
             "must not be committed with a sample"
         );
@@ -1002,10 +1059,10 @@ async function recordPairSpreadCommit({
   validateWindowSize(windowSize);
   validateMaxAgeMs(maxAgeMs);
   if (!Array.isArray(samples)) {
-    throw new TypeError("samples must be an array");
+    throw storeValidationError(TypeError, "samples must be an array");
   }
   if (!Array.isArray(attempts)) {
-    throw new TypeError("attempts must be an array");
+    throw storeValidationError(TypeError, "attempts must be an array");
   }
 
   const ownsLoad = loaded === null;

@@ -8,6 +8,12 @@ const {
   DEFAULT_WINDOW_SIZE: DEFAULT_PAIR_SPREAD_WINDOW_SIZE,
   normalizeMode: normalizePairSpreadMode,
 } = require("./pairSpread");
+const {
+  DEFAULT_PROBE_INTERVAL_MS: DEFAULT_PAIR_SPREAD_PROBE_INTERVAL_MS,
+  DEFAULT_PROBE_MAX_PER_CYCLE: DEFAULT_PAIR_SPREAD_PROBE_MAX_PER_CYCLE,
+  validateProbeIntervalMs,
+  validateProbeMaxPerCycle,
+} = require("./pairSpreadProbe");
 const { DEFAULT_PAIR_SPREADS_PATH } = require("./pairSpreadStore");
 
 function required(name) {
@@ -31,6 +37,37 @@ function optionalNumber(name, fallback) {
   return value === undefined || value === "" ? fallback : Number(value);
 }
 
+const PROBE_INTEGER_PATTERN = /^[0-9]+$/;
+
+// D12: Number("   ") is 0, which would silently disable probes. This reader
+// rejects whitespace-only and partially numeric values before any conversion.
+function optionalProbeInteger(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  if (typeof raw !== "string") {
+    throw new Error(`${name} must be a non-negative integer.`);
+  }
+  if (raw.trim() === "") {
+    throw new Error(
+      `${name} must not be whitespace-only. Use a non-negative integer or leave it unset.`
+    );
+  }
+  const trimmed = raw.trim();
+  if (!PROBE_INTEGER_PATTERN.test(trimmed)) {
+    throw new Error(
+      `${name} must be a non-negative integer written in decimal digits only ` +
+        "(no sign, decimal point or exponent)."
+    );
+  }
+  const value = Number(trimmed);
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(
+      `${name} must be a safe integer <= ${Number.MAX_SAFE_INTEGER}.`
+    );
+  }
+  return value;
+}
+
 function validateAddress(value, path) {
   try {
     return ethers.getAddress(value);
@@ -51,7 +88,24 @@ function validatePairSpreadMode(value) {
   }
 }
 
-function validatePairSpreadSettings({ mode, windowSize, minSamples, maxAgeMs }) {
+const DEFAULT_PAIR_SPREAD_PROBE_GLOBAL_INTERVAL_MS = 0;
+
+function emitProbeWarning(warn, code, detail) {
+  if (typeof warn !== "function") return;
+  warn(`[PAIR SPREAD] ${code}: ${detail}`);
+}
+
+function validatePairSpreadSettings({
+  mode,
+  windowSize,
+  minSamples,
+  maxAgeMs,
+  probeIntervalMs = DEFAULT_PAIR_SPREAD_PROBE_INTERVAL_MS,
+  probeGlobalIntervalMs = DEFAULT_PAIR_SPREAD_PROBE_GLOBAL_INTERVAL_MS,
+  probeMaxPerCycle = DEFAULT_PAIR_SPREAD_PROBE_MAX_PER_CYCLE,
+  pairCount,
+  warn = console.warn,
+}) {
   const normalizedMode = validatePairSpreadMode(mode);
   if (
     !Number.isInteger(windowSize) ||
@@ -80,6 +134,111 @@ function validatePairSpreadSettings({ mode, windowSize, minSamples, maxAgeMs }) 
     throw new Error(
       `PAIR_SPREAD_MAX_AGE_MS must be a finite number in (0, ${PAIR_SPREAD_MAX_MAX_AGE_MS}].`
     );
+  }
+  const validProbeIntervalMs = validateProbeIntervalMs(
+    probeIntervalMs,
+    "PAIR_SPREAD_PROBE_INTERVAL_MS"
+  );
+  const validProbeGlobalIntervalMs = validateProbeIntervalMs(
+    probeGlobalIntervalMs,
+    "PAIR_SPREAD_PROBE_GLOBAL_INTERVAL_MS"
+  );
+  const validProbeMaxPerCycle = validateProbeMaxPerCycle(
+    probeMaxPerCycle,
+    "PAIR_SPREAD_PROBE_MAX_PER_CYCLE"
+  );
+  if (pairCount !== undefined && pairCount !== null) {
+    if (!Number.isSafeInteger(pairCount) || pairCount < 0) {
+      throw new Error(
+        "pairCount must be a non-negative safe integer, or undefined/null when unavailable."
+      );
+    }
+  }
+  const maxIntervalMs = maxAgeMs / minSamples;
+  // Conservative operational margin: a pair probed every interval needs
+  // minSamples * interval to reach the minimum sample count before the oldest
+  // sample expires. This is not the exact scheduler condition: the real
+  // per-pair period also depends on the candidate count, maxPerCycle and cycle
+  // duration.
+  if (validProbeIntervalMs > 0 && validProbeIntervalMs > maxIntervalMs) {
+    throw new Error(
+      `PAIR_SPREAD_PROBE_INTERVAL_MS is too large: PAIR_SPREAD_MIN_SAMPLES (${minSamples}) * ` +
+        `interval (${validProbeIntervalMs} ms) exceeds PAIR_SPREAD_MAX_AGE_MS (${maxAgeMs} ms). ` +
+        "This is a conservative operational margin, not a guarantee that every candidate can be probed within maxAge."
+    );
+  }
+  if (validProbeGlobalIntervalMs > maxIntervalMs) {
+    throw new Error(
+      `PAIR_SPREAD_PROBE_GLOBAL_INTERVAL_MS is too large: PAIR_SPREAD_MIN_SAMPLES (${minSamples}) * ` +
+        `global interval (${validProbeGlobalIntervalMs} ms) exceeds PAIR_SPREAD_MAX_AGE_MS (${maxAgeMs} ms). ` +
+        "This is a conservative operational margin, not a guarantee that every candidate can be probed within maxAge."
+    );
+  }
+  // A2/A4: 0 is the safe disabled default, but an active per-pair interval
+  // must not be combined with no global throttle.
+  if (validProbeIntervalMs > 0 && validProbeGlobalIntervalMs === 0) {
+    throw new Error(
+      "PAIR_SPREAD_PROBE_GLOBAL_INTERVAL_MS must be > 0 when PAIR_SPREAD_PROBE_INTERVAL_MS is > 0."
+    );
+  }
+
+  const probesActive = normalizedMode === "enforce" && validProbeIntervalMs > 0;
+  const probesInertByMode = normalizedMode !== "enforce" && validProbeIntervalMs > 0;
+  const disabledSettingsInert =
+    validProbeIntervalMs === 0 &&
+    (validProbeGlobalIntervalMs !== DEFAULT_PAIR_SPREAD_PROBE_GLOBAL_INTERVAL_MS ||
+      validProbeMaxPerCycle !== DEFAULT_PAIR_SPREAD_PROBE_MAX_PER_CYCLE);
+
+  if (probesInertByMode) {
+    emitProbeWarning(
+      warn,
+      "PROBE_SETTINGS_INERT",
+      `mode "${normalizedMode}" does not run probes; interval=${validProbeIntervalMs} ms, ` +
+        `maxPerCycle=${validProbeMaxPerCycle}, globalInterval=${validProbeGlobalIntervalMs} ms are inert.`
+    );
+  } else if (disabledSettingsInert) {
+    emitProbeWarning(
+      warn,
+      "PROBE_SETTINGS_INERT",
+      `PAIR_SPREAD_PROBE_INTERVAL_MS=0 disables probes; ` +
+        `maxPerCycle=${validProbeMaxPerCycle} and globalInterval=${validProbeGlobalIntervalMs} ms are inert.`
+    );
+  }
+
+  if (probesActive) {
+    if (pairCount === undefined || pairCount === null || pairCount === 0) {
+      emitProbeWarning(
+        warn,
+        "PROBE_CAPACITY_INDETERMINATE",
+        "pairCount is absent, null or 0 while probes are active; capacity cannot be estimated at startup. " +
+          "Provide pairCount or measure the real rotation."
+      );
+    } else {
+      const batches = Math.ceil(pairCount / validProbeMaxPerCycle);
+      const batchRotationMs = batches * validProbeGlobalIntervalMs;
+      if (!Number.isSafeInteger(batchRotationMs)) {
+        emitProbeWarning(
+          warn,
+          "PROBE_CAPACITY_INDETERMINATE",
+          "ceil(pairCount / maxPerCycle) * globalIntervalMs exceeds Number.MAX_SAFE_INTEGER; " +
+            "capacity cannot be estimated at startup."
+        );
+      } else {
+        const nominalRotationMs = Math.max(
+          validProbeIntervalMs,
+          batchRotationMs
+        );
+        if (nominalRotationMs * minSamples > maxAgeMs) {
+          emitProbeWarning(
+            warn,
+            "PROBE_CAPACITY_MARGIN",
+            `nominal rotation ${nominalRotationMs} ms * minSamples ${minSamples} exceeds maxAge ${maxAgeMs} ms; ` +
+              "the nominal margin is exceeded and the rotation may not provide enough samples. " +
+              "This is a nominal indicator, not a proof."
+          );
+        }
+      }
+    }
   }
   return normalizedMode;
 }
@@ -410,6 +569,11 @@ function validateScannerConfig({
   pairSpreadWindowSize = DEFAULT_PAIR_SPREAD_WINDOW_SIZE,
   pairSpreadMinSamples = DEFAULT_PAIR_SPREAD_MIN_SAMPLES,
   pairSpreadMaxAgeMs = DEFAULT_PAIR_SPREAD_MAX_AGE_MS,
+  pairSpreadProbeIntervalMs = DEFAULT_PAIR_SPREAD_PROBE_INTERVAL_MS,
+  pairSpreadProbeGlobalIntervalMs = DEFAULT_PAIR_SPREAD_PROBE_GLOBAL_INTERVAL_MS,
+  pairSpreadProbeMaxPerCycle = DEFAULT_PAIR_SPREAD_PROBE_MAX_PER_CYCLE,
+  pairCount,
+  warn = console.warn,
 }) {
   if (minProfitUsd !== undefined && minProfitUsd !== null) {
     if (typeof minProfitUsd !== "number" || !Number.isFinite(minProfitUsd) || minProfitUsd < 0) {
@@ -543,6 +707,11 @@ function validateScannerConfig({
     windowSize: pairSpreadWindowSize,
     minSamples: pairSpreadMinSamples,
     maxAgeMs: pairSpreadMaxAgeMs,
+    probeIntervalMs: pairSpreadProbeIntervalMs,
+    probeGlobalIntervalMs: pairSpreadProbeGlobalIntervalMs,
+    probeMaxPerCycle: pairSpreadProbeMaxPerCycle,
+    pairCount,
+    warn,
   });
 }
 
@@ -629,6 +798,21 @@ const config = {
     "PAIR_SPREAD_MAX_AGE_MS",
     DEFAULT_PAIR_SPREAD_MAX_AGE_MS
   ),
+  // Phase 1: probe configuration only. 0 disables probes and is the default,
+  // so the current scan behaviour is unchanged. maxPerCycle is a hard cap for
+  // one scheduler call, not a guarantee about the number of candidates.
+  pairSpreadProbeIntervalMs: optionalProbeInteger(
+    "PAIR_SPREAD_PROBE_INTERVAL_MS",
+    DEFAULT_PAIR_SPREAD_PROBE_INTERVAL_MS
+  ),
+  pairSpreadProbeGlobalIntervalMs: optionalProbeInteger(
+    "PAIR_SPREAD_PROBE_GLOBAL_INTERVAL_MS",
+    DEFAULT_PAIR_SPREAD_PROBE_GLOBAL_INTERVAL_MS
+  ),
+  pairSpreadProbeMaxPerCycle: optionalProbeInteger(
+    "PAIR_SPREAD_PROBE_MAX_PER_CYCLE",
+    DEFAULT_PAIR_SPREAD_PROBE_MAX_PER_CYCLE
+  ),
 
   // Optional: lets the bot price gas in USD by quoting 1 WETH -> a stablecoin on a live DEX pool.
   // Required only for pairs whose borrowed token is WETH or a stablecoin (see README). Leave unset
@@ -668,10 +852,31 @@ validateScannerConfig({
   pairSpreadWindowSize: config.pairSpreadWindowSize,
   pairSpreadMinSamples: config.pairSpreadMinSamples,
   pairSpreadMaxAgeMs: config.pairSpreadMaxAgeMs,
+  pairSpreadProbeIntervalMs: config.pairSpreadProbeIntervalMs,
+  pairSpreadProbeGlobalIntervalMs: config.pairSpreadProbeGlobalIntervalMs,
+  pairSpreadProbeMaxPerCycle: config.pairSpreadProbeMaxPerCycle,
+  pairCount: config.pairs.length,
 });
+
+// D12: one startup line, never per cycle. The full enabled/disabled wording
+// is fixed so operators can grep the effective probe state.
+if (config.pairSpreadMode === "enforce" && config.pairSpreadProbeIntervalMs > 0) {
+  console.log(
+    `[PAIR SPREAD] probe enabled interval=${config.pairSpreadProbeIntervalMs} ` +
+      `maxPerCycle=${config.pairSpreadProbeMaxPerCycle} ` +
+      `globalInterval=${config.pairSpreadProbeGlobalIntervalMs}`
+  );
+} else {
+  console.log(
+    `[PAIR SPREAD] probe disabled interval=${config.pairSpreadProbeIntervalMs} ` +
+      `mode=${config.pairSpreadMode} maxPerCycle=${config.pairSpreadProbeMaxPerCycle} ` +
+      `globalInterval=${config.pairSpreadProbeGlobalIntervalMs}`
+  );
+}
 
 module.exports = config;
 module.exports.validatePairs = validatePairs;
 module.exports.validateSlippageBps = validateSlippageBps;
 module.exports.validateScannerConfig = validateScannerConfig;
 module.exports.validatePairSpreadSettings = validatePairSpreadSettings;
+module.exports.optionalProbeInteger = optionalProbeInteger;

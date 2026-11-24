@@ -23,7 +23,16 @@ const {
   normalizeMode: normalizePairSpreadMode,
 } = require("./pairSpread");
 const {
+  DEFAULT_PROBE_INTERVAL_MS,
+  DEFAULT_PROBE_MAX_PER_CYCLE,
+  initProbeHistoryFromState,
+  recordProbeAttempt,
+  selectProbeCandidates,
+} = require("./pairSpreadProbe");
+const {
   DEFAULT_PAIR_SPREADS_PATH,
+  PAIR_SPREAD_STORE_CODES,
+  appendPairSpreadCommit,
   loadPairSpreadState,
   recordPairSpreadCommit,
 } = require("./pairSpreadStore");
@@ -85,6 +94,185 @@ const PAIR_SPREAD_ATTEMPT_PRECEDENCE = Object.freeze({
   success: 2,
 });
 
+/// D6/D15: process-local probe runtime. It is never persisted and is lost on
+/// restart. Tests inject a fresh object through `main({ probeRuntime })`.
+function createProbeRuntime() {
+  return {
+    lastGlobalProbeAt: null,
+    writeFailures: 0,
+    suspendedUntil: 0,
+    pendingAttempts: new Map(),
+    cursorKey: null,
+  };
+}
+
+const defaultProbeRuntime = createProbeRuntime();
+const DEFAULT_PAIR_SPREAD_PROBE_GLOBAL_INTERVAL_MS = 0;
+const PROBE_BACKOFF_BASE_MS = 300_000;
+const PROBE_BACKOFF_MAX_MS = 3_600_000;
+// D15: only these stable `error.code` values classify a thrown commit refusal
+// as deterministic. `instanceof`, the message and the error name are never
+// used, because the same class can also signal an unexpected failure.
+const PROBE_DETERMINISTIC_COMMIT_CODES = new Set([
+  PAIR_SPREAD_STORE_CODES.VALIDATION_FAILED,
+  PAIR_SPREAD_STORE_CODES.CONFLICT,
+]);
+
+function resolveProbeRuntime(runtime) {
+  if (runtime === undefined || runtime === null) return defaultProbeRuntime;
+  if (typeof runtime !== "object" || Array.isArray(runtime)) {
+    throw new TypeError("probeRuntime must be an object");
+  }
+  return runtime;
+}
+
+function isProbeCancelled(signal) {
+  return signal !== undefined && signal !== null && signal.aborted === true;
+}
+
+function probeBackoffMs(writeFailures) {
+  const exponent = Math.max(0, writeFailures - 1);
+  return Math.min(PROBE_BACKOFF_BASE_MS * 2 ** exponent, PROBE_BACKOFF_MAX_MS);
+}
+
+function isDeterministicCommitCode(code) {
+  return PROBE_DETERMINISTIC_COMMIT_CODES.has(code);
+}
+
+function classifyReturnedCommit(result) {
+  if (result?.ok === true) {
+    return result.written === true ? "success" : "no_op";
+  }
+  if (
+    result?.ok === false &&
+    result.written === false &&
+    result.writable === true &&
+    result.error?.code === PAIR_SPREAD_STORE_CODES.WRITE_FAILED
+  ) {
+    return "write_failed";
+  }
+  // D15: every other returned refusal is deterministic, including an
+  // incoherent `ok:false, written:true`, a non-writable state and an unknown
+  // or missing error code. No backoff and no attempt fusion.
+  return "deterministic";
+}
+
+/// D15: merge a cycle's complete attempts into the overlay, keeping the
+/// attempt with the greatest `at` per key. On an equal timestamp the outcome
+/// precedence prevents a failure from replacing a success. Inputs are copied;
+/// neither the cycle attempts nor the existing overlay entries are mutated.
+function mergeAttemptsIntoPending(pendingAttempts, attempts) {
+  for (const attempt of attempts) {
+    if (!attempt || typeof attempt.key !== "string") continue;
+    const existing = pendingAttempts.get(attempt.key);
+    if (
+      existing === undefined ||
+      attempt.at > existing.at ||
+      (attempt.at === existing.at &&
+        (PAIR_SPREAD_ATTEMPT_PRECEDENCE[attempt.outcome] ?? -1) >
+          (PAIR_SPREAD_ATTEMPT_PRECEDENCE[existing.outcome] ?? -1))
+    ) {
+      pendingAttempts.set(attempt.key, { ...attempt });
+    }
+  }
+}
+
+function mergePairSpreadSample(samples, key, netProfitBps, at) {
+  const existing = samples.get(key);
+  if (!existing || netProfitBps > existing.netProfitBps) {
+    samples.set(key, { key, netProfitBps, at });
+  }
+}
+
+/// D10/D15 conflict guard: a pending non-success attempt is not re-emitted
+/// when the current commit carries a sample that survives Store
+/// normalization. `appendPairSpreadCommit` is the same pure authority the
+/// Store uses; if that preflight unexpectedly throws, every key with a sample
+/// is treated as surviving so the commit can never be built into a conflict.
+function survivingSampleKeys({ state, samples, now, windowSize, maxAgeMs }) {
+  const allSampleKeys = new Set(samples.map((sample) => sample.key));
+  if (samples.length === 0) return allSampleKeys;
+  try {
+    const appended = appendPairSpreadCommit({
+      state,
+      samples,
+      attempts: [],
+      now,
+      windowSize,
+      maxAgeMs,
+    });
+    const surviving = new Set();
+    for (const sample of samples) {
+      const canonical = sample.netProfitBps.toString();
+      const entry = appended.state.pairs[sample.key];
+      if (
+        entry &&
+        entry.samples.some(
+          (stored) =>
+            stored.at === sample.at && stored.netProfitBps === canonical
+        )
+      ) {
+        surviving.add(sample.key);
+      }
+    }
+    return surviving;
+  } catch {
+    return allSampleKeys;
+  }
+}
+
+function buildCommitAttempts({
+  runtime,
+  state,
+  samples,
+  cycleAttempts,
+  now,
+  windowSize,
+  maxAgeMs,
+}) {
+  const attempts = [...cycleAttempts];
+  const survivingKeys = survivingSampleKeys({
+    state,
+    samples,
+    now,
+    windowSize,
+    maxAgeMs,
+  });
+  for (const [key, pending] of runtime.pendingAttempts) {
+    // D15: a future attempt is not committable and must not make the state
+    // unwritable. It stays in the overlay.
+    if (!pending || pending.at > now) continue;
+    // D10/D15: never emit a non-success attempt beside a surviving sample for
+    // the same key. A success attempt is always safe.
+    if (pending.outcome !== "success" && survivingKeys.has(key)) continue;
+    attempts.push({ ...pending });
+  }
+  return attempts;
+}
+
+function applyWriteFailedBackoff(runtime, cycleAttempts, now) {
+  runtime.writeFailures += 1;
+  const backoffMs = probeBackoffMs(runtime.writeFailures);
+  runtime.suspendedUntil = now + backoffMs;
+  mergeAttemptsIntoPending(runtime.pendingAttempts, cycleAttempts);
+  return backoffMs;
+}
+
+function applyCommitSucceeded(runtime, now) {
+  const recovering =
+    runtime.writeFailures > 0 ||
+    runtime.suspendedUntil > 0 ||
+    runtime.pendingAttempts.size > 0;
+  runtime.writeFailures = 0;
+  runtime.suspendedUntil = 0;
+  // D15: only a real write resolves at-or-before-now entries, including a
+  // non-success entry excluded by the conflict guard. Future entries stay.
+  for (const [key, attempt] of runtime.pendingAttempts) {
+    if (attempt.at <= now) runtime.pendingAttempts.delete(key);
+  }
+  return recovering;
+}
+
 /// Keeps exactly one final attempt per pair key and cycle. A valid observation
 /// always wins over a failure or an empty result encountered for the same key.
 function mergePairSpreadAttempt(attempts, attempt) {
@@ -129,6 +317,263 @@ function logPairSpreadEvent(event) {
   }
 }
 
+/// D9: probe logging is non-blocking. A logger exception is reported locally
+/// and never changes the probe outcome, its sample or its attempt.
+function logPairSpreadEventSafely(event) {
+  try {
+    logPairSpreadEvent(event);
+    return true;
+  } catch (err) {
+    try {
+      console.warn(
+        `[PAIR SPREAD] probe logging failed: ${err?.message ?? String(err)}`
+      );
+    } catch {
+      // Logging is advisory; the probe outcome remains authoritative.
+    }
+    return false;
+  }
+}
+
+/// D6/D9/D10/D11: the single probe phase of a cycle. It runs after the main
+/// scan loop and before the sole Store commit. It never writes scans.jsonl,
+/// never changes counters, never calls maybeExecute and never throws into the
+/// cycle: every failure is logged and the phase returns.
+async function runPairSpreadProbePhase({
+  pairSpread,
+  pairSpreadLoaded,
+  pairSpreadStateAvailable,
+  probeCandidates,
+  scannedKeys,
+  pairSpreadNow,
+  probeRuntime,
+  signal,
+  provider,
+  executionConfig,
+  gasPriceWei,
+  ethUsdPrice,
+  blockTag,
+  scanPairImpl,
+  pairSpreadSamples,
+  pairSpreadAttempts,
+}) {
+  const phase = { ran: false, probeNow: null, selected: 0, started: 0 };
+  // D1/D7: probes exist only for enforce and require an explicit interval.
+  if (pairSpread.mode !== "enforce" || pairSpread.probeIntervalMs <= 0) {
+    return phase;
+  }
+  if (isProbeCancelled(signal)) {
+    logPairSpreadEventSafely({
+      event: "pair_spread_probe_cancelled",
+      level: "info",
+      reason: "BEFORE_SELECTION",
+      message: "[PAIR SPREAD] probes cancelled before selection",
+    });
+    return phase;
+  }
+  // D10/A7: an invalid, corrupt, unreadable or non-writable state forbids
+  // probes. writable:true is only a load-time indication, never a proof that
+  // the commit will succeed.
+  if (
+    !pairSpreadStateAvailable ||
+    !pairSpreadLoaded ||
+    pairSpreadLoaded.ok === false ||
+    pairSpreadLoaded.writable !== true
+  ) {
+    logPairSpreadEventSafely({
+      event: "pair_spread_probe_skipped",
+      level: "warn",
+      reason: "STATE_UNAVAILABLE",
+      writable: pairSpreadLoaded?.writable ?? false,
+      message:
+        "[PAIR SPREAD] probes skipped: loaded state is unavailable or not writable",
+    });
+    return phase;
+  }
+
+  // D11: captured once at the start of the probe phase. It is the envelope
+  // clock (suspension, global throttle) and is never used as an `at`.
+  const probeNow = Date.now();
+  phase.probeNow = probeNow;
+
+  // D8: seeded from persisted samples and attempts only. pendingAttempts is
+  // overlaid by the scheduler; the loaded state is never mutated.
+  let probeHistory;
+  try {
+    probeHistory = initProbeHistoryFromState(pairSpreadLoaded.state);
+  } catch (err) {
+    logPairSpreadEventSafely({
+      event: "pair_spread_probe_history_error",
+      level: "warn",
+      reason: "HISTORY_INVALID",
+      message: `[PAIR SPREAD] could not rebuild probe history: ${err.message}. Probes disabled for this cycle.`,
+    });
+    return phase;
+  }
+
+  let selection;
+  try {
+    selection = selectProbeCandidates({
+      candidates: probeCandidates,
+      history: probeHistory,
+      pairSpreadNow,
+      probeNow,
+      intervalMs: pairSpread.probeIntervalMs,
+      globalIntervalMs: pairSpread.probeGlobalIntervalMs,
+      lastGlobalProbeAt: probeRuntime.lastGlobalProbeAt,
+      suspendedUntil: probeRuntime.suspendedUntil,
+      maxPerCycle: pairSpread.probeMaxPerCycle,
+      cursorKey: probeRuntime.cursorKey,
+      scannedKeys,
+      probedKeys: new Set(),
+      pendingAttempts: probeRuntime.pendingAttempts,
+    });
+  } catch (err) {
+    logPairSpreadEventSafely({
+      event: "probe_scheduler_error",
+      level: "warn",
+      reason: "SCHEDULER_ERROR",
+      message: `[PAIR SPREAD] probe scheduler error: ${err.message}. Probes disabled for this cycle.`,
+    });
+    return phase;
+  }
+
+  phase.ran = true;
+  phase.selected = selection.selected.length;
+  const probedKeys = new Set();
+  let resolvedCount = 0;
+  let lastResolvedKey = null;
+
+  for (const candidate of selection.selected) {
+    // D3: an aborted cycle starts no new probe. A selected key not entered in
+    // the wrapper stays unresolved and blocks the runtime cursor.
+    if (isProbeCancelled(signal)) break;
+    const { key, pair } = candidate;
+
+    // D5: defence in depth. A key already scanned or probed in this cycle is
+    // resolved without being started and consumes no probe.
+    if (scannedKeys.has(key) || probedKeys.has(key)) {
+      resolvedCount += 1;
+      lastResolvedKey = key;
+      continue;
+    }
+
+    // Probe started: insert probedKeys before scanPair, then stamp this batch
+    // start with the probeNow captured at the beginning of the phase. Every
+    // started batch updates the global throttle, not only the first one.
+    probedKeys.add(key);
+    probeRuntime.lastGlobalProbeAt = probeNow;
+    const startedAt = Date.now();
+    let outcome = "failure";
+    let reason = "SCAN_ERROR";
+    let sampleBps = null;
+
+    try {
+      const results = await scanPairImpl({
+        provider,
+        pair,
+        config: executionConfig,
+        gasPriceWei,
+        ethUsdPrice,
+        blockTag,
+      });
+      if (!Array.isArray(results)) {
+        throw new TypeError("scanPair must return an array of results");
+      }
+      try {
+        const bps = bestNetProfitBps(results);
+        if (bps === null) {
+          outcome = "empty";
+          reason = classifyEmptyScan(results);
+        } else if (typeof bps === "bigint") {
+          outcome = "success";
+          reason = null;
+          sampleBps = bps;
+        } else {
+          throw new TypeError("bestNetProfitBps must return a bigint or null");
+        }
+      } catch {
+        // D9: a classification error is not a logging error. It produces no
+        // sample and a non-success attempt, preserving the Store invariant.
+        outcome = "failure";
+        reason = "SCAN_ERROR";
+        sampleBps = null;
+      }
+    } catch {
+      outcome = "failure";
+      reason = "SCAN_ERROR";
+      sampleBps = null;
+    }
+
+    const durationMs = Math.max(0, Date.now() - startedAt);
+
+    // D9/D10: record the sample and attempt before logging so a logger throw
+    // can never alter the outcome. The attempt always uses pairSpreadNow.
+    if (outcome === "success") {
+      mergePairSpreadSample(
+        pairSpreadSamples,
+        key,
+        sampleBps,
+        pairSpreadNow
+      );
+    }
+    mergePairSpreadAttempt(pairSpreadAttempts, {
+      key,
+      outcome,
+      source: "probe",
+      at: pairSpreadNow,
+      ...(reason === null ? {} : { reason }),
+    });
+    try {
+      probeHistory = recordProbeAttempt({
+        history: probeHistory,
+        key,
+        at: pairSpreadNow,
+      });
+    } catch (err) {
+      logPairSpreadEventSafely({
+        event: "pair_spread_probe_history_error",
+        level: "warn",
+        reason: "HISTORY_UPDATE_FAILED",
+        message: `[PAIR SPREAD] could not update in-memory probe history: ${err.message}`,
+      });
+    }
+
+    resolvedCount += 1;
+    lastResolvedKey = key;
+    phase.started += 1;
+
+    logPairSpreadEventSafely({
+      event: "pair_spread_probe",
+      level: outcome === "failure" ? "warn" : "debug",
+      key,
+      pair: pair?.label ?? null,
+      outcome,
+      reason,
+      durationMs,
+      message:
+        `[PAIR SPREAD] probe pair=${pair?.label ?? key} outcome=${outcome} ` +
+        `reason=${reason ?? "n/a"} durationMs=${durationMs}`,
+    });
+  }
+
+  // D3/A17 runtime cursor rule: never move past a selected key that was not
+  // resolved (started or explicitly excluded by D5). A key excluded by D5 is
+  // resolved and may be passed; an empty batch may advance the selection
+  // cursor because no probe is at risk.
+  if (selection.selected.length === 0) {
+    probeRuntime.cursorKey = selection.nextCursorKey;
+  } else if (resolvedCount === 0) {
+    // No selected key was resolved: keep the previous runtime cursor.
+  } else if (resolvedCount === selection.selected.length) {
+    probeRuntime.cursorKey = selection.nextCursorKey;
+  } else {
+    probeRuntime.cursorKey = lastResolvedKey;
+  }
+
+  return phase;
+}
+
 function resolvePairSpreadSettings(config) {
   let mode;
   try {
@@ -142,6 +587,13 @@ function resolvePairSpreadSettings(config) {
     windowSize: config.pairSpreadWindowSize ?? DEFAULT_PAIR_SPREAD_WINDOW_SIZE,
     minSamples: config.pairSpreadMinSamples ?? DEFAULT_PAIR_SPREAD_MIN_SAMPLES,
     maxAgeMs: config.pairSpreadMaxAgeMs ?? DEFAULT_PAIR_SPREAD_MAX_AGE_MS,
+    // D12: probes stay disabled by default; an explicit interval is required.
+    probeIntervalMs: config.pairSpreadProbeIntervalMs ?? DEFAULT_PROBE_INTERVAL_MS,
+    probeGlobalIntervalMs:
+      config.pairSpreadProbeGlobalIntervalMs ??
+      DEFAULT_PAIR_SPREAD_PROBE_GLOBAL_INTERVAL_MS,
+    probeMaxPerCycle:
+      config.pairSpreadProbeMaxPerCycle ?? DEFAULT_PROBE_MAX_PER_CYCLE,
   };
 }
 
@@ -198,9 +650,16 @@ async function main({
   config: injectedConfig,
   scanPair: scanPairImpl = scanPair,
   maybeExecute: maybeExecuteImpl = maybeExecute,
+  probeRuntime: injectedProbeRuntime,
+  signal,
+  throttle: injectedThrottle,
+  loadPairSpreadState: loadPairSpreadStateImpl = loadPairSpreadState,
+  recordPairSpreadCommit: recordPairSpreadCommitImpl = recordPairSpreadCommit,
 } = {}) {
   const config = injectedConfig || require("./config");
   const pairSpread = resolvePairSpreadSettings(config);
+  const probeRuntime = resolveProbeRuntime(injectedProbeRuntime);
+  const mainThrottle = injectedThrottle || getMainThrottle(config);
   const adaptivePath = config.adaptivePath ?? DEFAULT_ADAPTIVE_PATH;
   let cycleConfig = config;
   try {
@@ -243,7 +702,7 @@ async function main({
   // Verify the real chain id before touching any journal or scanning: a provider pinned to a
   // static network would otherwise answer from its configuration, and reconciliation on the
   // wrong chain could mark valid pending executions as dropped.
-  const chainIdOutcome = await withThrottle(getMainThrottle(config), () => readChainId(provider));
+  const chainIdOutcome = await withThrottle(mainThrottle, () => readChainId(provider));
   const chainId = chainIdOutcome.result;
   if (config.expectedChainId !== undefined && chainId !== Number(config.expectedChainId)) {
     const reason =
@@ -267,7 +726,7 @@ async function main({
       message: `[PAIR SPREAD] mode=${pairSpread.mode} path=${pairSpread.filePath}`,
     });
     try {
-      pairSpreadLoaded = await loadPairSpreadState({
+      pairSpreadLoaded = await loadPairSpreadStateImpl({
         filePath: pairSpread.filePath,
         now: pairSpreadNow,
         windowSize: pairSpread.windowSize,
@@ -315,10 +774,10 @@ async function main({
   }
 
   const [feeDataOutcome, ethUsdPrice, blockTagOutcome] = await Promise.all([
-    withThrottle(getMainThrottle(config), () => provider.getFeeData()),
+    withThrottle(mainThrottle, () => provider.getFeeData()),
     getEthUsdPrice(provider, config.ethUsdRoute, config),
     typeof provider.getBlockNumber === "function"
-      ? withThrottle(getMainThrottle(config), () => provider.getBlockNumber())
+      ? withThrottle(mainThrottle, () => provider.getBlockNumber())
       : Promise.resolve({ result: "latest" }),
   ]);
   const feeData = feeDataOutcome.result;
@@ -369,6 +828,11 @@ async function main({
   let pairErrors = 0;
   const pairSpreadSamples = new Map();
   const pairSpreadAttempts = new Map();
+  // D5: keys scanned in this cycle. It is filled immediately before every
+  // scanPair call so a scan that throws still excludes a probe.
+  const scannedKeys = new Set();
+  // D1: only pairs skipped by enforce are probe candidates.
+  const probeCandidates = [];
   const executionConfig = { ...cycleConfig, ethUsdPrice, aaveFlashLoanPremiumBps };
   const configuredPairs = Array.isArray(cycleConfig.pairs) ? cycleConfig.pairs : [];
 
@@ -436,6 +900,10 @@ async function main({
             reason: pairDecision.reason,
             message: `[PAIR SPREAD] SKIP pair=${pair.label} reason=${pairDecision.reason}`,
           });
+          // D1: the blackout is the only source of probe candidates.
+          if (pairKey !== null && pairSpread.mode === "enforce") {
+            probeCandidates.push({ key: pairKey, pair });
+          }
           continue;
         }
       }
@@ -445,6 +913,7 @@ async function main({
       console.log(`\nScanning ${pair.label} ...`);
       let results;
       try {
+        if (pairKey !== null) scannedKeys.add(pairKey);
         results = await scanPairImpl({
           provider,
           pair,
@@ -584,21 +1053,100 @@ async function main({
     }
   }
 
+  await runPairSpreadProbePhase({
+    pairSpread,
+    pairSpreadLoaded,
+    pairSpreadStateAvailable,
+    probeCandidates,
+    scannedKeys,
+    pairSpreadNow,
+    probeRuntime,
+    signal,
+    provider,
+    executionConfig,
+    gasPriceWei,
+    ethUsdPrice,
+    blockTag,
+    scanPairImpl,
+    pairSpreadSamples,
+    pairSpreadAttempts,
+  });
+
   if (pairSpread.mode !== "off" && pairSpreadStateAvailable && pairSpreadLoaded) {
+    const commitSamples = Array.from(pairSpreadSamples.values());
+    const cycleAttempts = Array.from(pairSpreadAttempts.values());
+    const commitAttempts = buildCommitAttempts({
+      runtime: probeRuntime,
+      state: pairSpreadLoaded.state,
+      samples: commitSamples,
+      cycleAttempts,
+      now: pairSpreadNow,
+      windowSize: pairSpread.windowSize,
+      maxAgeMs: pairSpread.maxAgeMs,
+    });
+    // D15: only the Store call is a persistence boundary. Logging is
+    // advisory and must never turn a successful write into a commit failure,
+    // arm the backoff or fuse the cycle attempts.
+    let recordResult;
+    let commitFailed = false;
+    let commitError = null;
     try {
-      const recordResult = await recordPairSpreadCommit({
+      recordResult = await recordPairSpreadCommitImpl({
         filePath: pairSpread.filePath,
         loaded: pairSpreadLoaded,
-        samples: Array.from(pairSpreadSamples.values()),
-        attempts: Array.from(pairSpreadAttempts.values()),
+        samples: commitSamples,
+        attempts: commitAttempts,
         now: pairSpreadNow,
         windowSize: pairSpread.windowSize,
         maxAgeMs: pairSpread.maxAgeMs,
       });
+    } catch (err) {
+      commitFailed = true;
+      commitError = err;
+    }
+    if (commitFailed) {
+      logPairSpreadEventSafely({
+        event: "pair_spread_persist",
+        level: "warn",
+        status: "error",
+        written: false,
+        message: `[PAIR SPREAD] could not persist state: ${
+          commitError?.message ?? String(commitError)
+        }`,
+      });
+      if (isDeterministicCommitCode(commitError?.code)) {
+        // D15: deterministic Store refusal. No backoff, no attempt fusion;
+        // the existing overlay is preserved.
+        logPairSpreadEventSafely({
+          event: "pair_spread_probe_commit_refused",
+          level: "warn",
+          status: "error",
+          code: commitError.code,
+          message:
+            `[PAIR SPREAD] deterministic commit refusal code=${commitError.code}. ` +
+            "Cycle attempts are not retained.",
+        });
+      } else {
+        // D15: unexpected exception. The write outcome is unknown, so the
+        // cycle attempts are retained for the next commit; no backoff is armed.
+        mergeAttemptsIntoPending(probeRuntime.pendingAttempts, cycleAttempts);
+        logPairSpreadEventSafely({
+          event: "pair_spread_probe_commit_error",
+          level: "warn",
+          status: "error",
+          pendingAttempts: probeRuntime.pendingAttempts.size,
+          message:
+            `[PAIR SPREAD] unexpected commit error: ${
+              commitError?.message ?? String(commitError)
+            }. ` +
+            `Retaining ${cycleAttempts.length} cycle attempt(s) for the next commit.`,
+        });
+      }
+    } else {
       const warningIsNew =
         typeof recordResult.warning === "string" &&
         recordResult.warning !== pairSpreadLoaded.warning;
-      logPairSpreadEvent({
+      logPairSpreadEventSafely({
         event: "pair_spread_persist",
         level: recordResult.ok ? "info" : "warn",
         status: recordResult.status,
@@ -614,14 +1162,52 @@ async function main({
           `expiredPruned=${recordResult.expiredPruned}` +
           (warningIsNew ? ` warning=${recordResult.warning}` : ""),
       });
-    } catch (err) {
-      logPairSpreadEvent({
-        event: "pair_spread_persist",
-        level: "warn",
-        status: "error",
-        written: false,
-        message: `[PAIR SPREAD] could not persist state: ${err.message}`,
-      });
+
+      const commitOutcome = classifyReturnedCommit(recordResult);
+      if (commitOutcome === "success") {
+        if (applyCommitSucceeded(probeRuntime, pairSpreadNow)) {
+          logPairSpreadEventSafely({
+            event: "pair_spread_probe_recovered",
+            level: "info",
+            writeFailures: probeRuntime.writeFailures,
+            pendingAttempts: probeRuntime.pendingAttempts.size,
+            message: "[PAIR SPREAD] probe persistence recovered",
+          });
+        }
+      } else if (commitOutcome === "write_failed") {
+        const backoffMs = applyWriteFailedBackoff(
+          probeRuntime,
+          cycleAttempts,
+          Date.now()
+        );
+        logPairSpreadEventSafely({
+          event: "pair_spread_probe_write_failed",
+          level: "warn",
+          code: PAIR_SPREAD_STORE_CODES.WRITE_FAILED,
+          writeFailures: probeRuntime.writeFailures,
+          backoffMs,
+          suspendedUntil: probeRuntime.suspendedUntil,
+          pendingAttempts: probeRuntime.pendingAttempts.size,
+          message:
+            `[PAIR SPREAD] probe write failed: failures=${probeRuntime.writeFailures} ` +
+            `backoffMs=${backoffMs} suspendedUntil=${probeRuntime.suspendedUntil} ` +
+            `pendingAttempts=${probeRuntime.pendingAttempts.size}`,
+        });
+      } else if (commitOutcome === "deterministic") {
+        // D15: a returned refusal other than WRITE_FAILED is deterministic.
+        // It arms no backoff and never fuses the cycle attempts.
+        logPairSpreadEventSafely({
+          event: "pair_spread_probe_commit_refused",
+          level: "warn",
+          status: recordResult.status,
+          writable: recordResult.writable,
+          written: recordResult.written,
+          code: recordResult.error?.code ?? null,
+          message:
+            `[PAIR SPREAD] probe commit refused status=${recordResult.status} ` +
+            `code=${recordResult.error?.code ?? "n/a"}. Probes keep their current state.`,
+        });
+      }
     }
   }
 

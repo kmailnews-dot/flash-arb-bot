@@ -210,6 +210,15 @@ describe("bot/pairSpreadStore", function () {
       for (const code of Object.values(PAIR_SPREAD_STORE_CODES)) {
         expect(code.startsWith("PAIR_SPREAD_")).to.equal(true);
       }
+      expect(PAIR_SPREAD_STORE_CODES.VALIDATION_FAILED).to.equal(
+        "PAIR_SPREAD_STATE_VALIDATION_FAILED"
+      );
+      expect(PAIR_SPREAD_STORE_CODES.CONFLICT).to.equal(
+        "PAIR_SPREAD_STATE_CONFLICT"
+      );
+      expect(PAIR_SPREAD_STORE_CODES.WRITE_FAILED).to.equal(
+        "PAIR_SPREAD_STATE_WRITE_FAILED"
+      );
     });
   });
 
@@ -2354,6 +2363,255 @@ describe("bot/pairSpreadStore", function () {
       expect(err).to.be.instanceOf(TypeError);
       expect(err.message).to.include("must not be committed with a sample");
       expect(fs.existsSync(filePath)).to.equal(false);
+    });
+  });
+
+  describe("deterministic error codes (D15)", function () {
+    it("exposes PAIR_SPREAD_STATE_VALIDATION_FAILED for invalid commit arguments", async function () {
+      const cases = [
+        () => recordPairSpreadCommit({ filePath, samples: "nope", now: NOW }),
+        () => recordPairSpreadCommit({ filePath, attempts: {}, now: NOW }),
+        () => recordPairSpreadCommit({ filePath, now: -1 }),
+        () => recordPairSpreadCommit({ filePath: "", now: NOW }),
+      ];
+
+      for (const run of cases) {
+        const err = await rejection(run());
+        expect(err).to.be.instanceOf(Error);
+        expect(err.code).to.equal(PAIR_SPREAD_STORE_CODES.VALIDATION_FAILED);
+      }
+
+      expect(fs.existsSync(filePath)).to.equal(false);
+    });
+
+    it("exposes PAIR_SPREAD_STATE_VALIDATION_FAILED for malformed samples and attempts", async function () {
+      const invalidSamples = [
+        { key: KEY_A, netProfitBps: 1.5, at: NOW },
+        { key: KEY_A, netProfitBps: "1.5", at: NOW },
+        { key: KEY_A, netProfitBps: 10n, at: -1 },
+        { key: KEY_A, netProfitBps: 10n, at: NOW + 1 },
+        { key: "", netProfitBps: 10n, at: NOW },
+        null,
+        [],
+      ];
+
+      for (const sample of invalidSamples) {
+        const err = await rejection(
+          recordPairSpreadCommit({
+            filePath,
+            samples: [sample],
+            now: NOW,
+          })
+        );
+        expect(err.code).to.equal(PAIR_SPREAD_STORE_CODES.VALIDATION_FAILED);
+      }
+
+      const invalidAttempts = [
+        { key: KEY_A, outcome: "success", source: "scan" },
+        incomingAttempt(KEY_A, { at: 0 }),
+        incomingAttempt(KEY_A, { at: NOW + 1 }),
+        incomingAttempt(KEY_A, { outcome: "bogus" }),
+        incomingAttempt(KEY_A, { source: "cron" }),
+        incomingAttempt(KEY_A, { reason: "lowercase" }),
+        null,
+      ];
+
+      for (const attempt of invalidAttempts) {
+        const err = await rejection(
+          recordPairSpreadCommit({
+            filePath,
+            attempts: [attempt],
+            now: NOW,
+          })
+        );
+        expect(err.code).to.equal(PAIR_SPREAD_STORE_CODES.VALIDATION_FAILED);
+      }
+
+      expect(fs.existsSync(filePath)).to.equal(false);
+    });
+
+    it("exposes PAIR_SPREAD_STATE_CONFLICT for a sample and non-success attempt", async function () {
+      for (const outcome of ["empty", "failure"]) {
+        const err = await rejection(
+          recordPairSpreadCommit({
+            filePath,
+            samples: [{ key: KEY_A, netProfitBps: 10n, at: NOW }],
+            attempts: [
+              incomingAttempt(KEY_A, {
+                at: NOW,
+                outcome,
+                source: "probe",
+              }),
+            ],
+            now: NOW,
+          })
+        );
+
+        expect(err).to.be.instanceOf(TypeError);
+        expect(err.code).to.equal(PAIR_SPREAD_STORE_CODES.CONFLICT);
+      }
+
+      expect(fs.existsSync(filePath)).to.equal(false);
+    });
+
+    it("tags direct append refusals with the same stable codes", function () {
+      let validationErr;
+      try {
+        appendPairSpreadCommit({
+          state: createEmptyPairSpreadState(),
+          samples: "nope",
+          now: NOW,
+        });
+      } catch (err) {
+        validationErr = err;
+      }
+      expect(validationErr.code).to.equal(
+        PAIR_SPREAD_STORE_CODES.VALIDATION_FAILED
+      );
+
+      let conflictErr;
+      try {
+        appendPairSpreadCommit({
+          state: createEmptyPairSpreadState(),
+          samples: [{ key: KEY_A, netProfitBps: 10n, at: NOW }],
+          attempts: [
+            incomingAttempt(KEY_A, {
+              at: NOW,
+              outcome: "failure",
+              source: "probe",
+            }),
+          ],
+          now: NOW,
+        });
+      } catch (err) {
+        conflictErr = err;
+      }
+      expect(conflictErr.code).to.equal(PAIR_SPREAD_STORE_CODES.CONFLICT);
+    });
+
+    it("does not label an unexpected exception as deterministic", async function () {
+      const boom = new Error("unexpected boom");
+      const sample = { key: KEY_A, at: NOW };
+      Object.defineProperty(sample, "netProfitBps", {
+        get() {
+          throw boom;
+        },
+      });
+
+      const err = await rejection(
+        recordPairSpreadCommit({ filePath, samples: [sample], now: NOW })
+      );
+
+      expect(err).to.equal(boom);
+      expect(err.code).to.equal(undefined);
+      expect(isPairSpreadStoreError(err)).to.equal(false);
+      expect(fs.existsSync(filePath)).to.equal(false);
+    });
+
+    it("preserves the existing file on validation and conflict refusals", async function () {
+      const seeded = await recordPairSpreadCommit({
+        filePath,
+        samples: [{ key: KEY_A, netProfitBps: 10n, at: NOW - MINUTE_MS }],
+        now: NOW - MINUTE_MS,
+      });
+      expect(seeded.ok).to.equal(true);
+      expect(seeded.written).to.equal(true);
+      const before = fs.readFileSync(filePath, "utf8");
+
+      const validationErr = await rejection(
+        recordPairSpreadCommit({
+          filePath,
+          samples: [{ key: KEY_A, netProfitBps: "not-a-bps", at: NOW }],
+          now: NOW,
+        })
+      );
+      expect(validationErr.code).to.equal(
+        PAIR_SPREAD_STORE_CODES.VALIDATION_FAILED
+      );
+      expect(fs.readFileSync(filePath, "utf8")).to.equal(before);
+
+      const conflictErr = await rejection(
+        recordPairSpreadCommit({
+          filePath,
+          samples: [{ key: KEY_B, netProfitBps: 20n, at: NOW }],
+          attempts: [
+            incomingAttempt(KEY_B, {
+              at: NOW,
+              outcome: "failure",
+              source: "probe",
+            }),
+          ],
+          now: NOW,
+        })
+      );
+      expect(conflictErr.code).to.equal(PAIR_SPREAD_STORE_CODES.CONFLICT);
+      expect(fs.readFileSync(filePath, "utf8")).to.equal(before);
+    });
+
+    it("keeps ok:true, written:false as a no-op without an error code", async function () {
+      const first = await recordPairSpreadCommit({
+        filePath,
+        samples: [{ key: KEY_A, netProfitBps: 10n, at: NOW }],
+        now: NOW,
+      });
+      expect(first.ok).to.equal(true);
+      expect(first.written).to.equal(true);
+
+      const second = await recordPairSpreadCommit({
+        filePath,
+        samples: [{ key: KEY_A, netProfitBps: 10n, at: NOW }],
+        now: NOW,
+      });
+
+      expect(second.ok).to.equal(true);
+      expect(second.written).to.equal(false);
+      expect(second.error).to.equal(null);
+      expect(second.error?.code).to.equal(undefined);
+    });
+
+    it("keeps WRITE_FAILED distinct from deterministic refusals", async function () {
+      const originalOpen = fsp.open;
+      fsp.open = async (target, flags) => {
+        if (String(target).endsWith(".tmp")) {
+          const err = new Error("simulated open failure");
+          err.code = "EIO";
+          throw err;
+        }
+        return originalOpen.call(fsp, target, flags);
+      };
+
+      try {
+        const result = await recordPairSpreadCommit({
+          filePath,
+          samples: [{ key: KEY_A, netProfitBps: 10n, at: NOW }],
+          now: NOW,
+        });
+
+        expect(result.ok).to.equal(false);
+        expect(result.written).to.equal(false);
+        expect(result.writable).to.equal(true);
+        expect(result.error.code).to.equal(
+          PAIR_SPREAD_STORE_CODES.WRITE_FAILED
+        );
+        expect(isPairSpreadStoreError(result.error)).to.equal(true);
+      } finally {
+        fsp.open = originalOpen;
+      }
+    });
+
+    it("keeps a returned non-writable refusal distinct from a thrown refusal", async function () {
+      writeRaw(filePath, "{not json");
+
+      const result = await recordPairSpreadCommit({
+        filePath,
+        samples: [{ key: KEY_A, netProfitBps: 10n, at: NOW }],
+        now: NOW,
+      });
+
+      expect(result.ok).to.equal(false);
+      expect(result.written).to.equal(false);
+      expect(result.writable).to.equal(false);
+      expect(result.error.code).to.equal(PAIR_SPREAD_STORE_CODES.CORRUPT);
     });
   });
 
